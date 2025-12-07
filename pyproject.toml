@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "aisbom-cli"
+version = "0.1.0"
+description = "An AI Supply Chain security tool that generates SBOMs for Machine Learning models."
+authors = ["Ajoy Labroo <ajoy.labroo@gmail.com>"]
+readme = "README.md"
+packages = [{include = "aisbom"}]
+[tool.poetry.dependencies]
+python = "^3.11"
+typer = {extras = ["all"], version = "^0.12.5"}
+rich = "^13.7.1"
+cyclonedx-python-lib = "^8.5.0"
+pip-requirements-parser = "^32.0.1"
+click = "<8.2.0"
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+aisbom = "aisbom.cli:app"
