@@ -45,13 +45,13 @@ aisbom scan ./my-ml-project
 You will see a risk assessment table in your terminal:
 
 🧠 AI Model Artifacts Found                           
-┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Filename           ┃ Framework ┃ Risk Level                            ┃
-┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ bert_finetune.pt   │ PyTorch   │ CRITICAL (RCE Detected: posix.system) │
-│ safe_model.safetensors │ SafeTensors | LOW (Binary Safe)               │
-└────────────────────┴───────────┴───────────────────────────────────────┘
-A compliant sbom.json will be generated in the current directory.
+
+| Filename | Framework | Risk Level |
+| :--- | :--- | :--- |
+| `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) |
+| `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) |
+
+A compliant `sbom.json` will be generated in the current directory.
 
 ---
 
