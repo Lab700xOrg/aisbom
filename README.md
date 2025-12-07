@@ -62,3 +62,20 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 * subprocess (Shell execution)
 * builtins.eval / exec (Dynamic code execution)
 * socket (Network reverse shells)
+
+---
+
+## 🧪 Verification & Safety 
+
+Security tools require trust. **Real Detection:** To maintain a safe repository, **we provide the *source code* to generate a test "Pickle Bomb" locally.** AIsbom detects the *structure* of the threat, not just a known file hash.
+
+**To verify the engine yourself:**
+1.  Inspect `demo_data/generate_malware.py`. You will see it uses standard Python libraries to create a payload that simulates an `os.system` call.
+2.  Run the generator:
+    ```bash
+    python demo_data/generate_malware.py
+    ```
+3.  Scan the newly created artifact:
+    ```bash
+    aisbom scan demo_data
+    ```
