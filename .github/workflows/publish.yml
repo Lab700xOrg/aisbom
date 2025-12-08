@@ -1,0 +1,35 @@
+name: Publish to PyPI
+
+# Trigger this action ONLY when a Release is published in the GitHub UI
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Check out the code
+      - uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      # 3. Install Poetry
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # 4. Install Dependencies (Optional, mostly for sanity check)
+      - name: Install dependencies
+        run: poetry install
+
+      # 5. Build and Publish using the Secret
+      - name: Publish to PyPI
+        env:
+          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
+        run: poetry publish --build
