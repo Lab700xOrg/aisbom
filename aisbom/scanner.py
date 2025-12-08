@@ -1,4 +1,5 @@
 import os
+import hashlib
 import json
 import zipfile
 import struct
@@ -39,12 +40,13 @@ class DeepScanner:
         return {"artifacts": self.artifacts, "dependencies": self.dependencies, "errors": self.errors}
 
     def _inspect_pytorch(self, path: Path) -> Dict[str, Any]:
-        """Peeks inside a PyTorch file structure and SCANS for malware."""
+        """Peeks inside a PyTorch file structure without loading weights and SCANS for malware."""
         meta = {
             "name": path.name,
             "type": "machine-learning-model",
             "framework": "PyTorch",
-            "risk_level": "UNKNOWN", 
+            "risk_level": "UNKNOWN",
+            "hash": self._calculate_hash(path),
             "details": {}
         }
         try:
@@ -87,6 +89,7 @@ class DeepScanner:
             "type": "machine-learning-model", 
             "framework": "SafeTensors",
             "risk_level": "LOW", # Safe by design
+            "hash": self._calculate_hash(path),
             "details": {}
         }
         try:
@@ -124,3 +127,15 @@ class DeepScanner:
                     })
         except Exception as e:
             self.errors.append({"file": str(path), "error": str(e)})
+    
+    def _calculate_hash(self, path: Path) -> str:
+        """Calculates SHA256 hash of a file efficiently (chunked)."""
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                # Read in 64kb chunks to avoid memory spikes on large models
+                for byte_block in iter(lambda: f.read(65536), b""):
+                    sha256_hash.update(byte_block)
+            return sha256_hash.hexdigest()
+        except Exception:
+            return "hash_error"

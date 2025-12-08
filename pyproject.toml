@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "aisbom-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for Machine Learning models."
 authors = ["Ajoy L <lab700xdev@gmail.com>"]
 readme = "README.md"

@@ -5,7 +5,9 @@ from rich.table import Table
 from rich.panel import Panel
 from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
+from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
+
 
 
 # Import our new logic engine
@@ -39,11 +41,13 @@ def main(
         
         for art in results['artifacts']:
             risk_style = "green" if "LOW" in art['risk_level'] else "red"
+            # Add Hash to table output to prove it works visually
+            display_meta = f"SHA256: {art.get('hash', 'N/A')[:8]}... | " + str(art.get('details', ''))[:20]
             table.add_row(
                 art['name'], 
                 art['framework'], 
                 f"[{risk_style}]{art['risk_level']}[/{risk_style}]", 
-                str(art.get('details', ''))[:40] + "..."
+                display_meta
             )
         console.print(table)
     else:
@@ -56,6 +60,7 @@ def main(
         console.print("\n[bold red]⚠️ Errors Encountered:[/bold red]")
         for err in results['errors']:
             console.print(f"  - Could not parse [yellow]{err['file']}[/yellow]: {err['error']}")
+    
     # 3. Generate CycloneDX SBOM (Standard Compliance)
     bom = Bom()
     
@@ -64,9 +69,15 @@ def main(
         c = Component(
             name=art['name'],
             type=ComponentType.MACHINE_LEARNING_MODEL,
-            # We shove our risk assessment into the description for now
             description=f"Risk: {art['risk_level']} | Framework: {art['framework']}"
         )
+        # Add SHA256 Hash if available
+        if 'hash' in art and art['hash'] != 'hash_error':
+            c.hashes.add(HashType(
+                alg=HashAlgorithm.SHA_256,
+                content=art['hash']
+            ))
+        
         bom.components.add(c)
 
     # Add Libraries
