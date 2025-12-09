@@ -1,5 +1,7 @@
 import typer
 import json
+import tomllib
+import importlib.metadata
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -16,8 +18,8 @@ from .scanner import DeepScanner
 app = typer.Typer()
 console = Console()
 
-@app.callback(invoke_without_command=True)
-def main(
+@app.command()
+def scan(
     directory: str = typer.Argument(".", help="Target directory to scan"),
     output: str = typer.Option("sbom.json", help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options")
@@ -99,6 +101,47 @@ def main(
         f.write(outputter.output_as_string())
     
     console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
+
+@app.command()
+def info():
+    """
+    Displays application information, pulling from pyproject.toml if available.
+    """
+    version = description = repository = None
+
+    # First, try to read from pyproject.toml (for development)
+    try:
+        with open("pyproject.toml", "rb") as f:
+            pyproject_data = tomllib.load(f)
+        poetry_data = pyproject_data.get("tool", {}).get("poetry", {})
+        version = poetry_data.get("version")
+        description = poetry_data.get("description")
+        repository = poetry_data.get("repository")
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        pass  # Not in a dev environment, so we'll try the installed package
+
+    # If not found in pyproject.toml, try importlib.metadata (for installed package)
+    if not version:
+        try:
+            version = importlib.metadata.version("aisbom")
+            # To get other metadata, we'd need to call metadata()
+            pkg_metadata = importlib.metadata.metadata("aisbom")
+            if not description:
+                description = pkg_metadata.get("Summary")
+            if not repository:
+                repository = pkg_metadata.get("Home-page")
+        except importlib.metadata.PackageNotFoundError:
+            pass # package not installed
+
+    # Fallbacks
+    version = version or "unknown (not installed)"
+    description = description or "AI SBOM Generator CLI"
+    repository = repository or "https://github.com/Lab700xOrg/aisbom"
+
+    console.print(f"aisbom: {description}")
+    console.print(f"Version: {version}")
+    console.print(f"Repository: {repository}")
+
 
 if __name__ == "__main__":
     app()
