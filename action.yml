@@ -1,7 +1,7 @@
 # LOCATION: ~/Projects/sbom/aisbom-cli/action.yml
 
 name: 'AIsbom Security Scanner'
-description: 'AIsbom is a Supply Chain Integrity platform. An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for Machine Learning models.'
+description: 'An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for ML models.'
 author: 'Lab700xOrg'
 branding:
   icon: 'shield'
