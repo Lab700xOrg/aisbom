@@ -1,0 +1,28 @@
+# LOCATION: ~/Projects/sbom/aisbom-cli/action.yml
+
+name: 'AIsbom Security Scanner'
+description: 'Detect Pickle bombs and malicious bytecode in PyTorch/ML artifacts. AIsbom is a Supply Chain Integrity platform'
+author: 'Lab700xOrg'
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+# Inputs match your CLI arguments
+inputs:
+  directory:
+    description: 'Directory to scan for AI models'
+    required: true
+    default: '.'
+  output-file:
+    description: 'Path to save the SBOM JSON report'
+    required: false
+    default: 'sbom.json'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile' # This tells GitHub to look for the Dockerfile in THIS directory
+  args:
+    - 'scan'
+    - ${{ inputs.directory }}
+    - '--output'
+    - ${{ inputs.output-file }}
