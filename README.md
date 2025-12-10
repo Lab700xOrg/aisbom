@@ -37,7 +37,7 @@ You will see a risk assessment table in your terminal:
 | `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) |
 | `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) |
 
-A compliant `sbom.json` will be generated in the current directory.
+A CycloneDX compliant `sbom.json` will be generated in the current directory.
 
 ---
 
