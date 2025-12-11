@@ -9,6 +9,7 @@ from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
+from cyclonedx.factory.license import LicenseFactory
 
 
 
@@ -38,17 +39,20 @@ def scan(
         table = Table(title="🧠 AI Model Artifacts Found")
         table.add_column("Filename", style="cyan")
         table.add_column("Framework", style="magenta")
-        table.add_column("Risk Level", style="bold red")
+        table.add_column("Security Risk", style="bold red")
+        table.add_column("Legal Risk", style="yellow")
         table.add_column("Metadata", style="dim")
         
         for art in results['artifacts']:
             risk_style = "green" if "LOW" in art['risk_level'] else "red"
+            legal_style = "red" if "RISK" in art['legal_status'] else "green"
             # Add Hash to table output to prove it works visually
             display_meta = f"SHA256: {art.get('hash', 'N/A')[:8]}... | " + str(art.get('details', ''))[:20]
             table.add_row(
                 art['name'], 
                 art['framework'], 
-                f"[{risk_style}]{art['risk_level']}[/{risk_style}]", 
+                f"[{risk_style}]{art['risk_level']}[/{risk_style}]",
+                f"[{legal_style}]{art['legal_status']}[/{legal_style}]",
                 display_meta
             )
         console.print(table)
@@ -65,13 +69,14 @@ def scan(
     
     # 3. Generate CycloneDX SBOM (Standard Compliance)
     bom = Bom()
+    lf = LicenseFactory()
     
     # Add Models
     for art in results['artifacts']:
         c = Component(
             name=art['name'],
             type=ComponentType.MACHINE_LEARNING_MODEL,
-            description=f"Risk: {art['risk_level']} | Framework: {art['framework']}"
+            description=f"Risk: {art['risk_level']} | Framework: {art['framework']} | Legal: {art['legal_status']} | License: {art.get('license')}"
         )
         # Add SHA256 Hash if available
         if 'hash' in art and art['hash'] != 'hash_error':
@@ -79,6 +84,11 @@ def scan(
                 alg=HashAlgorithm.SHA_256,
                 content=art['hash']
             ))
+        # Add License info to SBOM if known
+        if art.get('license') and art['license'] != 'Unknown':
+            # Create a License object (using name since we don't have SPDX ID validation yet)
+            lic = lf.make_from_string(art['license'])
+            c.licenses.add(lic)
         
         bom.components.add(c)
 

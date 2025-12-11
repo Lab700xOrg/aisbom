@@ -4,7 +4,9 @@
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Compliance](https://img.shields.io/badge/standard-CycloneDX-green)
 
-**AIsbom** is a specialized security scanner for Machine Learning artifacts. Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`) to detect risks hidden inside the serialized weights.
+**AIsbom** is a specialized security and compliance scanner for Machine Learning artifacts. 
+
+Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
 ---
 
@@ -17,8 +19,7 @@ Install directly from PyPI. No cloning required.
 pip install aisbom-cli
 ```
 
-__Note: The package name is aisbom-cli, but the command you run is aisbom.__
-
+_Note: The package name is aisbom-cli, but the command you run is aisbom._
 
 ### 2. Run a Scan
 Point it at any directory containing your ML project. It will find requirements files AND binary model artifacts.
@@ -28,36 +29,39 @@ aisbom scan ./my-project-folder
 ```
 
 ### 3. Output
-You will see a risk assessment table in your terminal:
+You will see a combined Security & Legal risk assessment in your terminal:
 
 🧠 AI Model Artifacts Found                           
 
-| Filename | Framework | Risk Level |
-| :--- | :--- | :--- |
-| `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) |
-| `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) |
+| Filename | Framework | Security Risk | Legal Risk |
+| :--- | :--- | :--- | :--- |
+| `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) | UNKNOWN |
+| `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) | UNKNOWN |
+│ `restricted_model.st` │ SafeTensors │ **LOW**  │ LEGAL RISK (cc-by-nc-4.0) │
 
-A CycloneDX compliant `sbom.json` will be generated in the current directory.
+A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data will be generated in your current directory.
 
 ---
 
 ## 🚀 Why AIsbom?
-AI models are not just text files; they are executable programs.
-*   **PyTorch (`.pt`)** files are Zip archives containing Pickle bytecode.
+AI models are not just text files; they are executable programs and IP assets.
+*   **The Security Risk:** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model can execute arbitrary code (RCE) instantly when loaded.
+*   **The Legal Risk:** A developer might download a "Non-Commercial" model (CC-BY-NC) and deploy it to production. Since the license is hidden inside the binary header, standard tools miss it.
 *   **Pickle** files can execute arbitrary code (RCE) instantly upon loading.
-*   Legacy scanners look at requirements.txt manifest files but ignore binary model weights. **We look inside.** We decompile the bytecode headers without loading the heavy weights into RAM.
+*   **The Solution:** Legacy scanners look at requirements.txt manifest files but ignore binary model weights. **We look inside.** We decompile the bytecode headers without loading the heavy weights into RAM.
 
 ## ✨ Key Features
-*   **🧠 Deep Introspection:** Peeks inside PyTorch Zip structures without loading weights into RAM.
+*   **🧠 Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
 *   **💣 Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
+*   **⚖️ License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
 *   **🛡️ Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
-*   **⚡ Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only.
+*   **⚡ Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
 
 ---
 
 ## 🧪 How to Verify (The "Trust Factor")
 
-Security tools require trust. To maintain a safe repository, we do not distribute malicious binaries. However, you can verify our detection engine works by generating a test "Pickle Bomb" yourself.
+Security tools require trust. To maintain a safe repository, we do not distribute malicious binaries. However, you can verify our detection engine works by generating test artifacts locally using our provided scripts.
 
 **Prerequisites:** You will need to clone the repository to access the generator scripts.
 
@@ -66,10 +70,14 @@ Security tools require trust. To maintain a safe repository, we do not distribut
 git clone https://github.com/Lab700xOrg/aisbom.git
 cd aisbom
 ```
-**2. Generate the "Malware":**
-We provide a transparent Python script that uses standard libraries to create a file simulating a system call.
+**2. Generate Test Artifacts:**
+We provide a transparent Python script that uses standard libraries to create "fake" threats for testing.
 ```bash
+# Generate a Pickle Bomb (Security Risk)
 python demo_data/generate_malware.py
+
+# Generate a Non-Commercial Model (Legal Risk)
+python demo_data/generate_restricted_model.py
 ```
 __Result: A file named malicious_model.pt is created.__
 
@@ -78,7 +86,7 @@ __Result: A file named malicious_model.pt is created.__
 # You can use your globally installed aisbom, or poetry run aisbom
 aisbom scan demo_data
 ```
-__You will see the scanner flag malicious_model.pt as CRITICAL.__
+_You will see the scanner flag malicious_model.pt as **CRITICAL** and restricted_model.safetensors as a **LEGAL RISK**._
 
 ---
 
@@ -91,3 +99,21 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 * socket (Network reverse shells)
 
 ---
+
+## 🤖 GitHub Actions Integration
+Add AIsbom to your CI/CD pipeline to block unsafe models before they merge.
+
+```Yaml
+name: AI Security Scan
+on: [pull_request]
+
+jobs:
+  aisbom-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Scan AI Models
+        uses: Lab700xOrg/aisbom@v0
+        with:
+          directory: '.'
