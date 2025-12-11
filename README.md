@@ -37,7 +37,7 @@ You will see a combined Security & Legal risk assessment in your terminal:
 | :--- | :--- | :--- | :--- |
 | `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) | UNKNOWN |
 | `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) | UNKNOWN |
-│ `restricted_model.safetensors` │ SafeTensors │ 🟢 **LOW** │ LEGAL RISK (cc-by-nc-4.0) │
+| `restricted_model.safetensors` | SafeTensors | 🟢 **LOW** | LEGAL RISK (cc-by-nc-4.0)  |
 
 A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data will be generated in your current directory.
 
