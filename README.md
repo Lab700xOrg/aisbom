@@ -43,6 +43,18 @@ A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license dat
 
 ---
 
+### 4. Visualize the Report (New!)
+Don't like reading JSON? You can visualize your security posture using our **offline** viewer.
+
+1.  Run the scan.
+2.  Go to [aisbom.io/viewer.html](https://aisbom.io/viewer.html).
+3.  Drag and drop your `sbom.json`.
+4.  Get an instant dashboard of risks, license issues, and compliance stats.
+
+*Note: The viewer is client-side only. Your SBOM data never leaves your browser.*
+
+---
+
 ## 🚀 Why AIsbom?
 AI models are not just text files; they are executable programs and IP assets.
 *   **The Security Risk:** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model can execute arbitrary code (RCE) instantly when loaded.
