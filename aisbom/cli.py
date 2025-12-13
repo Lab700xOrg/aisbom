@@ -112,6 +112,14 @@ def scan(
     
     console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
 
+    console.print(Panel(
+        f"[bold white]📊 Visualize this report:[/bold white]\n"
+        f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
+        f"👉 [link=https://www.aisbom.io/viewer.html]https://www.aisbom.io/viewer.html[/link]",
+        border_style="blue",
+        expand=False
+    ))
+
 @app.command()
 def info():
     """
