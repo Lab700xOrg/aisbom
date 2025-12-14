@@ -8,6 +8,8 @@
 
 Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
+![AIsbom Demo](assets/aisbom_demo.gif)
+
 ---
 
 ## ⚡ Quick Start
