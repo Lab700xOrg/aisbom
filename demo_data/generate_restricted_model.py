@@ -1,5 +1,6 @@
 import struct
 import json
+import os
 
 # 1. Define the Header with RESTRICTED License
 header = {
@@ -23,7 +24,9 @@ header_len = len(header_json)
 dummy_data = b'\x00\x00\x00\x00'
 
 # 4. Write File: [8 bytes length][json header][data]
-output_file = "restricted_model.safetensors"
+# Get the directory where this script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+output_file = os.path.join(script_dir, "restricted_model.safetensors")
 with open(output_file, "wb") as f:
     # Write header length as unsigned long long (8 bytes)
     f.write(struct.pack('<Q', header_len))
