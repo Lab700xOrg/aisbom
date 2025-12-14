@@ -12,8 +12,7 @@ from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
 from .generator import create_mock_malware_file, create_mock_restricted_file
 from pathlib import Path
-
-# Import our new logic engine
+import importlib.metadata
 from .scanner import DeepScanner
 
 app = typer.Typer()
@@ -123,42 +122,24 @@ def scan(
 @app.command()
 def info():
     """
-    Displays application information, pulling from pyproject.toml if available.
+    Display current version and environment info.
     """
-    version = description = repository = None
-
-    # First, try to read from pyproject.toml (for development)
     try:
-        with open("pyproject.toml", "rb") as f:
-            pyproject_data = tomllib.load(f)
-        poetry_data = pyproject_data.get("tool", {}).get("poetry", {})
-        version = poetry_data.get("version")
-        description = poetry_data.get("description")
-        repository = poetry_data.get("repository")
-    except (FileNotFoundError, tomllib.TOMLDecodeError):
-        pass  # Not in a dev environment, so we'll try the installed package
+        # CRITICAL FIX: Use "aisbom-cli" (the PyPI package name), not "aisbom" (the folder)
+        ver = importlib.metadata.version("aisbom-cli")
+    except importlib.metadata.PackageNotFoundError:
+        ver = "unknown (dev build)"
 
-    # If not found in pyproject.toml, try importlib.metadata (for installed package)
-    if not version:
-        try:
-            version = importlib.metadata.version("aisbom")
-            # To get other metadata, we'd need to call metadata()
-            pkg_metadata = importlib.metadata.metadata("aisbom")
-            if not description:
-                description = pkg_metadata.get("Summary")
-            if not repository:
-                repository = pkg_metadata.get("Home-page")
-        except importlib.metadata.PackageNotFoundError:
-            pass # package not installed
-
-    # Fallbacks
-    version = version or "unknown (not installed)"
-    description = description or "AI SBOM Generator CLI"
-    repository = repository or "https://github.com/Lab700xOrg/aisbom"
-
-    console.print(f"aisbom: {description}")
-    console.print(f"Version: {version}")
-    console.print(f"Repository: {repository}")
+    console.print(Panel(
+        f"[bold cyan]AI SBOM[/bold cyan]: AI Software Bill of Materials - The Supply Chain for Artificial Intelligence\n"
+        f"[bold]Version:[/bold] {ver}\n"
+        f"[bold]License:[/bold] Apache 2.0\n"
+        f"[bold]Website:[/bold] https://www.aisbom.io\n"
+        f"[bold]Repository:[/bold] https://github.com/Lab700xOrg/aisbom",
+        title=" System Info ",
+        border_style="magenta",
+        expand=False
+    ))
 
 @app.command()
 def generate_test_artifacts(
@@ -170,8 +151,12 @@ def generate_test_artifacts(
     target_path = Path(directory)
     if not target_path.exists():
         target_path.mkdir(parents=True)
-        
-    console.print(Panel.fit(f"[bold blue]🧪 Generating Test Artifacts in:[/bold blue] {target_path.resolve()}"))
+
+    # FIX: Use relative path to hide your username/home folder
+    # If it's the current dir, just show "."
+    display_path = "." if directory == "." else directory
+
+    console.print(Panel.fit(f"[bold blue]🧪 Generating Test Artifacts in:[/bold blue] {display_path}"))
     
     # 1. Create Mock Malware
     mock_malware_path = create_mock_malware_file(target_path)
