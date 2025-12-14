@@ -43,7 +43,6 @@ demo_data/*.bin
 demo_data/*.safetensors
 
 # ...but explicitly allow the generator script and text files
-!demo_data/generate_malware.py
 !demo_data/requirements.txt
 
 # --- VS Code ---

@@ -73,32 +73,26 @@ AI models are not just text files; they are executable programs and IP assets.
 
 ## 🧪 How to Verify (The "Trust Factor")
 
-Security tools require trust. To maintain a safe repository, we do not distribute malicious binaries. However, you can verify our detection engine works by generating test artifacts locally using our provided scripts.
+Security tools require trust. To maintain a safe repository, we do not distribute malicious binaries. However, AIsbom includes a built-in generator so you can create safe "test dummies" to verify the scanner works.
 
-**Prerequisites:** You will need to clone the repository to access the generator scripts.
-
-**1. Clone the repo:**
+**1. Install:**
 ```bash
-git clone https://github.com/Lab700xOrg/aisbom.git
-cd aisbom
+pip install aisbom-cli
 ```
 **2. Generate Test Artifacts:**
-We provide a transparent Python script that uses standard libraries to create "fake" threats for testing.
+Run this command to create a fake "Pickle Bomb" and a "Restricted License" model in your current folder.
 ```bash
-# Generate a Pickle Bomb (Security Risk)
-python demo_data/generate_malware.py
-
-# Generate a Non-Commercial Model (Legal Risk)
-python demo_data/generate_restricted_model.py
+# Generate a mock Pickle Bomb (Security Risk) and a mock Non-Commercial Model (Legal Risk)
+aisbom generate-test-artifacts
 ```
-__Result: A file named malicious_model.pt is created.__
+__Result: Files named mock_malware.pt and mock_restricted.safetensors are created.__
 
 **3. Scan it:**
 ```bash
 # You can use your globally installed aisbom, or poetry run aisbom
-aisbom scan demo_data
+aisbom scan .
 ```
-_You will see the scanner flag malicious_model.pt as **CRITICAL** and restricted_model.safetensors as a **LEGAL RISK**._
+_You will see the scanner flag mock_malware.pt as **CRITICAL** and mock_restricted.safetensors as a **LEGAL RISK**._
 
 ---
 

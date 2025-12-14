@@ -10,8 +10,8 @@ from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
-
-
+from .generator import create_mock_malware_file, create_mock_restricted_file
+from pathlib import Path
 
 # Import our new logic engine
 from .scanner import DeepScanner
@@ -159,6 +159,29 @@ def info():
     console.print(f"aisbom: {description}")
     console.print(f"Version: {version}")
     console.print(f"Repository: {repository}")
+
+@app.command()
+def generate_test_artifacts(
+    directory: str = typer.Argument(".", help="Directory to generate test files in")
+):
+    """
+    Generates harmless 'mock' artifacts (Malware simulator & License risk) for testing.
+    """
+    target_path = Path(directory)
+    if not target_path.exists():
+        target_path.mkdir(parents=True)
+        
+    console.print(Panel.fit(f"[bold blue]🧪 Generating Test Artifacts in:[/bold blue] {target_path.resolve()}"))
+    
+    # 1. Create Mock Malware
+    mock_malware_path = create_mock_malware_file(target_path)
+    console.print(f"  [red]• Created:[/red] {mock_malware_path.name} (Simulates Pickle RCE)")
+    
+    # 2. Create Mock Legal Risk
+    mock_legal_path = create_mock_restricted_file(target_path)
+    console.print(f"  [yellow]• Created:[/yellow] {mock_legal_path.name} (Simulates Restrictive License)")
+    
+    console.print("\n[bold green]Done.[/bold green] Now run: [code]aisbom scan .[/code]")
 
 
 if __name__ == "__main__":
