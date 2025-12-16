@@ -1,5 +1,5 @@
 # AIsbom: The Supply Chain for Artificial Intelligence
-[![PyPI version](https://badge.fury.io/py/aisbom-cli.svg)](https://badge.fury.io/py/aisbom-cli)
+[![PyPI version](https://img.shields.io/pypi/v/aisbom-cli.svg)](https://pypi.org/project/aisbom-cli/)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Compliance](https://img.shields.io/badge/standard-CycloneDX-green)
