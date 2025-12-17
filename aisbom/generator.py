@@ -55,3 +55,36 @@ def create_mock_restricted_file(target_dir: Path):
         f.write(dummy_data)
         
     return output_path
+
+def create_mock_gguf(target_dir: Path):
+    """Generates a minimal valid GGUF header with a restrictive license."""
+    output_path = target_dir / "mock_restricted.gguf"
+    
+    with open(output_path, "wb") as f:
+        # 1. Magic "GGUF"
+        f.write(b'GGUF')
+        
+        # 2. Version (3) - Little Endian uint32
+        f.write(struct.pack('<I', 3))
+        
+        # 3. Tensor Count (0) - uint64
+        f.write(struct.pack('<Q', 0))
+        
+        # 4. KV Pair Count (1) - uint64 (We will write 1 pair: general.license)
+        f.write(struct.pack('<Q', 1))
+        
+        # --- KV PAIR 1 ---
+        # Key: "general.license"
+        key = "general.license"
+        f.write(struct.pack('<Q', len(key))) # Key Length
+        f.write(key.encode('utf-8'))         # Key String
+        
+        # Type: String (8) - uint32
+        f.write(struct.pack('<I', 8))
+        
+        # Value: "cc-by-nc-sa-4.0" (Restrictive)
+        val = "cc-by-nc-sa-4.0"
+        f.write(struct.pack('<Q', len(val))) # Value Length
+        f.write(val.encode('utf-8'))         # Value String
+        
+    return output_path
