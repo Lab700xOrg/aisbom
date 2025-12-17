@@ -10,7 +10,7 @@ from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
-from .generator import create_mock_malware_file, create_mock_restricted_file
+from .generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf
 from pathlib import Path
 import importlib.metadata
 from .scanner import DeepScanner
@@ -193,6 +193,10 @@ def generate_test_artifacts(
     mock_legal_path = create_mock_restricted_file(target_path)
     console.print(f"  [yellow]• Created:[/yellow] {mock_legal_path.name} (Simulates Restrictive License)")
     
+    # 3. Create GGUF Risk (New)
+    mock_gguf_path = create_mock_gguf(target_path)
+    console.print(f"  [yellow]• Created:[/yellow] {mock_gguf_path.name} (Simulates GGUF License Risk)")
+
     console.print("\n[bold green]Done.[/bold green] Now run: [code]aisbom scan .[/code]")
 
 

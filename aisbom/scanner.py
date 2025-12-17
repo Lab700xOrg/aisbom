@@ -11,6 +11,7 @@ from aisbom.safety import scan_pickle_stream
 # Constants
 PYTORCH_EXTENSIONS = {'.pt', '.pth', '.bin'}
 SAFETENSORS_EXTENSION = '.safetensors'
+GGUF_EXTENSION = '.gguf'
 REQUIREMENTS_FILENAME = 'requirements.txt'
 
 # Simple blocklist for license keywords that imply legal risk in commercial software
@@ -33,6 +34,8 @@ class DeepScanner:
                     self.artifacts.append(self._inspect_pytorch(full_path))
                 elif ext == SAFETENSORS_EXTENSION:
                     self.artifacts.append(self._inspect_safetensors(full_path))
+                elif ext == GGUF_EXTENSION:
+                    self.artifacts.append(self._inspect_gguf(full_path))
                 elif full_path.name == REQUIREMENTS_FILENAME:
                     self._parse_requirements(full_path)
 
@@ -131,6 +134,95 @@ class DeepScanner:
                     }
         except Exception as e:
             meta["error"] = str(e)
+        return meta
+
+    def _inspect_gguf(self, path: Path) -> Dict[str, Any]:
+        """
+        Parses GGUF header to extract metadata/licenses.
+        GGUF format: Magic (4b) | Version (4b) | TensorCount (8b) | KVCount (8b) | KV Pairs...
+        """
+        meta = {
+            "name": path.name,
+            "type": "machine-learning-model",
+            "framework": "GGUF",
+            "risk_level": "LOW", # GGUF is binary-safe (no pickle)
+            "license": "Unknown",
+            "legal_status": "UNKNOWN",
+            "hash": self._calculate_hash(path),
+            "details": {}
+        }
+
+        try:
+            with open(path, 'rb') as f:
+                # 1. Check Magic "GGUF"
+                magic = f.read(4)
+                if magic != b'GGUF':
+                    meta['risk_level'] = "UNKNOWN (Invalid Header)"
+                    return meta
+
+                # 2. Read Header Info
+                # Version (I), Tensor Count (Q), KV Count (Q)
+                # I = uint32 (4 bytes), Q = uint64 (8 bytes)
+                ver_bytes = f.read(4)
+                version = struct.unpack('<I', ver_bytes)[0]
+                
+                f.read(8) # Skip Tensor Count
+                
+                kv_count_bytes = f.read(8)
+                kv_count = struct.unpack('<Q', kv_count_bytes)[0]
+                
+                extracted_meta = {}
+                
+                # 3. Parse Key-Value Pairs
+                # We interpret just enough to find the license
+                for _ in range(kv_count):
+                    # Read Key (String: Length (Q) + Bytes)
+                    key_len_b = f.read(8)
+                    if not key_len_b: break
+                    key_len = struct.unpack('<Q', key_len_b)[0]
+                    key = f.read(key_len).decode('utf-8', errors='ignore')
+                    
+                    # Read Value Type (uint32)
+                    type_b = f.read(4)
+                    val_type = struct.unpack('<I', type_b)[0]
+                    
+                    # GGUF Value Types: 8=String, others are numbers/bools/arrays
+                    # We strictly care about Strings (8) for metadata
+                    value = "N/A"
+                    if val_type == 8: # String
+                        val_len = struct.unpack('<Q', f.read(8))[0]
+                        value = f.read(val_len).decode('utf-8', errors='ignore')
+                    elif val_type in [0, 1, 2, 3, 4, 5, 10, 11, 12]: 
+                        # Simple scalar types (1-8 bytes), skip them to get to next key
+                        # Mapping sizes roughly: 
+                        # 0(uint8):1, 1(int8):1, 2(uint16):2, 3(int16):2, 4(uint32):4, 5(int32):4
+                        # 10(uint64):8, 11(int64):8, 12(float64):8
+                        skip_map = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:8, 10:8, 11:8, 12:8}
+                        skip = skip_map.get(val_type, 0)
+                        if skip > 0: f.read(skip)
+                        if val_type == 12: value = "float" # Placeholder
+                    elif val_type == 9: # Array
+                        # Arrays are complex to skip without recursion, abort parsing to avoid crash
+                        # Most metadata strings are at the top of the file anyway
+                        break 
+                    
+                    # Capture interesting keys
+                    if val_type == 8:
+                        if "license" in key:
+                            extracted_meta[key] = value
+                        if "architecture" in key:
+                            extracted_meta["arch"] = value
+
+                # 4. Analyze License
+                # GGUF usually stores it as "general.license"
+                lic = extracted_meta.get("general.license") or extracted_meta.get("license") or "Unknown"
+                meta["license"] = lic
+                meta["legal_status"] = self._assess_legal_risk(lic)
+                meta["details"] = extracted_meta
+
+        except Exception as e:
+            meta['details']['error'] = str(e)
+            
         return meta
 
     def _parse_requirements(self, path: Path):

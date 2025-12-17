@@ -41,6 +41,7 @@ demo_data/*.pkl
 demo_data/*.onnx
 demo_data/*.bin
 demo_data/*.safetensors
+demo_data/*.gguf
 
 # ...but explicitly allow the generator script and text files
 !demo_data/requirements.txt

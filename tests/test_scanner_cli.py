@@ -4,7 +4,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from aisbom.cli import app
-from aisbom.generator import create_mock_restricted_file
+from aisbom.generator import create_mock_restricted_file, create_mock_gguf
 from aisbom.safety import scan_pickle_stream
 from aisbom.scanner import DeepScanner
 
@@ -54,6 +54,7 @@ def test_deep_scanner_detects_artifacts_and_dependencies(tmp_path):
 def test_cli_scan_outputs_sbom_with_components(tmp_path):
     _write_malicious_pt(tmp_path / "mock_malware.pt")
     create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
     (tmp_path / "requirements.txt").write_text("torch==2.1.0\nrequests>=2.0\n")
 
     output_path = tmp_path / "sbom.json"
@@ -67,13 +68,31 @@ def test_cli_scan_outputs_sbom_with_components(tmp_path):
 
     assert "mock_malware.pt" in component_names
     assert "mock_restricted.safetensors" in component_names
+    assert "mock_restricted.gguf" in component_names
     assert "torch" in component_names
     assert "requests" in component_names
+
+
+def test_gguf_scanning_sets_license_and_legal_status(tmp_path):
+    gguf_path = create_mock_gguf(tmp_path)
+
+    scanner = DeepScanner(tmp_path)
+    results = scanner.scan()
+
+    artifacts = {a["name"]: a for a in results["artifacts"]}
+    assert gguf_path.name in artifacts
+    gguf = artifacts[gguf_path.name]
+    assert gguf["framework"] == "GGUF"
+    assert gguf["risk_level"] == "LOW"
+    assert gguf["license"] == "cc-by-nc-sa-4.0"
+    assert gguf["legal_status"].startswith("LEGAL RISK")
+    assert gguf["hash"] != "hash_error"
 
 
 def test_cli_scan_allows_success_when_fail_on_risk_disabled(tmp_path):
     _write_malicious_pt(tmp_path / "mock_malware.pt")
     create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
     (tmp_path / "requirements.txt").write_text("torch==2.1.0\nrequests>=2.0\n")
 
     output_path = tmp_path / "sbom.json"
