@@ -22,7 +22,8 @@ console = Console()
 def scan(
     directory: str = typer.Argument(".", help="Target directory to scan"),
     output: str = typer.Option("sbom.json", help="Output file path"),
-    schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options")
+    schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
+    fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found")
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -32,6 +33,23 @@ def scan(
     # 1. Run the Logic
     scanner = DeepScanner(directory)
     results = scanner.scan()
+    # Track highest risk for exit code purposes (CI friendly)
+    def _risk_score(label: str) -> int:
+        text = (label or "").upper()
+        if "CRITICAL" in text:
+            return 3
+        if "MEDIUM" in text:
+            return 2
+        if "LOW" in text:
+            return 1
+        return 0
+
+    highest_risk = max((_risk_score(a.get("risk_level")) for a in results['artifacts']), default=0)
+    exit_code = 0
+    if results['errors']:
+        exit_code = max(exit_code, 1)
+    if fail_on_risk and highest_risk >= 3:
+        exit_code = 2
     
     # 2. Render Results (UI)
     if results['artifacts']:
@@ -118,6 +136,15 @@ def scan(
         border_style="blue",
         expand=False
     ))
+
+    # Signal exit behavior to the user
+    if exit_code == 2:
+        console.print("[bold red]CRITICAL risks detected.[/bold red] Exiting with code 2 (controlled by --fail-on-risk).")
+    elif exit_code == 1:
+        console.print("[bold yellow]Errors encountered during scan.[/bold yellow] Exiting with code 1.")
+
+    # Non-zero exit codes for CI/CD when high risk or errors are present
+    raise typer.Exit(code=exit_code)
 
 @app.command()
 def info():

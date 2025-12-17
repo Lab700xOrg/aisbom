@@ -65,11 +65,11 @@ AI models are not just text files; they are executable programs and IP assets.
 *   **The Solution:** Legacy scanners look at requirements.txt manifest files but ignore binary model weights. **We look inside.** We decompile the bytecode headers without loading the heavy weights into RAM.
 
 ## Key Features
-*   ** Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
-*   ** Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
-*   ** License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
-*   ** Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
-*   ** Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
+*   **Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
+*   **Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
+*   **License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
+*   **Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
+*   **Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
 
 ---
 
