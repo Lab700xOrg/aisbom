@@ -12,7 +12,7 @@ Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### 1. Installation
 Install directly from PyPI. No cloning required.
@@ -33,7 +33,7 @@ aisbom scan ./my-project-folder
 ### 3. Output
 You will see a combined Security & Legal risk assessment in your terminal:
 
-🧠 AI Model Artifacts Found                           
+AI Model Artifacts Found                           
 
 | Filename | Framework | Security Risk | Legal Risk |
 | :--- | :--- | :--- | :--- |
@@ -57,23 +57,23 @@ Don't like reading JSON? You can visualize your security posture using our **off
 
 ---
 
-## 🚀 Why AIsbom?
+## Why AIsbom?
 AI models are not just text files; they are executable programs and IP assets.
 *   **The Security Risk:** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model can execute arbitrary code (RCE) instantly when loaded.
 *   **The Legal Risk:** A developer might download a "Non-Commercial" model (CC-BY-NC) and deploy it to production. Since the license is hidden inside the binary header, standard tools miss it.
 *   **Pickle** files can execute arbitrary code (RCE) instantly upon loading.
 *   **The Solution:** Legacy scanners look at requirements.txt manifest files but ignore binary model weights. **We look inside.** We decompile the bytecode headers without loading the heavy weights into RAM.
 
-## ✨ Key Features
-*   **🧠 Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
-*   **💣 Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
-*   **⚖️ License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
-*   **🛡️ Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
-*   **⚡ Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
+## Key Features
+*   ** Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
+*   ** Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
+*   ** License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
+*   ** Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
+*   ** Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
 
 ---
 
-## 🧪 How to Verify (The "Trust Factor")
+## How to Verify (The "Trust Factor")
 
 Security tools require trust. To maintain a safe repository, we do not distribute malicious binaries. However, AIsbom includes a built-in generator so you can create safe "test dummies" to verify the scanner works.
 
@@ -98,7 +98,7 @@ _You will see the scanner flag mock_malware.pt as **CRITICAL** and mock_restrict
 
 ---
 
-## 🔒 Security Logic
+## Security Logic
 AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It looks for specific `GLOBAL` and `STACK_GLOBAL` instructions that reference dangerous modules:
 
 * os / posix (System calls)
@@ -108,7 +108,7 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 
 ---
 
-## 🤖 GitHub Actions Integration
+## GitHub Actions Integration
 Add AIsbom to your CI/CD pipeline to block unsafe models before they merge.
 
 ```Yaml
