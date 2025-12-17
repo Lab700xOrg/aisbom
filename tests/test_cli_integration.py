@@ -36,7 +36,7 @@ def test_cli_scan_subprocess_creates_sbom(tmp_path):
     output_path = tmp_path / "sbom.json"
     result = _run_cli(["scan", str(tmp_path), "--output", str(output_path)], cwd=tmp_path)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0, "Critical risk should trigger non-zero exit"
     assert output_path.is_file()
 
     sbom = json.loads(output_path.read_text())

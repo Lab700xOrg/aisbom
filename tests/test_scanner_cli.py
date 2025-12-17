@@ -59,7 +59,7 @@ def test_cli_scan_outputs_sbom_with_components(tmp_path):
     output_path = tmp_path / "sbom.json"
     result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 2  # Critical risk -> non-zero exit
     assert output_path.is_file()
 
     data = json.loads(output_path.read_text())
@@ -69,3 +69,18 @@ def test_cli_scan_outputs_sbom_with_components(tmp_path):
     assert "mock_restricted.safetensors" in component_names
     assert "torch" in component_names
     assert "requests" in component_names
+
+
+def test_cli_scan_allows_success_when_fail_on_risk_disabled(tmp_path):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    (tmp_path / "requirements.txt").write_text("torch==2.1.0\nrequests>=2.0\n")
+
+    output_path = tmp_path / "sbom.json"
+    result = runner.invoke(
+        app,
+        ["scan", str(tmp_path), "--output", str(output_path), "--no-fail-on-risk"],
+    )
+
+    assert result.exit_code == 0
+    assert output_path.is_file()
