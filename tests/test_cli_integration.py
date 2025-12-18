@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import importlib
 from pathlib import Path
 
 from aisbom.generator import create_mock_restricted_file, create_mock_gguf
@@ -59,3 +60,10 @@ def test_generate_test_artifacts_creates_all_mocks(tmp_path):
     expected = {"mock_malware.pt", "mock_restricted.safetensors", "mock_restricted.gguf"}
     produced = {p.name for p in tmp_path.iterdir() if p.is_file()}
     assert expected <= produced
+
+
+def test_cli_scan_no_artifacts_is_success(tmp_path):
+    output_path = tmp_path / "sbom.json"
+    result = _run_cli(["scan", str(tmp_path), "--output", str(output_path)], cwd=tmp_path)
+    assert result.returncode == 0
+    assert output_path.is_file()

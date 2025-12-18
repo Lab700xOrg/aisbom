@@ -18,8 +18,9 @@ REQUIREMENTS_FILENAME = 'requirements.txt'
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 
 class DeepScanner:
-    def __init__(self, root_path: str):
+    def __init__(self, root_path: str, strict_mode: bool = False):
         self.root_path = Path(root_path)
+        self.strict_mode = strict_mode
         self.artifacts = []
         self.dependencies = []
         self.errors = []
@@ -85,7 +86,7 @@ class DeepScanner:
                         main_pkl = pickle_files[0]
                         with z.open(main_pkl) as f:
                             content = f.read(10 * 1024 * 1024) 
-                            threats = scan_pickle_stream(content)
+                            threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
 
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"

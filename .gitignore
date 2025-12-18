@@ -49,3 +49,6 @@ demo_data/*.gguf
 # --- VS Code ---
 .vscode/
 *.code-workspace
+
+# --- Coverage ---
+.coverage
