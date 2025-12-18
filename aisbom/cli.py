@@ -23,7 +23,8 @@ def scan(
     directory: str = typer.Argument(".", help="Target directory to scan"),
     output: str = typer.Option("sbom.json", help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
-    fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found")
+    fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
+    strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)")
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -31,7 +32,7 @@ def scan(
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{directory}[/underline]"))
 
     # 1. Run the Logic
-    scanner = DeepScanner(directory)
+    scanner = DeepScanner(directory, strict_mode=strict)
     results = scanner.scan()
     # Track highest risk for exit code purposes (CI friendly)
     def _risk_score(label: str) -> int:

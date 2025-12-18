@@ -13,7 +13,22 @@ DANGEROUS_GLOBALS = {
     "socket": {"socket", "connect"},
 }
 
-def scan_pickle_stream(data: bytes) -> List[str]:
+# Strict allowlist mode: only these modules/functions are permitted
+SAFE_MODULES = {
+    "torch",
+    "numpy",
+    "collections",
+    "builtins",
+    "copyreg",
+    "__builtin__",
+    "typing",
+    "datetime",
+    "_codecs",
+}
+
+SAFE_BUILTINS = {"getattr", "setattr", "bytearray", "dict", "list", "set", "tuple"}
+
+def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
     """
     Disassembles a pickle stream and checks for dangerous imports.
     Returns a list of detected threats (e.g., ["os.system"]).
@@ -35,15 +50,29 @@ def scan_pickle_stream(data: bytes) -> List[str]:
                 # Arg is "module\nname"
                 if isinstance(arg, str) and "\n" in arg:
                     module, name = arg.split("\n")
-                    if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
-                        threats.append(f"{module}.{name}")
+                    if strict_mode:
+                        is_safe = module in SAFE_MODULES
+                        if module in ("builtins", "__builtin__"):
+                            is_safe = is_safe and name in SAFE_BUILTINS
+                        if not is_safe:
+                            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
+                    else:
+                        if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
+                            threats.append(f"{module}.{name}")
 
             elif opcode.name == "STACK_GLOBAL":
                 # Takes two arguments from the stack: module and name
                 if len(memo) == 2:
                     module, name = memo
-                    if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
-                        threats.append(f"{module}.{name}")
+                    if strict_mode:
+                        is_safe = module in SAFE_MODULES
+                        if module in ("builtins", "__builtin__"):
+                            is_safe = is_safe and name in SAFE_BUILTINS
+                        if not is_safe:
+                            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
+                    else:
+                        if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
+                            threats.append(f"{module}.{name}")
                 # Clear memo after use to avoid false positives
                 memo.clear()
 

@@ -28,6 +28,7 @@ Point it at any directory containing your ML project. It will find requirements 
 
 ```bash
 aisbom scan ./my-project-folder
+aisbom scan ./my-project-folder --strict  # Enable pickle allowlisting
 ```
 
 ### 3. Output
@@ -106,6 +107,8 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 * subprocess (Shell execution)
 * builtins.eval / exec (Dynamic code execution)
 * socket (Network reverse shells)
+
+**Strict Mode (Pickle Allowlisting):** Run `aisbom scan --strict` to switch from a blocklist to a strict allowlist. Only common ML/runtime modules are permitted (`torch`, `numpy`, `collections`, `builtins`, `copyreg`, `__builtin__`, `typing`, `datetime`, `_codecs`) and only specific builtins (`getattr`, `setattr`, `bytearray`, `dict`, `list`, `set`, `tuple`). Any other pickle import is flagged as `UNSAFE_IMPORT` and elevated to CRITICAL. Combine with `--fail-on-risk` (default) to make CI fail on unexpected pickle behavior.
 
 ---
 
