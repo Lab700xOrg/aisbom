@@ -6,7 +6,7 @@
 
 **AIsbom** is a specialized security and compliance scanner for Machine Learning artifacts. 
 
-Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`) to detect malware risks and legal license violations hidden inside the serialized weights.
+Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
 ![AIsbom Demo](assets/aisbom_demo.gif)
 
@@ -40,6 +40,7 @@ AI Model Artifacts Found
 | `bert_finetune.pt` | PyTorch | 🔴 **CRITICAL** (RCE Detected: posix.system) | UNKNOWN |
 | `safe_model.safetensors` | SafeTensors | 🟢 **LOW** (Binary Safe) | UNKNOWN |
 | `restricted_model.safetensors` | SafeTensors | 🟢 **LOW** | LEGAL RISK (cc-by-nc-4.0)  |
+| `tiny_model.gguf` | GGUF | 🟢 **LOW** (Binary Safe) | LEGAL RISK (cc-by-nc-sa-4.0) |
 
 A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data will be generated in your current directory.
 
@@ -65,9 +66,9 @@ AI models are not just text files; they are executable programs and IP assets.
 *   **The Solution:** Legacy scanners look at requirements.txt manifest files but ignore binary model weights. **We look inside.** We decompile the bytecode headers without loading the heavy weights into RAM.
 
 ## Key Features
-*   **Deep Introspection:** Peeks inside PyTorch Zip structures and Safetensors headers without loading weights into RAM.
+*   **Deep Introspection:** Peeks inside PyTorch Zip structures, SafeTensors headers, and GGUF headers without loading weights into RAM.
 *   **Pickle Bomb Detector:** Disassembles bytecode to detect `os.system`, `subprocess`, and `eval` calls before they run.
-*   **License Radar:** Extracts metadata from .safetensors to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
+*   **License Radar:** Extracts metadata from .safetensors and GGUF key/value headers to flag restrictive licenses (e.g., CC-BY-NC, AGPL) that threaten commercial use.
 *   **Compliance Ready:** Generates standard [CycloneDX v1.6](https://cyclonedx.org/) JSON for enterprise integration (Dependency-Track, ServiceNow).
 *   **Blazing Fast:** Scans GB-sized models in milliseconds by reading headers only and using streaming hash calculation.
 
@@ -82,19 +83,19 @@ Security tools require trust. To maintain a safe repository, we do not distribut
 pip install aisbom-cli
 ```
 **2. Generate Test Artifacts:**
-Run this command to create a fake "Pickle Bomb" and a "Restricted License" model in your current folder.
+Run this command to create a fake "Pickle Bomb" and two "Restricted License" models (SafeTensors + GGUF) in your current folder.
 ```bash
-# Generate a mock Pickle Bomb (Security Risk) and a mock Non-Commercial Model (Legal Risk)
+# Generate a mock Pickle Bomb (Security Risk) and mock Non-Commercial Models (Legal Risk)
 aisbom generate-test-artifacts
 ```
-__Result: Files named mock_malware.pt and mock_restricted.safetensors are created.__
+__Result: Files named mock_malware.pt, mock_restricted.safetensors, and mock_restricted.gguf are created.__
 
 **3. Scan it:**
 ```bash
 # You can use your globally installed aisbom, or poetry run aisbom
 aisbom scan .
 ```
-_You will see the scanner flag mock_malware.pt as **CRITICAL** and mock_restricted.safetensors as a **LEGAL RISK**._
+_You will see the scanner flag mock_malware.pt as **CRITICAL** and the others as **LEGAL RISK**._
 
 ---
 
