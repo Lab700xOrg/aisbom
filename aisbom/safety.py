@@ -50,6 +50,13 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
                 # Arg is "module\nname"
                 if isinstance(arg, str) and "\n" in arg:
                     module, name = arg.split("\n")
+                elif isinstance(arg, str) and " " in arg:
+                    # Some pickle protocols encode as "module name" (space-separated)
+                    module, name = arg.split(" ", 1)
+                else:
+                    module, name = None, None
+
+                if module and name:
                     if strict_mode:
                         is_safe = module in SAFE_MODULES
                         if module in ("builtins", "__builtin__"):

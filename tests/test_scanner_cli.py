@@ -37,6 +37,14 @@ def test_scan_pickle_stream_detects_dangerous_opcode():
     assert "os.system" in threats
 
 
+def test_scan_pickle_stream_detects_global_with_space_separator():
+    import pickle
+
+    payload = pickle.dumps(MockExploitPayload(), protocol=2)
+    threats = scan_pickle_stream(payload)
+    assert threats and any("posix.system" in t for t in threats)
+
+
 def test_scan_pickle_stream_strict_mode_blocks_unknown_imports():
     threats = scan_pickle_stream(STACK_GLOBAL_SYSTEM, strict_mode=True)
     assert threats == ["UNSAFE_IMPORT: os.system"]
@@ -122,6 +130,14 @@ def test_deep_scanner_strict_mode_marks_unknown_imports(tmp_path):
     results = scanner.scan()
     threats = results["artifacts"][0]["details"]["threats"]
     assert any("UNSAFE_IMPORT" in t for t in threats)
+
+
+def test_deep_scanner_handles_generated_mock_malware(tmp_path):
+    create_mock_malware_file(tmp_path)
+    scanner = DeepScanner(tmp_path)
+    results = scanner.scan()
+    threats = results["artifacts"][0]["details"]["threats"]
+    assert any("posix.system" in t or "os.system" in t for t in threats)
 
 
 def test_deep_scanner_flags_legacy_pt_when_not_zip(tmp_path):
