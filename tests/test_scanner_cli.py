@@ -14,6 +14,7 @@ from aisbom.generator import (
 )
 from aisbom.safety import scan_pickle_stream
 from aisbom.scanner import DeepScanner
+from aisbom import cli as cli_module
 
 
 runner = CliRunner()
@@ -59,6 +60,26 @@ def test_create_mock_malware_file_writes_zip(tmp_path):
     assert pt_path.exists()
     with zipfile.ZipFile(pt_path, "r") as zf:
         assert "archive/data.pkl" in zf.namelist()
+
+
+def test_generate_markdown_renders_table():
+    results = {
+        "artifacts": [
+            {
+                "name": "model.pt",
+                "framework": "PyTorch",
+                "risk_level": "CRITICAL (RCE Detected)",
+                "legal_status": "LEGAL RISK (cc)",
+                "hash": "deadbeefcafebabe",
+            }
+        ],
+        "dependencies": [{"name": "torch"}],
+    }
+    md = cli_module._generate_markdown(results)
+    assert "AIsbom Report" in md
+    assert "Dependencies found: **1**" in md
+    assert "| model.pt | PyTorch | 🔴" in md
+    assert "deadbeef" in md
 
 
 def test_info_command_falls_back_when_package_missing(monkeypatch):

@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 import importlib
+from aisbom.cli import app
+from typer.testing import CliRunner
 from pathlib import Path
 
 from aisbom.generator import create_mock_restricted_file, create_mock_gguf
@@ -27,6 +29,9 @@ def _run_cli(args, cwd: Path, env=None):
         env=env_vars,
     )
     return result
+
+
+runner = CliRunner()
 
 
 def test_cli_scan_subprocess_creates_sbom(tmp_path):
@@ -67,3 +72,41 @@ def test_cli_scan_no_artifacts_is_success(tmp_path):
     result = _run_cli(["scan", str(tmp_path), "--output", str(output_path)], cwd=tmp_path)
     assert result.returncode == 0
     assert output_path.is_file()
+
+
+def test_cli_scan_defaults_to_sbom_json_when_output_missing(tmp_path, monkeypatch):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["scan", str(tmp_path)])
+    assert result.exit_code == 2
+    sbom_path = tmp_path / "sbom.json"
+    assert sbom_path.exists()
+
+
+def test_cli_scan_schema_v15_branch(tmp_path):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+    output_path = tmp_path / "sbom15.json"
+    result = runner.invoke(
+        app,
+        ["scan", str(tmp_path), "--schema-version", "1.5", "--output", str(output_path)],
+    )
+    assert result.exit_code == 2
+    assert output_path.exists()
+
+
+def test_cli_scan_markdown_default_output(tmp_path, monkeypatch):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["scan", str(tmp_path), "--format", "markdown"])
+    assert result.exit_code == 2
+    md_path = tmp_path / "aisbom-report.md"
+    assert md_path.exists()
+    content = md_path.read_text()
+    assert "AIsbom Report" in content
+    assert "mock_malware.pt" in content

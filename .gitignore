@@ -52,3 +52,6 @@ demo_data/*.gguf
 
 # --- Coverage ---
 .coverage
+
+# --- Reports ---
+aisbom-report.md

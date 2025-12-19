@@ -2,6 +2,7 @@ import typer
 import json
 import tomllib
 import importlib.metadata
+from enum import Enum
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -18,13 +19,51 @@ from .scanner import DeepScanner
 app = typer.Typer()
 console = Console()
 
+class OutputFormat(str, Enum):
+    JSON = "json"
+    MARKDOWN = "markdown"
+
+def _generate_markdown(results: dict) -> str:
+    """Render a GitHub-flavored Markdown report for CI artifacts."""
+    lines = []
+    deps_count = len(results.get("dependencies", []))
+    lines.append("## AIsbom Report")
+    lines.append("")
+    lines.append(f"- Dependencies found: **{deps_count}**")
+    lines.append("")
+    lines.append("| Filename | Framework | Security Risk | Legal Risk | SHA256 Hash |")
+    lines.append("| :--- | :--- | :--- | :--- | :--- |")
+
+    for art in results.get("artifacts", []):
+        risk = art.get("risk_level", "UNKNOWN")
+        legal = art.get("legal_status", "UNKNOWN")
+        risk_upper = risk.upper()
+        legal_upper = legal.upper()
+
+        if "CRITICAL" in risk_upper or "HIGH" in risk_upper:
+            risk_icon = "🔴"
+        elif "MEDIUM" in risk_upper:
+            risk_icon = "🟡"
+        else:
+            risk_icon = "🟢"
+
+        legal_icon = "🔴" if "RISK" in legal_upper else "🟢"
+        hash_short = (art.get("hash") or "")[:8] or "N/A"
+
+        lines.append(
+            f"| {art.get('name', '?')} | {art.get('framework', '?')} | {risk_icon} {risk} | {legal_icon} {legal} | {hash_short} |"
+        )
+
+    return "\n".join(lines)
+
 @app.command()
 def scan(
     directory: str = typer.Argument(".", help="Target directory to scan"),
-    output: str = typer.Option("sbom.json", help="Output file path"),
+    output: str | None = typer.Option(None, help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
-    strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)")
+    strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
+    format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report)")
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -120,23 +159,32 @@ def scan(
         bom.components.add(c)
 
     # 4. Save to Disk
-    if schema_version == "1.5":
-        outputter = JsonV1Dot5(bom)
-    else:
-        outputter = JsonV1Dot6(bom)
-        
-    with open(output, "w") as f:
-        f.write(outputter.output_as_string())
-    
-    console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
+    if output is None:
+        output = "sbom.json" if format == OutputFormat.JSON else "aisbom-report.md"
 
-    console.print(Panel(
-        f"[bold white]📊 Visualize this report:[/bold white]\n"
-        f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
-        f"👉 [link=https://www.aisbom.io/viewer.html]https://www.aisbom.io/viewer.html[/link]",
-        border_style="blue",
-        expand=False
-    ))
+    if format == OutputFormat.JSON:
+        if schema_version == "1.5":
+            outputter = JsonV1Dot5(bom)
+        else:
+            outputter = JsonV1Dot6(bom)
+            
+        with open(output, "w") as f:
+            f.write(outputter.output_as_string())
+        
+        console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
+
+        console.print(Panel(
+            f"[bold white]📊 Visualize this report:[/bold white]\n"
+            f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
+            f"👉 [link=https://www.aisbom.io/viewer.html]https://www.aisbom.io/viewer.html[/link]",
+            border_style="blue",
+            expand=False
+        ))
+    else:
+        markdown = _generate_markdown(results)
+        with open(output, "w") as f:
+            f.write(markdown)
+        console.print(f"\n[bold green]✔ Markdown Report Generated:[/bold green] {output}")
 
     # Signal exit behavior to the user
     if exit_code == 2:
