@@ -29,6 +29,7 @@ Point it at any directory containing your ML project. It will find requirements 
 ```bash
 aisbom scan ./my-project-folder
 aisbom scan ./my-project-folder --strict  # Enable pickle allowlisting
+aisbom scan ./my-project-folder --format markdown  # Save a CI-friendly Markdown report
 ```
 
 ### 3. Output
@@ -109,6 +110,8 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 * socket (Network reverse shells)
 
 **Strict Mode (Pickle Allowlisting):** Run `aisbom scan --strict` to switch from a blocklist to a strict allowlist. Only common ML/runtime modules are permitted (`torch`, `numpy`, `collections`, `builtins`, `copyreg`, `__builtin__`, `typing`, `datetime`, `_codecs`) and only specific builtins (`getattr`, `setattr`, `bytearray`, `dict`, `list`, `set`, `tuple`). Any other pickle import is flagged as `UNSAFE_IMPORT` and elevated to CRITICAL. Combine with `--fail-on-risk` (default) to make CI fail on unexpected pickle behavior.
+
+**Markdown Reporting:** Use `--format markdown` to emit a GitHub-flavored Markdown table (`aisbom-report.md` by default) while still printing the Rich table to stdout. The report is ignored by Git (`.gitignore`).
 
 ---
 
