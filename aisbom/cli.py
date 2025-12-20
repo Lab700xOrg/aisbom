@@ -58,7 +58,7 @@ def _generate_markdown(results: dict) -> str:
 
 @app.command()
 def scan(
-    directory: str = typer.Argument(".", help="Target directory to scan"),
+    target: str = typer.Argument(".", help="Directory or URL (http/hf://) to scan"),
     output: str | None = typer.Option(None, help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
@@ -68,11 +68,15 @@ def scan(
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
     """
-    console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{directory}[/underline]"))
+    console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
 
     # 1. Run the Logic
-    scanner = DeepScanner(directory, strict_mode=strict)
-    results = scanner.scan()
+    scanner = DeepScanner(target, strict_mode=strict)
+    if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://") or target.startswith("hf://")):
+        with console.status("[cyan]Resolving remote repository...[/cyan]"):
+            results = scanner.scan()
+    else:
+        results = scanner.scan()
     # Track highest risk for exit code purposes (CI friendly)
     def _risk_score(label: str) -> int:
         text = (label or "").upper()
