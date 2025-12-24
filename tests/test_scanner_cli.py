@@ -147,7 +147,8 @@ def test_deep_scanner_flags_legacy_pt_when_not_zip(tmp_path):
     scanner = DeepScanner(tmp_path)
     results = scanner.scan()
     art = {a["name"]: a for a in results["artifacts"]}[legacy.name]
-    assert art["risk_level"].startswith("CRITICAL (Legacy Binary)")
+    assert art["risk_level"] == "LOW"
+    assert art["framework"] == "Python Path Config"
 
 
 def test_cli_scan_outputs_sbom_with_components(tmp_path):

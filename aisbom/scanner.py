@@ -140,7 +140,24 @@ class DeepScanner:
                         
                     meta["details"] = {"internal_files": len(files), "threats": threats}
             else:
-                 meta["risk_level"] = "CRITICAL (Legacy Binary)"
+                 # Handle text-based .pth config files to avoid false positives
+                 try:
+                     stream.seek(0)
+                     sample = stream.read(1024)
+                     if isinstance(sample, bytes):
+                         text = sample.decode("utf-8")
+                     else:
+                         text = str(sample)
+                     # Consider it text if mostly printable characters
+                     printable = sum(ch.isprintable() for ch in text)
+                     if len(text) > 0 and printable / len(text) > 0.9:
+                         meta["risk_level"] = "LOW"
+                         meta["type"] = "configuration"
+                         meta["framework"] = "Python Path Config"
+                     else:
+                         meta["risk_level"] = "CRITICAL (Legacy Binary)"
+                 except Exception:
+                     meta["risk_level"] = "CRITICAL (Legacy Binary)"
             if local_path and not stream.closed:
                 stream.close()
         except Exception as e:
