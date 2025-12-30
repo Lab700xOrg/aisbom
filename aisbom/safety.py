@@ -23,10 +23,60 @@ SAFE_MODULES = {
     "__builtin__",
     "typing",
     "datetime",
-    "_codecs",
+    # Expanded Safe List
+    "pathlib",
+    "posixpath",
+    "ntpath",
+    "re",
+    "copy",
+    "functools",
+    "operator",
+    "warnings",
+    "contextlib",
+    "abc",
+    "enum",
+    "dataclasses",
+    "types",
+    "_operator",
+    "complex",
 }
 
-SAFE_BUILTINS = {"getattr", "setattr", "bytearray", "dict", "list", "set", "tuple"}
+SAFE_BUILTINS = {
+    "getattr", "setattr", "bytearray", "dict", "list", "set", "tuple",
+    # Expanded Builtins
+    "slice", "frozenset", "range", "complex",
+    "bool", "int", "float", "str", "bytes", "object",
+}
+
+def _is_safe_import(module: str, name: str) -> bool:
+    """Helper to validate imports against strict mode policies."""
+    # 1. Exact Match Safe Modules
+    if module in SAFE_MODULES:
+        return True
+    
+    # 2. Torch Submodules (torch.*)
+    if module.startswith("torch."):
+        return True
+    
+    # 3. Codecs (Explicitly allow encode/decode only)
+    if module == "_codecs" and name in ("encode", "decode"):
+        return True
+        
+    # 4. Pathlib internals handling (pathlib._local or generic submodules of safe packages?)
+    # Generally if 'pathlib' is safe, 'pathlib.anything' *should* be safe if it's code, but strict mode is strict.
+    # On many python versions, Path is in 'pathlib'. 'pathlib._local' is an implementation detail.
+    # Let's allow submodules of SAFE_MODULES if they start with that name?
+    # No, that opens up 'os.path' if 'os' was safe (it isn't).
+    # But for 'pathlib', 're', nested usage is common.
+    # Let's add specific check for known safe packages that use submodules
+    if module.startswith("pathlib.") or module.startswith("re.") or module.startswith("collections."):
+        return True
+
+    # 5. Builtins Checks
+    if module in ("builtins", "__builtin__"):
+        return name in SAFE_BUILTINS
+
+    return False
 
 def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
     """
@@ -58,10 +108,7 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
 
                 if module and name:
                     if strict_mode:
-                        is_safe = module in SAFE_MODULES
-                        if module in ("builtins", "__builtin__"):
-                            is_safe = is_safe and name in SAFE_BUILTINS
-                        if not is_safe:
+                        if not _is_safe_import(module, name):
                             threats.append(f"UNSAFE_IMPORT: {module}.{name}")
                     else:
                         if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
@@ -72,10 +119,7 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
                 if len(memo) == 2:
                     module, name = memo
                     if strict_mode:
-                        is_safe = module in SAFE_MODULES
-                        if module in ("builtins", "__builtin__"):
-                            is_safe = is_safe and name in SAFE_BUILTINS
-                        if not is_safe:
+                        if not _is_safe_import(module, name):
                             threats.append(f"UNSAFE_IMPORT: {module}.{name}")
                     else:
                         if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:

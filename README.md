@@ -83,17 +83,20 @@ aisbom diff baseline_sbom.json new_sbom.json
 ```
 
 It enforces Quality Gates by exiting with **code 1** if:
-*   🚨 A new **CRITICAL** risk is introduced.
-*   📈 A Component's risk level escalates (e.g., LOW -> CRITICAL).
-*   ⚠️ **Hash Drift**: A verified file has been tampered with (Marked as INTEGRITY FAIL).
+*   A new **CRITICAL** risk is introduced.
+*   A Component's risk level escalates (e.g., LOW -> CRITICAL).
+*   **Hash Drift**: A verified file has been tampered with (Marked as INTEGRITY FAIL).
 
 ### Strict Mode (Allowlisting)
 For high-security environments, switch from "Blocklisting" (looking for malware) to "Allowlisting" (blocking everything unknown).
 
 ```bash
-aisbom scan . --strict
+aisbom scan model.pkl --strict
 ```
-*   Only permits standard ML modules (`torch`, `numpy`, `collections`, etc.).
+
+This will report **any** import that is not in the safe-list.
+**Allowed Libraries**: `torch` (and submodules), `numpy`, `collections`, `typing`, `datetime`, `re`, `pathlib`, `copy`, `functools`, `dataclasses`, `uuid`.
+**Allowed Builtins**: `dict`, `list`, `set`, `tuple`, `int`, `float`, `str`, `bytes`, etc., etc.).
 *   Flags *any* unknown global import as `CRITICAL`.
 
 ### Markdown Reporting (CI/CD)
