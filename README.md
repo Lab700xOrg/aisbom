@@ -106,6 +106,13 @@ Generate a GitHub-flavored Markdown report suitable for Pull Request comments.
 aisbom scan . --format markdown --output report.md
 ```
 
+### SPDX Export (Enterprise Compliance)
+Generate a standard SPDX 2.3 JSON Software Bill of Materials.
+
+```bash
+aisbom scan . --format spdx --output sbom.spdx.json
+```
+
 ---
 
 ## CI/CD Integration
