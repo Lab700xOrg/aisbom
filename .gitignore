@@ -55,5 +55,9 @@ demo_data/*.gguf
 
 # --- Reports ---
 aisbom-report.md
-DEPENDABOT_MERGE.md
-SESSION_CONTEXT.md.agent/workflows/
+SESSION_CONTEXT.md
+
+# --- Agent ---
+.agent/
+docs/DEPENDABOT_MERGE.md
+
