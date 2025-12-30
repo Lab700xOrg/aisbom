@@ -17,7 +17,7 @@ click = "<8.2.0"
 [tool.poetry.dependencies.requests]
 version = "^2.32.3"
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.3.3"
+pytest = ">=8.3.3,<10.0.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
