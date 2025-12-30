@@ -7,7 +7,7 @@ from aisbom.cli import app
 from typer.testing import CliRunner
 from pathlib import Path
 
-from aisbom.generator import create_mock_restricted_file, create_mock_gguf
+from aisbom.mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf
 from tests.test_scanner_cli import _write_malicious_pt
 
 
@@ -110,3 +110,21 @@ def test_cli_scan_markdown_default_output(tmp_path, monkeypatch):
     content = md_path.read_text()
     assert "AIsbom Report" in content
     assert "mock_malware.pt" in content
+    assert "mock_malware.pt" in content
+
+def test_cli_diff_command(tmp_path):
+    # Use generator to make real files
+    create_mock_malware_file(tmp_path)
+    (tmp_path / "sbom1.json").write_text(json.dumps({"components": []}))
+    (tmp_path / "sbom2.json").write_text(json.dumps({
+        "components": [{
+            "name": "mock_malware.pt", 
+            "version": "1.0", 
+            "description": "Risk: CRITICAL"
+        }]
+    }))
+    
+    result = runner.invoke(app, ["diff", str(tmp_path/"sbom1.json"), str(tmp_path/"sbom2.json")])
+    assert result.exit_code == 1
+    assert "FAILURE" in result.stdout
+    assert "mock_malware.pt" in result.stdout

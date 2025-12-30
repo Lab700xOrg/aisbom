@@ -61,6 +61,32 @@ aisbom scan hf://google-bert/bert-base-uncased
 *   **Storage:** Zero disk usage.
 *   **Security:** Verify "SafeTensors" compliance before you even `git clone`.
 
+### Config Drift Detection
+Detect "Silent Regressions" in your AI Supply Chain. The `diff` command compares your current SBOM against a known baseline JSON.
+
+```bash
+aisbom diff baseline_sbom.json new_sbom.json
+```
+
+**Drift Analysis Output:**
+
+```text
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Component     ┃ Type     ┃ Change  ┃ Security Risk  ┃ Legal Risk      ┃ Details        ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ drift-risk.pt │ Modified │ DRIFT   │ LOW ->         │ -               │                │
+│               │          │         │ CRITICAL       │                 │                │
+│ drift-license │ Modified │ DRIFT   │ -              │ UNKNOWN ->      │ Lic: MIT ->    │
+│               │          │         │                │ LEGAL RISK      │ CC-BY-NC       │
+│ drift-hash.pt │ Modified │ DRIFT   │ INTEGRITY FAIL │ -               │ Hash: ...      │
+└───────────────┴──────────┴─────────┴────────────────┴─────────────────┴────────────────┘
+```
+
+It enforces Quality Gates by exiting with **code 1** if:
+*   🚨 A new **CRITICAL** risk is introduced.
+*   📈 A Component's risk level escalates (e.g., LOW -> CRITICAL).
+*   ⚠️ **Hash Drift**: A verified file has been tampered with (Marked as INTEGRITY FAIL).
+
 ### Strict Mode (Allowlisting)
 For high-security environments, switch from "Blocklisting" (looking for malware) to "Allowlisting" (blocking everything unknown).
 
