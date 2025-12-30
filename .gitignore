@@ -55,3 +55,5 @@ demo_data/*.gguf
 
 # --- Reports ---
 aisbom-report.md
+DEPENDABOT_MERGE.md
+SESSION_CONTEXT.md
