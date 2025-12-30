@@ -23,6 +23,7 @@ console = Console()
 class OutputFormat(str, Enum):
     JSON = "json"
     MARKDOWN = "markdown"
+    SPDX = "spdx"
 
 def _generate_markdown(results: dict) -> str:
     """Render a GitHub-flavored Markdown report for CI artifacts."""
@@ -165,7 +166,12 @@ def scan(
 
     # 4. Save to Disk
     if output is None:
-        output = "sbom.json" if format == OutputFormat.JSON else "aisbom-report.md"
+        if format == OutputFormat.JSON:
+             output = "sbom.json"
+        elif format == OutputFormat.SPDX:
+             output = "sbom.spdx.json"
+        else:
+             output = "aisbom-report.md"
 
     if format == OutputFormat.JSON:
         if schema_version == "1.5":
@@ -185,6 +191,12 @@ def scan(
             border_style="blue",
             expand=False
         ))
+    elif format == OutputFormat.SPDX:
+        from .spdx_gen import generate_spdx_sbom
+        spdx_json = generate_spdx_sbom(results)
+        with open(output, "w") as f:
+            f.write(spdx_json)
+        console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (SPDX v2.3)")
     else:
         markdown = _generate_markdown(results)
         with open(output, "w") as f:
