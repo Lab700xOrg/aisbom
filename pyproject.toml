@@ -10,7 +10,7 @@ urls = { "Homepage" = "https://www.aisbom.io/" }
 [tool.poetry.dependencies]
 python = "^3.11"
 typer = {extras = ["all"], version = ">=0.12.5,<0.21.0"}
-rich = "^13.7.1"
+rich = ">=13.7.1,<15.0.0"
 cyclonedx-python-lib = "^8.5.0"
 pip-requirements-parser = "^32.0.1"
 click = "<8.2.0"
