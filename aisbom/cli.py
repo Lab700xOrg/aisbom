@@ -11,10 +11,11 @@ from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
-from .generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf
+from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms
 from pathlib import Path
 import importlib.metadata
 from .scanner import DeepScanner
+from .diff import SBOMDiff
 
 app = typer.Typer()
 console = Console()
@@ -250,8 +251,120 @@ def generate_test_artifacts(
     mock_gguf_path = create_mock_gguf(target_path)
     console.print(f"  [yellow]• Created:[/yellow] {mock_gguf_path.name} (Simulates GGUF License Risk)")
 
+    # 4. Create Diff Testing Data (New)
+    try:
+        demo_old, demo_new = create_demo_diff_sboms(target_path)
+        console.print(f"  [cyan]• Created:[/cyan] demo_data/ (Baseline & Drifted SBOMs for 'diff' testing)")
+    except Exception as e:
+        console.print(f"  [red]• Error creating diff demos:[/red] {e}")
+
     console.print("\n[bold green]Done.[/bold green] Now run: [code]aisbom scan .[/code]")
 
+
+@app.command()
+def diff(
+    old_file: str = typer.Argument(..., help="Path to baseline SBOM (JSON)"),
+    new_file: str = typer.Argument(..., help="Path to new SBOM (JSON)"),
+    fail_on_risk_increase: bool = typer.Option(True, help="Exit with code 1 if risk increases or hashes drift")
+):
+    """
+    Compare two SBOM files (CycloneDX JSON) and detect drift in risks, licenses, dependencies, or model hashes.
+    """
+    path_old = Path(old_file)
+    path_new = Path(new_file)
+
+    if not path_old.exists() or not path_new.exists():
+        console.print("[bold red]Error:[/bold red] One or both files do not exist.")
+        raise typer.Exit(code=1)
+
+    try:
+        differ = SBOMDiff(path_old, path_new)
+        result = differ.compare()
+    except Exception as e:
+        console.print(f"[bold red]Error parsing SBOMs:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(Panel.fit(f"[bold cyan]Comparing[/bold cyan] {path_old.name} -> {path_new.name}"))
+
+    table = Table(title="Drift Analysis")
+    table.add_column("Component", style="cyan")
+    table.add_column("Type", style="magenta")
+    table.add_column("Change", style="yellow")
+    table.add_column("Security Risk", style="bold red")
+    table.add_column("Legal Risk", style="yellow")
+    table.add_column("Details", style="white")
+
+    # Added
+    for item in result.added:
+        risk = differ._get_risk(item)
+        lic = differ._get_license(item)
+        legal_stat = differ._get_legal_status(item)
+        
+        sec_style = "bold red" if risk == "CRITICAL" else "green"
+        legal_style = "bold red" if legal_stat == "LEGAL RISK" else "green"
+        
+        table.add_row(item['name'], "Added", "NEW", f"[{sec_style}]{risk}[/{sec_style}]", f"[{legal_style}]{legal_stat}[/{legal_style}]", f"Lic: {lic}")
+
+    # Removed
+    for item in result.removed:
+        table.add_row(item['name'], "Removed", "DELETED", "-", "-", "")
+
+    # Changed
+    for change in result.changed:
+        details = []
+        sec_risk_disp = "-"
+        legal_risk_disp = "-"
+        
+        if change.risk_diff:
+            old_r, new_r = change.risk_diff
+            style = "bold red" if new_r == "CRITICAL" else "yellow"
+            sec_risk_disp = f"{old_r} -> [{style}]{new_r}[/{style}]"
+        
+        if change.legal_status_diff:
+            old_s, new_s = change.legal_status_diff
+            style = "bold red" if new_s == "LEGAL RISK" else "green"
+            legal_risk_disp = f"{old_s} -> [{style}]{new_s}[/{style}]"
+        
+        # If license text changed but status didn't, still allow DETAILS to show the text change
+        # But ensure 'Legal Risk' column reflects current status if not drifted
+        if not change.legal_status_diff and change.license_diff:
+             # Just show current status
+             # We need to re-fetch current status to show it, or leave it blank/dash if not drifted?
+             # User implies they want to assess risk. If it's a diff, we usually show what changed.
+             # If status is stuck at "LEGAL RISK" -> "LEGAL RISK" but license changed, we should probably show that?
+             # For now, if no status diff, we leave it as "-" to indicate STABLE risk level, but details show the change.
+             pass
+
+        if change.license_diff:
+            old_l, new_l = change.license_diff
+            details.append(f"Lic: {old_l} -> {new_l}")
+            
+        if change.version_diff:
+            old_v, new_v = change.version_diff
+            details.append(f"Ver: {old_v} -> {new_v}")
+            
+        if change.hash_diff:
+            old_h, new_h = change.hash_diff
+            details.append(f"Hash: {old_h[:8]}... -> [red]{new_h[:8]}...[/red]")
+            # If hash drifted, this is an Integrity Failure regardless of scanner score
+            if sec_risk_disp == "-":
+                sec_risk_disp = "[bold red]INTEGRITY FAIL[/bold red]"
+            else:
+                # If risk ALSO increased, append it
+                sec_risk_disp += "\n[bold red]INTEGRITY FAIL[/bold red]"
+        
+        table.add_row(change.name, "Modified", "DRIFT", sec_risk_disp, legal_risk_disp, ", ".join(details))
+
+    if result.added or result.removed or result.changed:
+        console.print(table)
+    else:
+        console.print("[green]No changes detected.[/green]")
+
+    if fail_on_risk_increase and (result.risk_increased or result.hash_drifted):
+        console.print("\n[bold red]FAILURE: Critical risk increase or hash drift detected![/bold red]")
+        raise typer.Exit(code=1)
+    
+    console.print("\n[bold green]Success: No critical regression detected.[/bold green]")
 
 if __name__ == "__main__":
     app()

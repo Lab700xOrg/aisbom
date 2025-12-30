@@ -6,7 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from aisbom.cli import app
-from aisbom.generator import (
+from aisbom.mock_generator import (
     MockExploitPayload,
     create_mock_malware_file,
     create_mock_restricted_file,

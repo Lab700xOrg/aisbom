@@ -70,7 +70,7 @@ def test_resolve_huggingface_repo(monkeypatch):
 def test_remote_scanner_detects_pickle_threat(monkeypatch, tmp_path):
     import zipfile
     import pickle
-    from aisbom.generator import MockExploitPayload
+    from aisbom.mock_generator import MockExploitPayload
 
     payload = pickle.dumps(MockExploitPayload(), protocol=2)
     zip_bytes = Path(tmp_path / "remote.pt")
