@@ -32,6 +32,8 @@ env/
 # --- Project Specific Outputs (Do not commit reports) ---
 sbom.json
 sbom.xml
+sbom.spdx.json
+sbom.spdx.jsonld
 
 # --- Demo Data (Binaries) ---
 # We commit the scripts to generate them, but NOT the binaries themselves.
@@ -59,6 +61,7 @@ SESSION_CONTEXT.md
 
 # --- Agent ---
 .agent/
+!.agent/features/
 docs/DEPENDABOT_MERGE.md
 
 demo_data/

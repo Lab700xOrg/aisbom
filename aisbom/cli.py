@@ -185,13 +185,6 @@ def scan(
         
         console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
 
-        console.print(Panel(
-            f"[bold white]📊 Visualize this report:[/bold white]\n"
-            f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
-            f"👉 [link=https://www.aisbom.io/viewer.html]https://www.aisbom.io/viewer.html[/link]",
-            border_style="blue",
-            expand=False
-        ))
     elif format == OutputFormat.SPDX:
         from .spdx_gen import generate_spdx_sbom
         spdx_json = generate_spdx_sbom(results)
@@ -203,6 +196,23 @@ def scan(
         with open(output, "w") as f:
             f.write(markdown)
         console.print(f"\n[bold green]✔ Markdown Report Generated:[/bold green] {output}")
+
+    # Show visualization panel for machine-readable formats
+    if format in [OutputFormat.JSON, OutputFormat.SPDX]:
+        try:
+            ver = importlib.metadata.version("aisbom-cli")
+        except importlib.metadata.PackageNotFoundError:
+            ver = "unknown"
+
+        viewer_url = f"https://www.aisbom.io/viewer.html?utm_source=cli&utm_medium=terminal&utm_campaign=scan_output&utm_version={ver}"
+
+        console.print(Panel(
+            f"[bold white]📊 Visualize this report:[/bold white]\n"
+            f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
+            f"👉 [link={viewer_url}]Open Secure Viewer (aisbom.io)[/link]",
+            border_style="blue",
+            expand=False
+        ))
 
     # Signal exit behavior to the user
     if exit_code == 2:
