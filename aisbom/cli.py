@@ -63,9 +63,10 @@ def scan(
     target: str = typer.Argument(".", help="Directory or URL (http/hf://) to scan"),
     output: str | None = typer.Option(None, help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
+    spdx_version: str = typer.Option("2.3", help="SPDX version (2.3 or 3.0)", case_sensitive=False, rich_help_panel="Advanced Options"),
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
     strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
-    format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report)")
+    format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report, SPDX for Compliance)")
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.

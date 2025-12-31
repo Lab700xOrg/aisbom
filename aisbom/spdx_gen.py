@@ -17,10 +17,9 @@ from spdx_tools.spdx.model import (
     Checksum,
     ChecksumAlgorithm
 )
-# from spdx_tools.spdx.writer.write_utils import convert_to_dict
 from spdx_tools.spdx.writer.json import json_writer
 
-class SPDXGenerator:
+class SPDX2Generator:
     def __init__(self, creation_time=None):
         self.creation_time = creation_time or datetime.now(timezone.utc)
         self.packages = []
@@ -61,24 +60,11 @@ class SPDXGenerator:
         document.relationships = self.relationships
 
         # 5. Serialize
-        # spdx-tools allows converting the Document object to a dict, which we can then dump as JSON
-        # Note: spdx-tools 0.8.x interface uses writer.write_utils
-        # Or we can write to an in-memory stream using json_writer?
-        # json_writer writes to a file object.
-        
-        # However, for simplicity and strict control, converting to dict matches standard flow.
-        # But spdx-tools document structure is complex.
-        # Let's try to use the provided helpers.
-        
-        # Since spdx_tools.spdx.writer.write_utils.convert_to_dict might not exist or work as expected depending on version.
-        # Actually it's simpler: The spdx-tools library is primarily about PARSING. 
-        # But for WRITING, passing to `spdx_tools.spdx.writer.json.json_writer.write_document_to_stream(doc, stream)` is best.
-        
         from io import StringIO
         output = StringIO()
         json_writer.write_document_to_stream(document, output)
         return output.getvalue()
-
+        
     def _process_artifact(self, artifact: Dict, doc_spdx_id: str):
         """Map AI model artifact to SPDX Package."""
         name = artifact.get("filename", "unknown-model")
@@ -104,14 +90,6 @@ class SPDXGenerator:
              license_declared=SpdxNoAssertion(),
              copyright_text=SpdxNoAssertion()
         )
-        
-        # Hashes
-        if "hashes" in artifact:
-            # AISBOM uses dict or list for hashes?
-            # From previous steps, it seemed to be list like [{'alg': 'SHA-256', 'content': '...'}]
-            # Or dict? Looking at generator.py output or mock.
-            # Usually aisbom/scanner.py output.
-            pass # TODO: Add checksums if available in right format
             
         self.packages.append(pkg)
         
@@ -144,5 +122,5 @@ class SPDXGenerator:
         ))
 
 def generate_spdx_sbom(results: Dict[str, Any]) -> str:
-    generator = SPDXGenerator()
+    generator = SPDX2Generator()
     return generator.generate(results)
