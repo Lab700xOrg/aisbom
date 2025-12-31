@@ -7,7 +7,7 @@
 
 **AIsbom** is a specialized security and compliance scanner for Machine Learning artifacts.
 - **SPDX 2.3**: Standard SBOM format for industry compliance.
-- **CycloneDX**: (Coming soon)
+- **CycloneDX**: Supported (Default output format).
 
 Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
