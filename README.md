@@ -6,6 +6,8 @@
 ![Compliance](https://img.shields.io/badge/standard-CycloneDX-green)
 
 **AIsbom** is a specialized security and compliance scanner for Machine Learning artifacts.
+- **SPDX 2.3**: Standard SBOM format for industry compliance.
+- **CycloneDX**: (Coming soon)
 
 Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
@@ -107,7 +109,7 @@ aisbom scan . --format markdown --output report.md
 ```
 
 ### SPDX Export (Enterprise Compliance)
-Generate a standard SPDX 2.3 JSON Software Bill of Materials.
+Generate SPDX 2.3 Software Bill of Materials.
 
 ```bash
 aisbom scan . --format spdx --output sbom.spdx.json
