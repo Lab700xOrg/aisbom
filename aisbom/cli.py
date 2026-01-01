@@ -17,8 +17,39 @@ import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
 
+import threading
+from .version_check import check_latest_version
+
 app = typer.Typer()
 console = Console()
+
+# Thread-safe storage for update checks
+update_result = {"version": None}
+
+def run_version_check_wrapper():
+    """Wrapper to run version check and store result."""
+    update_result["version"] = check_latest_version()
+
+def _check_update_status():
+    """Checks if update thread finished and prints message if needed."""
+    # We join with a tiny timeout to see if it's done without blocking
+    # Since we call this at the END of the command, the network request likely finished.
+    # If it's still hung, we skip showing the message to avoid delay.
+    # Note: Threads in Python are daemon by default? No, we need to set daemon=True
+    # so it doesn't block exit if network hangs. But here we just want to check results.
+    if update_result["version"]:
+        ver = update_result["version"]
+        try:
+             curr = importlib.metadata.version("aisbom-cli")
+        except:
+             curr = "unknown"
+             
+        console.print(Panel(
+            f"💡 [bold yellow]Update Available:[/bold yellow] You are on v{curr}. v{ver} is available.\n"
+            f"Run [bold white]pip install --upgrade aisbom-cli[/bold white] to update.",
+            border_style="yellow",
+            expand=False
+        ))
 
 class OutputFormat(str, Enum):
     JSON = "json"
@@ -71,6 +102,10 @@ def scan(
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
     """
+    # Start background check
+    t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+    t.start()
+
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
 
     # 1. Run the Logic
@@ -220,6 +255,9 @@ def scan(
     elif exit_code == 1:
         console.print("[bold yellow]Errors encountered during scan.[/bold yellow] Exiting with code 1.")
 
+    # Check update status before exiting
+    _check_update_status()
+
     # Non-zero exit codes for CI/CD when high risk or errors are present
     raise typer.Exit(code=exit_code)
 
@@ -293,6 +331,10 @@ def diff(
     """
     Compare two SBOM files (CycloneDX JSON) and detect drift in risks, licenses, dependencies, or model hashes.
     """
+    # Start background check
+    t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+    t.start()
+
     path_old = Path(old_file)
     path_new = Path(new_file)
 
@@ -388,6 +430,8 @@ def diff(
         raise typer.Exit(code=1)
     
     console.print("\n[bold green]Success: No critical regression detected.[/bold green]")
+    
+    _check_update_status()
 
 if __name__ == "__main__":
     app()
