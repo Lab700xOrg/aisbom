@@ -32,6 +32,33 @@ def create_mock_malware_file(target_dir: Path):
     
     return output_path
 
+# --- 2. BROKEN MIGRATION LOGIC (LINT FAILURE) ---
+class MockCustomLayer(object):
+    """
+    A harmless custom class. It is NOT malware.
+    However, it will cause torch.load(weights_only=True) to fail
+    because it is not in the default PyTorch allowlist.
+    """
+    def __init__(self):
+        self.config = {"layer_type": "ProprietaryAttention"}
+
+def create_mock_broken_file(target_dir: Path):
+    """Generates a PyTorch file that is SAFE but fails Strict Mode."""
+    # Pickle a custom class
+    payload_bytes = pickle.dumps(MockCustomLayer(), protocol=2)
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('archive/data.pkl', payload_bytes)
+        z.writestr('archive/version', '3')
+
+    output_path = target_dir / "mock_broken.pt"
+    with open(output_path, "wb") as f:
+        f.write(zip_buffer.getvalue())
+
+    return output_path
+
+
 # --- LICENSE RISK LOGIC ---
 def create_mock_restricted_file(target_dir: Path):
     """Generates a Safetensors file with Non-Commercial metadata."""
