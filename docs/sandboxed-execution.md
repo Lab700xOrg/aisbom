@@ -7,7 +7,7 @@ AIsbom provides a "Defense in Depth" strategy for handling untrusted AI models. 
 1.  **Linter (Static):** Use `aisbom scan --lint` to inspect the file structure without loading it.
 2.  **Sandbox (Runtime):** If you MUST load the model, do it inside an isolated ephemeral environment.
 
-## 📦 Runtime Sandbox (Recommended)
+## Runtime Sandbox (Recommended)
 
 We recommend using **[amazing-sandbox](https://github.com/amazing-open-source/amazing-sandbox)**, wrapped via `uvx` for ephemeral execution. This ensures that even if a model contains RCE (Remote Code Execution), it cannot persist or access your host filesystem.
 
