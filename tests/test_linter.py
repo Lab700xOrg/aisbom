@@ -19,7 +19,10 @@ def test_safe_pickle():
     data = pickle.dumps(datetime.datetime.now())
     linter = MigrationLinter()
     errors = linter.lint_pickle(data)
-    assert len(errors) == 0, f"Expected 0 errors for datetime, got: {errors}"
+    # datetime uses REDUCE, so we expect a WARNING now.
+    # But we should have 0 ERRORS.
+    real_errors = [e for e in errors if e.severity == "ERROR"]
+    assert len(real_errors) == 0, f"Expected 0 errors for datetime, got: {real_errors}"
 
 def test_custom_class_import():
     """Test that a custom class triggers a GLOBAL error."""
@@ -44,6 +47,18 @@ def test_reduce_rce():
     # But now we only flag the unsafe GLOBAL (posix.system)
     found = any("Custom Class Import Detected" in e.message and "posix" in e.message for e in errors)
     assert found, f"Expected unsafe global error for RCE, got: {errors}"
+
+def test_reduce_warning():
+    """Test that REDUCE opcode triggers a warning."""
+    # RCE() uses __reduce__, so it will emit REDUCE.
+    # We also expect the GLOBAL error from os.system, but we specifically want to check for the REDUCE warning.
+    data = pickle.dumps(RCE())
+    linter = MigrationLinter()
+    errors = linter.lint_pickle(data)
+    
+    # Look for the specific REDUCE warning
+    reduce_warnings = [e for e in errors if "Arbitrary Execution Risk" in e.message and e.severity == "WARNING"]
+    assert len(reduce_warnings) > 0, f"Expected REDUCE warning, found: {errors}"
 
 
 def test_linter_global_opcode():

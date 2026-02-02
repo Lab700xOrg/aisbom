@@ -96,8 +96,16 @@ class MigrationLinter:
                              name = parts[-1] if len(parts) > 1 else "?"
                              self._check_import(module, name, pos, errors)
                 
-                # Rule 2: Remove REDUCE check
-                # weights_only=True allows REDUCE. It only restricts the GLOBALs used.
+                # Rule 2: Warn on REDUCE / BUILD
+                # weights_only=True allows REDUCE only if the function being reduced is a safe global.
+                # However, it represents arbitrary execution risk (constructor calls).
+                elif opcode.name in ('REDUCE', 'BUILD', 'INST', 'OBJ'):
+                     errors.append(LintError(
+                         offset=pos,
+                         message=f"Arbitrary Execution Risk: Found {opcode.name} opcode.",
+                         severity="WARNING",
+                         hint="Model uses dynamic object construction (`__reduce__`). This is allowed by `weights_only=True` ONLY for safe globals, but is risky."
+                     ))
                 
                 # We reset stack on STOP or other clear boundaries? No, valid pickle is one stream.
                 
