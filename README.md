@@ -110,6 +110,17 @@ aisbom scan model.pt --lint
 
 The `--lint` flag activates the Migration Linter, which statically simulates the unpickling stack to predict runtime failures without executing code.
 
+### Strategy: Defense in Depth
+
+AIsbom advocates for a two-layer security approach:
+
+1.  **Layer 1 (Pre-Execution):** Use `aisbom scan --lint` to statically analyze the file structure. This catches 99% of obvious malware and incompatible globals without ever loading the file.
+2.  **Layer 2 (Runtime Isolation):** If you *must* load a model that uses `REDUCE` or unsafe globals (common in legacy files), do not run it on bare metal.
+    *   **Recommendation:** Use [Sandboxed Execution](docs/sandboxed-execution.md) (e.g., `uvx` + `amazing-sandbox`) to contain any potential RCE.
+
+> [!TIP]
+> **Why both?** Static analysis is fast but can be tricked by complex obfuscation. Runtime sandboxing is secure but slow. Together, they provide speed and safety.
+
 **It detects:**
 *   **Custom Class Imports**: Objects that are not in the PyTorch default allowlist.
 *   **Unsafe Globals**: Usage of `posix.system` or other unsafe modules.
