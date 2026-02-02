@@ -11,44 +11,27 @@ AIsbom provides a "Defense in Depth" strategy for handling untrusted AI models. 
 
 We recommend using **[amazing-sandbox](https://github.com/amazing-open-source/amazing-sandbox)**, wrapped via `uvx` for ephemeral execution. This ensures that even if a model contains RCE (Remote Code Execution), it cannot persist or access your host filesystem.
 
-### Usage with `uvx`
+### Usage with Wrapper Script
 
-You can use `uv` (the fast Python package manager) to spin up a temporary sandbox environment.
+We provide a helper script to simplify the `uvx` command:
 
 ```bash
-# 1. Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Run your model loader inside the sandbox
-uvx --from amazing-sandbox asb run -- python load_model.py
+# Run any command inside the sandbox
+./scripts/asb-wrapper.sh <command>
 ```
 
 ### Example: Safely Loading a Suspicious Model
 
-Create a loader script that attempts to load the model using `weights_only=True` but falls back to safe unpickling.
+We include `scripts/safe_loader.py` as a template. It loads a model with `weights_only=False` (unsafe on host, but contained in sandbox) to verify if it works or to extract data.
 
-```python
-# load_model.py
-import torch
-import sys
-
-model_path = "suspicious_model.pt"
-
-try:
-    print(f"Loading {model_path} in SANDBOX...")
-    # Attempt load. If it contains malware, it executes here.
-    # But because we are in 'asb', network and filesystem are restricted.
-    model = torch.load(model_path, weights_only=False) 
-    print("Model loaded successfully (but be careful!)")
-except Exception as e:
-    print(f"Load failed: {e}")
-```
-
-Then execute it:
+**How to use:**
 
 ```bash
-uvx --from amazing-sandbox asb run -- python load_model.py
+# usage: ./scripts/asb-wrapper.sh python scripts/safe_loader.py <model_path>
+./scripts/asb-wrapper.sh python scripts/safe_loader.py my_legacy_model.pt
 ```
+
+If the model is malicious, the malware executes **inside** the ephemeral container, protecting your laptop.
 
 ## Why Sandbox?
 
