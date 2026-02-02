@@ -9,7 +9,7 @@ AIsbom provides a "Defense in Depth" strategy for handling untrusted AI models. 
 
 ## Runtime Sandbox (Recommended)
 
-We recommend using **[amazing-sandbox](https://github.com/amazing-open-source/amazing-sandbox)**, wrapped via `uvx` for ephemeral execution. This ensures that even if a model contains RCE (Remote Code Execution), it cannot persist or access your host filesystem.
+We recommend using **[amazing-sandbox](https://github.com/ashishb/amazing-sandbox)**, wrapped via `uvx` for ephemeral execution. This ensures that even if a model contains RCE (Remote Code Execution), it cannot persist or access your host filesystem.
 
 ### Usage with Wrapper Script
 
