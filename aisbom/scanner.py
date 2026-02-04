@@ -20,9 +20,10 @@ RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 from aisbom.remote import RemoteStream, resolve_huggingface_repo
 
 class DeepScanner:
-    def __init__(self, root_path: str, strict_mode: bool = False):
+    def __init__(self, root_path: str, strict_mode: bool = False, lint: bool = False):
         self.root_path = root_path
         self.strict_mode = strict_mode
+        self.lint = lint
         self.artifacts = []
         self.dependencies = []
         self.errors = []
@@ -130,6 +131,17 @@ class DeepScanner:
                         with z.open(main_pkl) as f:
                             content = f.read(10 * 1024 * 1024) 
                             threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
+                            
+                            # LINT CHECK (Migration Linter)
+                            if self.lint:
+                                from aisbom.linter import MigrationLinter
+                                linter = MigrationLinter()
+                                lint_errors = linter.lint_pickle(content)
+                                if lint_errors:
+                                    meta["details"]["lint_report"] = [
+                                        {"msg": e.message, "hint": e.hint, "severity": e.severity} 
+                                        for e in lint_errors
+                                    ]
 
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
@@ -138,7 +150,7 @@ class DeepScanner:
                     else:
                         meta["risk_level"] = "LOW"
                         
-                    meta["details"] = {"internal_files": len(files), "threats": threats}
+                    meta["details"].update({"internal_files": len(files), "threats": threats})
             else:
                  # Handle text-based .pth config files to avoid false positives
                  try:
@@ -155,8 +167,38 @@ class DeepScanner:
                          meta["type"] = "configuration"
                          meta["framework"] = "Python Path Config"
                      else:
+                         # Likely raw pickle (Legacy PyTorch 1.5-)
+                         if self.lint:
+                             stream.seek(0)
+                             content = stream.read()
+                             print(f"DEBUG: Linting {len(content)} bytes from {name}")
+                             try:
+                                 from aisbom.linter import MigrationLinter
+                                 lint_errors = MigrationLinter().lint_pickle(content)
+                                 print(f"DEBUG: Found {len(lint_errors)} errors")
+                                 if lint_errors:
+                                     meta["details"]["lint_report"] = [
+                                        {"msg": e.message, "hint": e.hint, "severity": e.severity} 
+                                        for e in lint_errors
+                                     ]
+                             except Exception as e:
+                                 print(f"DEBUG: Linter failed: {e}")
+                                 meta["details"]["lint_error"] = str(e)
                          meta["risk_level"] = "CRITICAL (Legacy Binary)"
                  except Exception:
+                     if self.lint:
+                         stream.seek(0)
+                         content = stream.read()
+                         try:
+                             from aisbom.linter import MigrationLinter
+                             lint_errors = MigrationLinter().lint_pickle(content)
+                             if lint_errors:
+                                 meta["details"]["lint_report"] = [
+                                    {"msg": e.message, "hint": e.hint, "severity": e.severity} 
+                                    for e in lint_errors
+                                 ]
+                         except Exception as e:
+                             meta["details"]["lint_error"] = str(e)
                      meta["risk_level"] = "CRITICAL (Legacy Binary)"
             if local_path and not stream.closed:
                 stream.close()
