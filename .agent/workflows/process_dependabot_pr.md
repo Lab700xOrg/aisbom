@@ -57,27 +57,43 @@ description: Process and merge a Dependabot PR after verification. Usage: Replac
     poetry run aisbom scan . --no-fail-on-risk --format markdown
     ```
 
-12. Checkout Main
+12. Smoke Test #8: Drift Detection (Diff)
+    ```bash
+    poetry run aisbom diff demo_data/sbom_baseline.json demo_data/sbom_drifted.json --no-fail-on-risk-increase
+    ```
+
+13. Smoke Test #9: Migration Linting
+    ```bash
+    poetry run aisbom scan mock_broken.pt --lint --no-fail-on-risk
+    ```
+
+14. Smoke Test #10: Compliance Export (SPDX & CycloneDX)
+    ```bash
+    poetry run aisbom scan . --format spdx --output sbom.spdx.json
+    poetry run aisbom scan . --format json --output sbom.json
+    ```
+
+15. Checkout Main
     ```bash
     git checkout main
     ```
 
-13. Merge PR
+16. Merge PR
     ```bash
     git merge pr-[PR_ID]
     ```
 
-14. Push Changes (Requires Auth)
+17. Push Changes (Requires Auth)
     ```bash
     git push origin main
     ```
 
-15. Verify Remote CI
+18. Verify Remote CI
     ```bash
     python3 .agent/scripts/check_latest_ci.py
     ```
 
-16. Cleanup Artifacts
+19. Cleanup Artifacts
     ```bash
-    rm -f mock_malware.pt mock_restricted.safetensors mock_restricted.gguf mock_broken.pt
+    rm -f mock_malware.pt mock_restricted.safetensors mock_restricted.gguf mock_broken.pt sbom.spdx.json sbom.json demo_data/sbom_baseline.json demo_data/sbom_drifted.json
     ```
