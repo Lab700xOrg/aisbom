@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "aisbom-cli"
-version = "0.4.2"
+version = "0.6.0"
 description = "An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for Machine Learning models."
 authors = ["Ajoy L <lab700xdev@gmail.com>"]
 readme = "README.md"
@@ -11,9 +11,9 @@ urls = { "Homepage" = "https://www.aisbom.io/" }
 python = "^3.11"
 typer = {extras = ["all"], version = ">=0.12.5,<0.22.0"}
 rich = ">=13.7.1,<15.0.0"
-cyclonedx-python-lib = "^8.5.0"
+cyclonedx-python-lib = ">=8.5,<12.0"
 pip-requirements-parser = "^32.0.1"
-click = "<8.2.0"
+click = "<8.4.0"
 spdx-tools = "^0.8.3"
 packaging = "^24.0"
 
@@ -21,7 +21,7 @@ packaging = "^24.0"
 version = "^2.32.3"
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3.3,<10.0.0"
-pytest-cov = "^6.0.0"
+pytest-cov = ">=6,<8"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
