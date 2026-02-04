@@ -79,5 +79,5 @@ description: Process and merge a Dependabot PR after verification. Usage: Replac
 
 16. Cleanup Artifacts
     ```bash
-    rm -f mock_malware.pt mock_restricted.safetensors mock_restricted.gguf
+    rm -f mock_malware.pt mock_restricted.safetensors mock_restricted.gguf mock_broken.pt
     ```
