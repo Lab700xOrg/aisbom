@@ -101,6 +101,43 @@ This will report **any** import that is not in the safe-list.
 **Allowed Builtins**: `dict`, `list`, `set`, `tuple`, `int`, `float`, `str`, `bytes`, etc., etc.).
 *   Flags *any* unknown global import as `CRITICAL`.
 
+### Migration Readiness (PyTorch weights_only=True)
+Prepare your models for the upcoming PyTorch security defaults. PyTorch 2.6+ will default to `weights_only=True`, which breaks many legacy models.
+
+```bash
+aisbom scan model.pt --lint
+```
+
+The `--lint` flag activates the Migration Linter, which statically simulates the unpickling stack to predict runtime failures without executing code.
+
+### Strategy: Defense in Depth
+
+AIsbom advocates for a two-layer security approach:
+
+1.  **Layer 1 (Pre-Execution):** Use `aisbom scan --lint` to statically analyze the file structure. This catches 99% of obvious malware and incompatible globals without ever loading the file.
+2.  **Layer 2 (Runtime Isolation):** If you *must* load a model that uses `REDUCE` or unsafe globals (common in legacy files), do not run it on bare metal.
+    *   **Recommendation:** Use [Sandboxed Execution](docs/sandboxed-execution.md) (e.g., `uvx` + `amazing-sandbox`) to contain any potential RCE.
+
+> [!TIP]
+> **Why both?** Static analysis is fast but can be tricked by complex obfuscation. Runtime sandboxing is secure but slow. Together, they provide speed and safety.
+
+**It detects:**
+*   **Custom Class Imports**: Objects that are not in the PyTorch default allowlist.
+*   **Unsafe Globals**: Usage of `posix.system` or other unsafe modules.
+
+**Output:**
+```text
+🛡️  Migration Readiness (weights_only=True)
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ File           ┃ Issue                         ┃ Recommendation                         ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ mock_broken.pt │ Custom Class Import Detected: │ Module 'aisbom' is not in PyTorch      │
+│                │ aisbom.mock.Layer             │ default allowlist. Use                 │
+│                │                               │ `torch.serialization.add_safe_globals` │
+│                │                               │ .                                      │
+└────────────────┴───────────────────────────────┴────────────────────────────────────────┘
+```
+
 ### Markdown Reporting (CI/CD)
 Generate a GitHub-flavored Markdown report suitable for Pull Request comments.
 
@@ -178,13 +215,13 @@ Run this command to create a mock "Pickle Bomb" and a "Restricted License" model
 ```bash
 aisbom generate-test-artifacts
 ```
-*Result: Files named `mock_malware.pt`, `mock_restricted.safetensors`, and `mock_restricted.gguf` are created.*
+*Result: Files named `mock_malware.pt`, `mock_restricted.safetensors`, `mock_restricted.gguf`, and `mock_broken.pt` are created.*
 
 **3. Scan them:**
 ```bash
 aisbom scan .
 ```
-*Result: You will see `mock_malware.pt` flagged as **CRITICAL** and (`mock_restricted.safetensors`, `mock_restricted.gguf`) as **LEGAL RISK**.*
+*Result: You will see `mock_malware.pt` flagged as **CRITICAL**, legal risks flagged, and if you run with `--lint`, `mock_broken.pt` will appear in the Migration Readiness table.*
 
 ---
 

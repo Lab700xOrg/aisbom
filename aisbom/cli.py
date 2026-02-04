@@ -11,7 +11,7 @@ from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
-from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms
+from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms, create_mock_broken_file
 from pathlib import Path
 import importlib.metadata
 from .scanner import DeepScanner
@@ -97,6 +97,7 @@ def scan(
     spdx_version: str = typer.Option("2.3", help="SPDX version (2.3 or 3.0)", case_sensitive=False, rich_help_panel="Advanced Options"),
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
     strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
+    lint: bool = typer.Option(False, help="Enable Migration Linter (checks for weights_only=True compatibility)"),
     format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report, SPDX for Compliance)")
 ):
     """
@@ -108,8 +109,9 @@ def scan(
 
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
 
+    
     # 1. Run the Logic
-    scanner = DeepScanner(target, strict_mode=strict)
+    scanner = DeepScanner(target, strict_mode=strict, lint=lint)
     if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://") or target.startswith("hf://")):
         with console.status("[cyan]Resolving remote repository...[/cyan]"):
             results = scanner.scan()
@@ -157,6 +159,27 @@ def scan(
         console.print(table)
     else:
         console.print("[yellow]No AI models found.[/yellow]")
+
+    # LINT OUTPUT (Migration Report)
+    lint_failures = [a for a in results['artifacts'] if a.get('details', {}).get('lint_report')]
+    if lint_failures:
+        console.print("\n[bold white]🛡️  Migration Readiness (weights_only=True)[/bold white]")
+        lint_table = Table(show_header=True, header_style="bold magenta")
+        lint_table.add_column("File", style="cyan")
+        lint_table.add_column("Issue", style="red")
+        lint_table.add_column("Recommendation", style="yellow")
+        
+        for art in lint_failures:
+            report = art['details']['lint_report']
+            for issue in report:
+                lint_table.add_row(
+                    art['name'],
+                    issue['msg'],
+                    issue['hint']
+                )
+        console.print(lint_table)
+        console.print("[dim]Use --no-lint to disable this check.[/dim]\n")
+
 
     if results['dependencies']:
         console.print(f"\n📦 Found [bold]{len(results['dependencies'])}[/bold] Python libraries.")
@@ -319,6 +342,10 @@ def generate_test_artifacts(
     except Exception as e:
         console.print(f"  [red]• Error creating diff demos:[/red] {e}")
 
+    # 5. Create Broken Migration (The new Linter use case)
+    broken_path = create_mock_broken_file(target_path)
+    console.print(f"  [magenta]• Created:[/magenta] {broken_path.name} (Safe, but fails weights_only=True)")
+    
     console.print("\n[bold green]Done.[/bold green] Now run: [code]aisbom scan .[/code]")
 
 
