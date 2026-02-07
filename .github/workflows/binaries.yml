@@ -16,7 +16,7 @@ jobs:
         include:
           - os: ubuntu-latest
             asset_name: aisbom-linux-amd64
-          - os: macos-13 # Intel
+          - os: macos-12 # Intel (Downgraded from 13 due to runner availability)
             asset_name: aisbom-macos-amd64
           - os: macos-14 # Silicon (M1/M2/M3)
             asset_name: aisbom-macos-arm64
