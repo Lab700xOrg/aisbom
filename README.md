@@ -9,6 +9,8 @@
 - **SPDX 2.3**: Standard SBOM format for industry compliance.
 - **CycloneDX**: Supported (Default output format).
 
+Install via **Pip** or download our **standalone, air-gapped binary** for USB/offline audits.
+
 Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
 ![AIsbom Demo](assets/aisbom_demo.gif)
@@ -25,13 +27,30 @@ pip install aisbom-cli
 ```
 *Note: The package name is `aisbom-cli`, but the command you run is `aisbom`.*
 
-### 1a. Standalone Binary (No Python Required)
-For air-gapped environments or "USB Test" scenarios where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/tag/v0.7.0).
+### 1a. Standalone Binary (Air-Gapped)
+For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/tag/v0.7.0).
+
+**Available Binaries:**
+*   `aisbom-linux-amd64` (Linux x86_64)
+*   `aisbom-macos-amd64` (macOS Intel)
+*   `aisbom-macos-arm64` (macOS Silicon M1/M2/M3)
+
+#### Installation & Troubleshooting (macOS)
+Due to Apple's strict security policies for unsigned binaries, you must explicitly allow the application to run.
 
 ```bash
-# Linux / macOS
-./aisbom scan .
+# 1. Make the binary executable
+chmod +x aisbom-macos-*
+
+# 2. Remove the "Quarantine" attribute (Fixes "Unidentified Developer" error)
+xattr -d com.apple.quarantine aisbom-macos-*
+
+# 3. Run it
+./aisbom-macos-arm64 --help
 ```
+
+*Why is `xattr` needed?*
+macOS tags downloaded files with a "quarantine" attribute. Since our open-source binary is not code-signed with an Apple Developer ID, Gatekeeper will block it by default. The `xattr -d` command removes this tag, allowing the binary to execute on your machine.
 *   **Zero Dependencies**: Everything is bundled.
 *   **Portable**: Runs on bare metal servers.
 
