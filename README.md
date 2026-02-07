@@ -25,6 +25,16 @@ pip install aisbom-cli
 ```
 *Note: The package name is `aisbom-cli`, but the command you run is `aisbom`.*
 
+### 1a. Standalone Binary (No Python Required)
+For air-gapped environments or "USB Test" scenarios where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases).
+
+```bash
+# Linux / macOS
+./aisbom scan .
+```
+*   **Zero Dependencies**: Everything is bundled.
+*   **Portable**: Runs on bare metal servers.
+
 ### 2. Run a Local Scan
 Point it at any directory containing your ML project. It scans recursively for requirements files AND binary model artifacts.
 
