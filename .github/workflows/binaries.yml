@@ -16,10 +16,10 @@ jobs:
         include:
           - os: ubuntu-latest
             asset_name: aisbom-linux-amd64
-            content_type: application/octet-stream
-          - os: macos-latest
+          - os: macos-13 # Intel
             asset_name: aisbom-macos-amd64
-            content_type: application/octet-stream
+          - os: macos-14 # Silicon (M1/M2/M3)
+            asset_name: aisbom-macos-arm64
 
     steps:
       - name: Checkout code
