@@ -12,7 +12,6 @@ jobs:
     name: Build binary on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-    strategy:
       matrix:
         include:
           - os: ubuntu-latest
