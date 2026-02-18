@@ -28,7 +28,7 @@ pip install aisbom-cli
 *Note: The package name is `aisbom-cli`, but the command you run is `aisbom`.*
 
 ### 1a. Standalone Binary (Air-Gapped)
-For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/tag/v0.7.0).
+For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/latest).
 
 **Available Binaries:**
 *   `aisbom-linux-amd64` (Linux x86_64)
