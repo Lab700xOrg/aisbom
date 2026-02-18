@@ -30,6 +30,8 @@ pip install aisbom-cli
 ### 1a. Standalone Binary (Air-Gapped)
 For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/latest).
 
+> **📚 Guide:** [How to Audit Air-Gapped / Offline Systems](docs/air-gapped-guide.md)
+
 **Available Binaries:**
 *   `aisbom-linux-amd64` (Linux x86_64)
 *   `aisbom-macos-amd64` (macOS Intel)
