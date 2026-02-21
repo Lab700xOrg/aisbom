@@ -9,7 +9,7 @@ repository = "https://github.com/Lab700xOrg/aisbom"
 urls = { "Homepage" = "https://www.aisbom.io/" }
 [tool.poetry.dependencies]
 python = "^3.11"
-typer = {extras = ["all"], version = ">=0.12.5,<0.22.0"}
+typer = {extras = ["all"], version = ">=0.12.5,<0.25.0"}
 rich = ">=13.7.1,<15.0.0"
 cyclonedx-python-lib = ">=8.5,<12.0"
 pip-requirements-parser = "^32.0.1"
