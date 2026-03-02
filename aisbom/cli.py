@@ -262,12 +262,10 @@ def scan(
         except importlib.metadata.PackageNotFoundError:
             ver = "unknown"
 
-        viewer_url = f"https://www.aisbom.io/viewer.html?utm_source=cli&utm_medium=terminal&utm_campaign=scan_output&utm_version={ver}"
-
         console.print(Panel(
             f"[bold white]📊 Visualize this report:[/bold white]\n"
             f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
-            f"👉 [link={viewer_url}]Open Secure Viewer (aisbom.io)[/link]",
+            f"> View detailed artifact visualizer: https://aisbom.io/viewer",
             border_style="blue",
             expand=False
         ))

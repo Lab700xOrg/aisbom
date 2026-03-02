@@ -4,7 +4,7 @@ import importlib.metadata
 import requests
 from packaging.version import parse as parse_version
 
-API_URL = "https://api.aisbom.io/v1/version"
+API_URL = "https://api.aisbom.io/v1/version?utm_source=cli&utm_medium=terminal"
 
 def check_latest_version() -> str | None:
     """
