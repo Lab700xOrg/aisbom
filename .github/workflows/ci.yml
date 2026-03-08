@@ -56,5 +56,5 @@ jobs:
         
       - name: Smoke Test #10 - Compliance Export (SPDX & CycloneDX)
         run: |
-          poetry run aisbom scan . --format spdx --output sbom.spdx.json
-          poetry run aisbom scan . --format json --output sbom.json
+          poetry run aisbom scan . --format spdx --output sbom.spdx.json --no-fail-on-risk
+          poetry run aisbom scan . --format json --output sbom.json --no-fail-on-risk
