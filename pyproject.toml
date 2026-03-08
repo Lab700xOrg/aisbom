@@ -15,7 +15,7 @@ cyclonedx-python-lib = ">=8.5,<12.0"
 pip-requirements-parser = "^32.0.1"
 click = "<8.4.0"
 spdx-tools = "^0.8.3"
-packaging = ">=24,<26"
+packaging = ">=24,<27"
 
 [tool.poetry.dependencies.requests]
 version = "^2.32.3"
