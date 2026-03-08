@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Verification Suite
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install poetry
+          poetry install
+          
+      - name: Smoke Test #1 - Generate test artifacts
+        run: poetry run aisbom generate-test-artifacts
+        
+      - name: Run Automated Tests
+        run: poetry run pytest
+        
+      - name: Smoke Test #2 - Check Coverage
+        run: poetry run pytest --cov=aisbom --cov-fail-under=85
+        
+      - name: Smoke Test #3 - Info
+        run: poetry run aisbom info
+        
+      - name: Smoke Test #4 - Standard Scan
+        run: poetry run aisbom scan demo_data --no-fail-on-risk --format markdown
+        
+      - name: Smoke Test #5 - Strict Mode Scan
+        run: poetry run aisbom scan demo_data --strict --no-fail-on-risk --format markdown
+        
+      - name: Smoke Test #6 - Remote Scan (HuggingFace)
+        run: poetry run aisbom scan hf://google-bert/bert-base-uncased --no-fail-on-risk --format markdown
+        
+      - name: Smoke Test #7 - Scan Current Directory (Artifacts)
+        run: poetry run aisbom scan . --no-fail-on-risk --format markdown
+        
+      - name: Smoke Test #8 - Drift Detection (Diff)
+        run: poetry run aisbom diff demo_data/sbom_baseline.json demo_data/sbom_drifted.json --no-fail-on-risk-increase
+        
+      - name: Smoke Test #9 - Migration Linting
+        run: poetry run aisbom scan mock_broken.pt --lint --no-fail-on-risk
+        
+      - name: Smoke Test #10 - Compliance Export (SPDX & CycloneDX)
+        run: |
+          poetry run aisbom scan . --format spdx --output sbom.spdx.json
+          poetry run aisbom scan . --format json --output sbom.json
