@@ -18,7 +18,10 @@ from .scanner import DeepScanner
 from .diff import SBOMDiff
 
 import threading
+import time
+import uuid
 from .version_check import check_latest_version
+from . import telemetry
 
 app = typer.Typer()
 console = Console()
@@ -50,6 +53,56 @@ def _check_update_status():
             border_style="yellow",
             expand=False
         ))
+
+
+def _classify_target(target: str) -> str:
+    """Bucket the scan target into a category label for telemetry."""
+    if target.startswith("hf://"):
+        return "huggingface"
+    if target.startswith("https://"):
+        return "https"
+    if target.startswith("http://"):
+        return "http"
+    return "local"
+
+
+def _summarize_model_format(artifacts: list[dict]) -> str:
+    """Reduce per-artifact `framework` values to a single label.
+
+    Returns 'none' if no artifacts, the framework name if all match,
+    or 'mixed' if multiple distinct frameworks were found."""
+    if not artifacts:
+        return "none"
+    formats = {(a.get("framework") or "unknown").lower() for a in artifacts}
+    if len(formats) == 1:
+        return formats.pop()
+    return "mixed"
+
+
+def _maybe_emit_install_event() -> threading.Thread | None:
+    """Fire cli_install_first_seen on the very first invocation per machine.
+
+    Suppressed in CI (config dirs are ephemeral there) and when the home
+    config dir isn't writable. Self-gates via the existence of
+    ~/.aisbom/config.json — once that file is created, this is a no-op."""
+    if telemetry.is_ci():
+        return None
+    home = telemetry.get_config_dir()
+    if home is None:
+        return None
+    if (home / "config.json").exists():
+        return None
+    # post_event() will internally call get_or_init_config() which writes
+    # config.json, so the next invocation sees it and skips this branch.
+    return telemetry.post_event("cli_install_first_seen", {})
+
+
+def _flush_telemetry_threads(threads: list[threading.Thread | None]) -> None:
+    """Wait briefly for in-flight telemetry POSTs to flush before exit."""
+    for t in threads:
+        if t is not None:
+            t.join(timeout=2.0)
+
 
 class OutputFormat(str, Enum):
     JSON = "json"
@@ -109,14 +162,30 @@ def scan(
 
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
 
-    
+    # Telemetry: per-invocation scan_id groups all events from this scan into
+    # one GA4 session. Started here so an early failure still has an id.
+    scan_id = uuid.uuid4().hex
+    t_start = time.monotonic()
+    telemetry_threads: list[threading.Thread | None] = [
+        _maybe_emit_install_event(),
+    ]
+
     # 1. Run the Logic
-    scanner = DeepScanner(target, strict_mode=strict, lint=lint)
-    if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://") or target.startswith("hf://")):
-        with console.status("[cyan]Resolving remote repository...[/cyan]"):
+    try:
+        scanner = DeepScanner(target, strict_mode=strict, lint=lint)
+        if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://") or target.startswith("hf://")):
+            with console.status("[cyan]Resolving remote repository...[/cyan]"):
+                results = scanner.scan()
+        else:
             results = scanner.scan()
-    else:
-        results = scanner.scan()
+    except Exception as e:
+        err_thread = telemetry.post_event(
+            "cli_error",
+            {"command": "scan", "error_type": type(e).__name__},
+            scan_id=scan_id,
+        )
+        _flush_telemetry_threads(telemetry_threads + [err_thread])
+        raise
     # Track highest risk for exit code purposes (CI friendly)
     def _risk_score(label: str) -> int:
         text = (label or "").upper()
@@ -134,7 +203,40 @@ def scan(
         exit_code = max(exit_code, 1)
     if fail_on_risk and highest_risk >= 3:
         exit_code = 2
-    
+
+    # Telemetry: fire cli_scan plus any conditional follow-ups now that the
+    # scan completed and risk is known. Non-blocking; flushed before exit.
+    _risk_label = {3: "critical", 2: "medium", 1: "low", 0: "none"}.get(highest_risk, "unknown")
+    scan_duration_ms = int((time.monotonic() - t_start) * 1000)
+    scan_params = {
+        "target_type": _classify_target(target),
+        "model_format": _summarize_model_format(results.get("artifacts", [])),
+        "risk_level_max": _risk_label,
+        "scan_duration_ms": str(scan_duration_ms),
+        "file_count": str(len(results.get("artifacts", []))),
+        "parse_error_count": str(len(results.get("errors", []))),
+        "strict_mode": "true" if strict else "false",
+    }
+    telemetry_threads.append(
+        telemetry.post_event("cli_scan", scan_params, scan_id=scan_id)
+    )
+    if highest_risk >= 3:
+        critical_count = sum(
+            1 for a in results.get("artifacts", [])
+            if "CRITICAL" in (a.get("risk_level") or "").upper()
+        )
+        telemetry_threads.append(
+            telemetry.post_event(
+                "cli_scan_critical_found",
+                {"critical_count": str(critical_count)},
+                scan_id=scan_id,
+            )
+        )
+    if strict:
+        telemetry_threads.append(
+            telemetry.post_event("cli_strict_mode", {}, scan_id=scan_id)
+        )
+
     # 2. Render Results (UI)
     if results['artifacts']:
         table = Table(title="🧠 AI Model Artifacts Found")
@@ -279,6 +381,9 @@ def scan(
     # Check update status before exiting
     _check_update_status()
 
+    # Flush in-flight telemetry POSTs so events aren't lost on exit.
+    _flush_telemetry_threads(telemetry_threads)
+
     # Non-zero exit codes for CI/CD when high risk or errors are present
     raise typer.Exit(code=exit_code)
 
@@ -360,11 +465,18 @@ def diff(
     t = threading.Thread(target=run_version_check_wrapper, daemon=True)
     t.start()
 
+    # Telemetry: per-invocation scan_id groups events into one GA4 session.
+    scan_id = uuid.uuid4().hex
+    telemetry_threads: list[threading.Thread | None] = [
+        _maybe_emit_install_event(),
+    ]
+
     path_old = Path(old_file)
     path_new = Path(new_file)
 
     if not path_old.exists() or not path_new.exists():
         console.print("[bold red]Error:[/bold red] One or both files do not exist.")
+        _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=1)
 
     try:
@@ -372,7 +484,21 @@ def diff(
         result = differ.compare()
     except Exception as e:
         console.print(f"[bold red]Error parsing SBOMs:[/bold red] {e}")
+        telemetry_threads.append(telemetry.post_event(
+            "cli_error",
+            {"command": "diff", "error_type": type(e).__name__},
+            scan_id=scan_id,
+        ))
+        _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=1)
+
+    # Telemetry: comparison succeeded; fire cli_diff with drift signal.
+    has_drift = bool(result.added or result.removed or result.changed)
+    telemetry_threads.append(telemetry.post_event(
+        "cli_diff",
+        {"has_drift": "true" if has_drift else "false"},
+        scan_id=scan_id,
+    ))
 
     console.print(Panel.fit(f"[bold cyan]Comparing[/bold cyan] {path_old.name} -> {path_new.name}"))
 
@@ -452,11 +578,13 @@ def diff(
 
     if fail_on_risk_increase and (result.risk_increased or result.hash_drifted):
         console.print("\n[bold red]FAILURE: Critical risk increase or hash drift detected![/bold red]")
+        _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=1)
-    
+
     console.print("\n[bold green]Success: No critical regression detected.[/bold green]")
-    
+
     _check_update_status()
+    _flush_telemetry_threads(telemetry_threads)
 
 if __name__ == "__main__":
     app()
