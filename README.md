@@ -230,6 +230,50 @@ AI models are not just text files; they are executable programs and IP assets.
 
 ---
 
+## Telemetry & Privacy
+
+AIsbom collects a small amount of anonymous usage telemetry — what model formats people scan, how often critical findings appear, whether scans run in CI — to help us prioritize what to build. We treat this with the same care we expect from any security tool. Read what we collect, then opt out if you'd rather not participate.
+
+### What's collected
+
+Per `aisbom scan`: `target_type` (the **bucket**: `local` / `huggingface` / `http` / `https` — never the actual path or URL), `model_format` (the file-type bucket), `risk_level_max`, `scan_duration_ms`, `file_count`, `parse_error_count`, `strict_mode`. A `cli_scan_critical_found` event with a count is added when at least one CRITICAL is found.
+
+Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
+
+On unhandled exceptions: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`) — never the message, traceback, or any file content.
+
+Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC address plus an app salt, truncated to 16 hex chars. Stored in `~/.aisbom/config.json`. Lets us see returning users without identifying anyone.
+
+### What's never collected
+
+File paths, directory contents, model names, target URLs, file hashes from your SBOMs, exception messages, tracebacks, or anything that could identify you, your project, or your organization.
+
+### Opt out
+
+Set `AISBOM_NO_TELEMETRY=1`. This wins over every other setting — telemetry will not fire and `~/.aisbom/config.json` will not be written.
+
+```bash
+# Permanent
+export AISBOM_NO_TELEMETRY=1
+
+# Single invocation
+AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
+```
+
+### Where the data goes
+
+Events POST to `https://api.aisbom.io/v1/telemetry` (a Cloudflare Worker we operate), which sanitizes the payload and forwards to Google Analytics 4 on the dedicated `cli.aisbom.io` data stream. We don't share, sell, or use this data for ad targeting.
+
+### CI environments
+
+When `CI=true` or `GITHUB_ACTIONS=true`, the `cli_install_first_seen` event is suppressed (containers are ephemeral and would otherwise spam the metric). Other events still fire, tagged `is_ci=true`.
+
+### Preview status
+
+In the current release, telemetry is **off by default** and only fires when `AISBOM_TELEMETRY_V2=1` is set. The next release will flip to default-on; `AISBOM_NO_TELEMETRY=1` is the opt-out and works in both states.
+
+---
+
 ## How to Verify (The "Trust Factor")
 
 Security tools require trust. **We do not distribute malicious binaries.**
