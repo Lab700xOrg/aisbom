@@ -11,6 +11,11 @@ updates:
         interval: "weekly"
       allow:
         - dependency-type: "direct"
+      ignore:
+        # demo_data/requirements.txt is a test fixture the scanner inspects
+        # during demos, not an actual project dependency. Pinning prevents
+        # Dependabot from proposing PRs that would mutate test data.
+        - dependency-name: "transformers"
       labels: ["deps", "poetry"]
       open-pull-requests-limit: 5
 
