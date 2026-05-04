@@ -22,6 +22,7 @@ import time
 import uuid
 from .version_check import check_latest_version
 from . import telemetry
+import requests
 
 app = typer.Typer()
 console = Console()
@@ -151,7 +152,9 @@ def scan(
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
     strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
     lint: bool = typer.Option(False, help="Enable Migration Linter (checks for weights_only=True compatibility)"),
-    format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report, SPDX for Compliance)")
+    format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report, SPDX for Compliance)"),
+    share: bool = typer.Option(False, help="Upload the SBOM to aisbom.io and generate a shareable viewer link"),
+    share_yes: bool = typer.Option(False, "--share-yes", help="Skip confirmation prompt when using --share")
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -344,6 +347,45 @@ def scan(
             f.write(outputter.output_as_string())
         
         console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
+
+        has_content = bool(results.get('artifacts') or results.get('dependencies'))
+        if share and has_content:
+            do_share = True
+            if not share_yes:
+                do_share = typer.confirm(
+                    "Upload this SBOM to aisbom.io to generate a shareable link?\n"
+                    "Data will be public to anyone with the link and expires in 30 days.", 
+                    default=False
+                )
+                if not do_share:
+                    console.print("[dim]Share cancelled.[/dim]")
+
+            if do_share:
+                with console.status("[cyan]Uploading SBOM to aisbom.io...[/cyan]"):
+                    try:
+                        json_str = outputter.output_as_string()
+                        res = requests.post(
+                            "https://aisbom.io/api/sbom-share",
+                            data=json_str,
+                            headers={
+                                "Content-Type": "application/json",
+                                "User-Agent": telemetry._build_user_agent()
+                            },
+                            timeout=15.0
+                        )
+                        res.raise_for_status()
+                        share_url = res.json().get("url")
+                        
+                        console.print(f"\n[bold green]✔ Share Link Created:[/bold green] [underline cyan]{share_url}[/underline cyan]")
+                        console.print("[dim]Anyone with this link can view this SBOM. Expires in 30 days.[/dim]")
+                        
+                        telemetry_threads.append(telemetry.post_event(
+                            "cli_share_created",
+                            {"has_share_yes": "true" if share_yes else "false"},
+                            scan_id=scan_id
+                        ))
+                    except Exception as e:
+                        console.print(f"\n[bold red]✖ Failed to create share link:[/bold red] {e}")
 
     elif format == OutputFormat.SPDX:
         from .spdx_gen import generate_spdx_sbom

@@ -80,6 +80,14 @@ You will see a combined Security & Legal risk assessment in your terminal:
 
 A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data will be generated in your current directory.
 
+### 4. Share Your SBOM (New!)
+You can instantly generate a secure, hosted, and shareable link for your SBOM by appending the `--share` flag to your scan.
+
+```bash
+aisbom scan ./my-project-folder --share
+```
+*Note: Your SBOM will be uploaded to aisbom.io and available publicly to anyone with the link for 30 days. You will be prompted for confirmation unless you also pass `--share-yes`.*
+
 ---
 
 ## Advanced Usage
@@ -237,6 +245,8 @@ AIsbom collects a small amount of anonymous usage telemetry — what model forma
 ### What's collected
 
 Per `aisbom scan`: `target_type` (the **bucket**: `local` / `huggingface` / `http` / `https` — never the actual path or URL), `model_format` (the file-type bucket), `risk_level_max`, `scan_duration_ms`, `file_count`, `parse_error_count`, `strict_mode`. A `cli_scan_critical_found` event with a count is added when at least one CRITICAL is found.
+
+If you explicitly use `--share`: the generated `sbom.json` document is uploaded to our servers and retained for 30 days to generate the shareable viewer link. A `cli_share_created` event is fired tracking whether `has_share_yes=true|false`.
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 
