@@ -243,3 +243,47 @@ def test_cli_scan_allows_success_when_fail_on_risk_disabled(tmp_path):
 
     assert result.exit_code == 0
     assert output_path.is_file()
+
+def test_cli_scan_share_prompts_and_aborts_if_no(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    import requests
+    
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    output_path = tmp_path / "sbom.json"
+    
+    mock_post = MagicMock()
+    monkeypatch.setattr(requests, "post", mock_post)
+    
+    # We pass 'N' to the prompt
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path), "--share", "--no-fail-on-risk"], input="N\n")
+    
+    assert "Upload this SBOM to aisbom.io" in result.stdout
+    assert "Share cancelled" in result.stdout
+    mock_post.assert_not_called()
+
+def test_cli_scan_share_yes_uploads_and_prints_url(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    import requests
+    
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    output_path = tmp_path / "sbom.json"
+    
+    class MockResponse:
+        def raise_for_status(self): pass
+        def json(self): return {"url": "https://aisbom.io/viewer?h=test_hash123"}
+        
+    mock_post = MagicMock(return_value=MockResponse())
+    monkeypatch.setattr(requests, "post", mock_post)
+    
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path), "--share", "--share-yes", "--no-fail-on-risk"])
+    
+    # Should skip prompt
+    assert "Upload this SBOM to aisbom.io" not in result.stdout
+    assert "https://aisbom.io/viewer?h=test_hash123" in result.stdout
+    
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://aisbom.io/api/sbom-share"
+    assert "application/json" in kwargs["headers"]["Content-Type"]
+    assert "data" in kwargs
+
