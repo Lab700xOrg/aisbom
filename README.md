@@ -278,9 +278,9 @@ Events POST to `https://api.aisbom.io/v1/telemetry` (a Cloudflare Worker we oper
 
 When `CI=true` or `GITHUB_ACTIONS=true`, the `cli_install_first_seen` event is suppressed (containers are ephemeral and would otherwise spam the metric). Other events still fire, tagged `is_ci=true`.
 
-### Preview status
+### Status
 
-In the current release, telemetry is **off by default** and only fires when `AISBOM_TELEMETRY_V2=1` is set. The next release will flip to default-on; `AISBOM_NO_TELEMETRY=1` is the opt-out and works in both states.
+As of **0.9.1**, telemetry is **on by default**. `AISBOM_NO_TELEMETRY=1` is the single opt-out lever and is honored on every code path. The previous `AISBOM_TELEMETRY_V2=1` opt-in flag was retired once the rollout soak completed — setting it today is a harmless no-op.
 
 ---
 
