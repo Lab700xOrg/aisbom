@@ -35,8 +35,13 @@ def fake_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def telemetry_enabled(monkeypatch, fake_home):
-    """Convenience: opt-in to v2 with a writable home."""
-    monkeypatch.setenv("AISBOM_TELEMETRY_V2", "1")
+    """
+    Convenience: telemetry default-enabled state with a writable home.
+
+    Telemetry is default-on as of 0.9.1; this fixture exists for clarity in
+    tests that exercise the "telemetry fires" path. The fake_home pin keeps
+    state out of the developer's real ~/.aisbom dir.
+    """
     return fake_home
 
 
@@ -179,8 +184,7 @@ class TestGetOrInitConfig:
         on_disk = json.loads(config_file.read_text())
         assert "user_id" in on_disk
 
-    def test_returns_empty_dict_when_config_dir_none(self, monkeypatch):
-        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "1")
+    def test_returns_empty_dict_when_config_dir_none(self):
         with patch.object(telemetry, "get_config_dir", return_value=None):
             assert telemetry.get_or_init_config() == {}
 
@@ -192,17 +196,24 @@ class TestGetOrInitConfig:
 
     def test_no_op_when_no_telemetry_set(self, fake_home, monkeypatch):
         monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
-        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "1")
         cfg = telemetry.get_or_init_config()
         assert cfg == {}
         # Critically, no file written when user has opted out
         assert not (fake_home / ".aisbom" / "config.json").exists()
 
-    def test_no_op_when_v2_not_enabled(self, fake_home):
-        # No env vars set: telemetry_enabled fixture not used here
+    def test_default_on_writes_config_with_no_env_vars(self, fake_home):
+        # 0.9.1 default-flip: no env vars required to enable telemetry.
         cfg = telemetry.get_or_init_config()
-        assert cfg == {}
-        assert not (fake_home / ".aisbom" / "config.json").exists()
+        assert "user_id" in cfg
+        assert (fake_home / ".aisbom" / "config.json").exists()
+
+    def test_legacy_v2_env_var_is_a_noop(self, fake_home, monkeypatch):
+        # Setting AISBOM_TELEMETRY_V2 (the gate retired in 0.9.1) must not
+        # change behavior — telemetry is still default-on, opt-out unchanged.
+        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "0")
+        cfg = telemetry.get_or_init_config()
+        assert "user_id" in cfg
+        assert (fake_home / ".aisbom" / "config.json").exists()
 
 
 # ============================================================================
@@ -243,27 +254,32 @@ class TestBuildUserAgent:
 class TestPostEventGates:
     def test_no_op_when_no_telemetry_set(self, monkeypatch):
         monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
-        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "1")
         with patch("aisbom.telemetry.requests.post") as mock_post:
             result = telemetry.post_event("cli_scan", {})
         assert result is None
         mock_post.assert_not_called()
 
-    def test_no_op_when_v2_not_enabled(self):
+    def test_default_on_fires_with_no_env_vars(self, telemetry_enabled):
+        # 0.9.1 default-flip: telemetry fires by default. No V2 opt-in required.
         with patch("aisbom.telemetry.requests.post") as mock_post:
-            result = telemetry.post_event("cli_scan", {})
-        assert result is None
-        mock_post.assert_not_called()
+            t = telemetry.post_event("cli_scan", {})
+            t.join(timeout=2.0)
+        assert mock_post.called
 
-    def test_no_op_when_v2_set_to_other_value(self, monkeypatch):
-        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "true")  # not "1" exactly
+    def test_legacy_v2_env_var_does_not_disable(self, telemetry_enabled, monkeypatch):
+        # Setting AISBOM_TELEMETRY_V2 to anything (including "0") must NOT
+        # disable telemetry — the gate was retired in 0.9.1.
+        monkeypatch.setenv("AISBOM_TELEMETRY_V2", "0")
         with patch("aisbom.telemetry.requests.post") as mock_post:
-            result = telemetry.post_event("cli_scan", {})
-        assert result is None
-        mock_post.assert_not_called()
+            t = telemetry.post_event("cli_scan", {})
+            t.join(timeout=2.0)
+        assert mock_post.called
 
-    def test_no_telemetry_wins_over_v2(self, monkeypatch):
-        # Both set: NO_TELEMETRY should still win
+    def test_no_telemetry_wins_when_both_legacy_and_optout_set(
+        self, monkeypatch, telemetry_enabled
+    ):
+        # Both vars set: NO_TELEMETRY still wins. Belt-and-suspenders check
+        # for users with both opt-out and the retired V2 var in their env.
         monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
         monkeypatch.setenv("AISBOM_TELEMETRY_V2", "1")
         with patch("aisbom.telemetry.requests.post") as mock_post:

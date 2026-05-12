@@ -1,0 +1,21 @@
+### What's new
+
+**Telemetry default-flip** — Anonymous CLI usage telemetry is now **on by default**.
+
+* The `AISBOM_TELEMETRY_V2=1` opt-in introduced in 0.8.x has been retired after a successful soak. The single lever from now on is the opt-out: `AISBOM_NO_TELEMETRY=1`.
+* No new events, no new fields, no change to what's collected — the schema shipped in 0.8.x continues unchanged. See the Telemetry & Privacy section in the README for the full list.
+* If you previously set `AISBOM_TELEMETRY_V2=1` in your shell rc or CI environment, you can remove it; it's now a no-op.
+
+### What's not changing
+
+Scanner behavior, exit codes, output formats, the `--share` flow shipped in 0.9.0, and what data is collected — all identical to 0.9.0.
+
+### Opting out
+
+```bash
+# Permanent
+export AISBOM_NO_TELEMETRY=1
+
+# One invocation
+AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
+```

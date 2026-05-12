@@ -8,9 +8,12 @@ cloudcowork/PHASE_1_2_DESIGN.md for the full design.
 Gates (all must be passed before any network call):
   AISBOM_NO_TELEMETRY  — opt-out, always wins. If set, no events fire and no
                          config files are written.
-  AISBOM_TELEMETRY_V2  — opt-in for the v2 rollout. Until set to "1",
-                         post_event() is a no-op even with no opt-out.
-                         Default-flipped to on in a future release.
+
+History: an earlier `AISBOM_TELEMETRY_V2=1` opt-in gate was used during the
+v2 schema rollout (Phase 1.2). It was retired in 0.9.1 once the soak period
+passed cleanly; telemetry is now default-on, with AISBOM_NO_TELEMETRY as the
+single opt-out lever. Setting AISBOM_TELEMETRY_V2 today is a no-op (kept
+documented purely so old shell rc files don't trip on an unknown var).
 
 PyInstaller constraint: this module imports only stdlib + `requests`. Do not
 add new third-party dependencies without updating scripts/build_binaries.sh.
@@ -48,10 +51,8 @@ def is_ci() -> bool:
 
 
 def _telemetry_disabled() -> bool:
-    """All-paths short-circuit. Both env vars consulted; opt-out always wins."""
+    """All-paths short-circuit. Opt-out always wins; default state is enabled."""
     if os.getenv("AISBOM_NO_TELEMETRY"):
-        return True
-    if os.getenv("AISBOM_TELEMETRY_V2") != "1":
         return True
     return False
 
