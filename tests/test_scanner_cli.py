@@ -23,6 +23,38 @@ runner = CliRunner()
 STACK_GLOBAL_SYSTEM = b"\x80\x04\x8c\x02os\x8c\x06system\x93."
 
 
+# ---------------------------------------------------------------------------
+# Phase 4.1 — Default-command onboarding panel
+# ---------------------------------------------------------------------------
+
+def test_no_args_shows_onboarding_panel():
+    """`aisbom` with no subcommand must show the quickstart panel, not Typer's help dump."""
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0
+    assert "Try it now" in result.stdout
+    # The exact example command — keep in sync with PHASE_4_1_DESIGN.md.
+    assert "aisbom scan hf://google-bert/bert-base-uncased" in result.stdout
+    # Pointer to the full reference must be present so power users aren't lost.
+    assert "aisbom --help" in result.stdout
+
+
+def test_help_flag_still_shows_typer_help():
+    """`aisbom --help` must continue to show Typer's full command reference."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.stdout
+    # Subcommand list survives — confirms we haven't shadowed Typer's help.
+    assert "Commands" in result.stdout
+
+
+def test_subcommand_invocation_unaffected_by_callback():
+    """A subcommand call must skip the panel and run the subcommand normally."""
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0
+    # The onboarding-panel marker must NOT appear; `info` has its own panel.
+    assert "Try it now" not in result.stdout
+
+
 def _write_malicious_pt(path: Path):
     """Create a PyTorch-style archive with a known dangerous pickle payload."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:

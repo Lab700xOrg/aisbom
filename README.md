@@ -27,7 +27,21 @@ pip install aisbom-cli
 ```
 *Note: The package name is `aisbom-cli`, but the command you run is `aisbom`.*
 
-### 1a. Standalone Binary (Air-Gapped)
+### 1a. Zero-Install (`pipx run`)
+Want to try AIsbom without committing to an install? Run it ephemerally with [pipx](https://pipx.pypa.io/):
+
+```bash
+# Single throwaway invocation — pipx fetches the latest, runs it, then cleans up.
+pipx run --spec aisbom-cli aisbom scan hf://google-bert/bert-base-uncased
+
+# Or install into pipx's isolated venv (still no system-Python pollution):
+pipx install aisbom-cli
+aisbom scan hf://google-bert/bert-base-uncased
+```
+
+`pipx run` is the fastest path from "I read about this on HN" to seeing a real scan. The `--spec aisbom-cli` is required because our PyPI package name (`aisbom-cli`) differs from the command name (`aisbom`).
+
+### 1b. Standalone Binary (Air-Gapped)
 For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/latest).
 
 > **📚 Guide:** [How to Audit Air-Gapped / Offline Systems](docs/air-gapped-guide.md)

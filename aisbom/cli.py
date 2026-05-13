@@ -27,6 +27,32 @@ import requests
 app = typer.Typer()
 console = Console()
 
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
+    """AIsbom — AI Supply Chain Security Scanner."""
+    # Owns the no-args codepath. When the user runs `aisbom` with no
+    # subcommand, show a one-screen quickstart instead of Typer's auto-help
+    # block. `--help` still short-circuits to Typer's full reference, and
+    # subcommand invocations fall through (this callback is a no-op when
+    # `ctx.invoked_subcommand` is set).
+    if ctx.invoked_subcommand is None:
+        console.print(
+            Panel(
+                "[bold cyan]Deep introspection of ML model artifacts[/bold cyan]\n"
+                "[dim](.pt, .safetensors, .gguf) for malware, license risk, and silent drift.[/dim]\n\n"
+                "[bold]Try it now:[/bold]\n\n"
+                "    [white]$ aisbom scan hf://google-bert/bert-base-uncased[/white]\n\n"
+                "[dim]Run [white]aisbom --help[/white] for the full command reference.[/dim]",
+                title=" AIsbom ",
+                border_style="cyan",
+                padding=(1, 2),
+                expand=False,
+            )
+        )
+        raise typer.Exit(code=0)
+
+
 # Thread-safe storage for update checks
 update_result = {"version": None}
 
