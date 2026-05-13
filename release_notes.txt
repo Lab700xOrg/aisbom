@@ -1,21 +1,18 @@
 ### What's new
 
-**Telemetry default-flip** — Anonymous CLI usage telemetry is now **on by default**.
+**Friendlier first-touch experience.** Two small changes that make the first 30 seconds with AIsbom click.
 
-* The `AISBOM_TELEMETRY_V2=1` opt-in introduced in 0.8.x has been retired after a successful soak. The single lever from now on is the opt-out: `AISBOM_NO_TELEMETRY=1`.
-* No new events, no new fields, no change to what's collected — the schema shipped in 0.8.x continues unchanged. See the Telemetry & Privacy section in the README for the full list.
-* If you previously set `AISBOM_TELEMETRY_V2=1` in your shell rc or CI environment, you can remove it; it's now a no-op.
+* **Concrete-example default command.** Running `aisbom` with no arguments now prints a one-screen quickstart with a working example (`aisbom scan hf://google-bert/bert-base-uncased`) instead of Typer's auto-generated help dump. `aisbom --help` still shows the full command reference for power users.
+* **Zero-install path documented.** New "Zero-Install (`pipx run`)" section in the README and a third install option on aisbom.io. Try AIsbom without committing to a system install:
+
+  ```bash
+  pipx run --spec aisbom-cli aisbom scan hf://google-bert/bert-base-uncased
+  ```
+
+### Housekeeping
+
+* CI: bumped `softprops/action-gh-release` from v2 to v3 in the binary-release workflow.
 
 ### What's not changing
 
-Scanner behavior, exit codes, output formats, the `--share` flow shipped in 0.9.0, and what data is collected — all identical to 0.9.0.
-
-### Opting out
-
-```bash
-# Permanent
-export AISBOM_NO_TELEMETRY=1
-
-# One invocation
-AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
-```
+Scanner behavior, exit codes, output formats, the `--share` flow, telemetry events, and what data is collected — all identical to 0.9.1. The default-command change is presentation-only; scripts that parse `aisbom` no-args output should already be relying on `--help` instead.
