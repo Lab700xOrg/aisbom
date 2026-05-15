@@ -55,6 +55,120 @@ def test_subcommand_invocation_unaffected_by_callback():
     assert "Try it now" not in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 help-pass (queued for 0.10.0): --version, env-var doc, info telemetry
+# ---------------------------------------------------------------------------
+
+def test_version_flag_prints_version_and_exits():
+    """`aisbom --version` (and `-V`) must print the version and exit 0."""
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert "aisbom" in result.stdout
+    # Onboarding panel must NOT show — --version wins over the no-args path.
+    assert "Try it now" not in result.stdout
+
+    short_result = runner.invoke(app, ["-V"])
+    assert short_result.exit_code == 0
+    assert "aisbom" in short_result.stdout
+
+
+def test_help_mentions_telemetry_env_var():
+    """`aisbom --help` must document the AISBOM_NO_TELEMETRY opt-out lever."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "AISBOM_NO_TELEMETRY" in result.stdout
+
+
+def test_scan_help_mentions_share_visibility_and_expiry():
+    """`aisbom scan --help` must surface the two key facts about --share:
+    public visibility + 30-day expiry. CI users adding --share --share-yes
+    to a pipeline never see the interactive prompt, so help is their only
+    chance to learn these properties."""
+    result = runner.invoke(app, ["scan", "--help"])
+    assert result.exit_code == 0
+    # --share help text must call out public + expiry
+    assert "public" in result.stdout.lower() or "publicly" in result.stdout.lower()
+    assert "30 days" in result.stdout or "30-day" in result.stdout
+    # --share-yes help must call out CI/CD intent
+    assert "CI/CD" in result.stdout or "CI / CD" in result.stdout
+
+
+def test_info_shows_telemetry_state(monkeypatch):
+    """`aisbom info` must surface telemetry state so users have one canonical
+    place to confirm whether events are firing on their machine."""
+    # Default state — telemetry enabled.
+    monkeypatch.delenv("AISBOM_NO_TELEMETRY", raising=False)
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0
+    assert "Telemetry:" in result.stdout
+    assert "enabled" in result.stdout.lower() or "AISBOM_NO_TELEMETRY" in result.stdout
+
+    # Opted-out state.
+    monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0
+    assert "opted out" in result.stdout.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3 — Trackable footer on every successful scan
+# ---------------------------------------------------------------------------
+
+def test_attribution_ref_appends_question_mark_for_clean_url(monkeypatch):
+    """A URL with no existing query string should get `?ref=cli` appended."""
+    monkeypatch.delenv("AISBOM_NO_TELEMETRY", raising=False)
+    from aisbom.cli import _attribution_ref
+    assert _attribution_ref("https://aisbom.io/advisories") == "https://aisbom.io/advisories?ref=cli"
+
+
+def test_attribution_ref_appends_ampersand_for_query_url(monkeypatch):
+    """A URL with an existing query string should get `&ref=cli` appended."""
+    monkeypatch.delenv("AISBOM_NO_TELEMETRY", raising=False)
+    from aisbom.cli import _attribution_ref
+    assert _attribution_ref("https://aisbom.io/viewer?h=abc") == "https://aisbom.io/viewer?h=abc&ref=cli"
+
+
+def test_attribution_ref_strips_when_telemetry_opted_out(monkeypatch):
+    """Opt-out users get the URL with NO attribution tag — still useful, untracked."""
+    monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
+    from aisbom.cli import _attribution_ref
+    assert _attribution_ref("https://aisbom.io/viewer?h=abc") == "https://aisbom.io/viewer?h=abc"
+    assert _attribution_ref("https://aisbom.io/advisories") == "https://aisbom.io/advisories"
+
+
+def test_scan_footer_shows_advisories_link_with_ref(tmp_path, monkeypatch):
+    """Every successful scan ends with the Next steps panel pointing at advisories."""
+    monkeypatch.delenv("AISBOM_NO_TELEMETRY", raising=False)
+    out = tmp_path / "sbom.json"
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(out)])
+    assert result.exit_code == 0, result.stdout
+    assert "Next steps" in result.stdout
+    assert "aisbom.io/advisories" in result.stdout
+    # Attribution tag must be present in the default (telemetry-on) state.
+    assert "ref=cli" in result.stdout
+
+
+def test_scan_footer_strips_ref_when_telemetry_opted_out(tmp_path, monkeypatch):
+    """Opted-out users still see the panel, but URLs lose the `ref=cli` tag."""
+    monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
+    out = tmp_path / "sbom.json"
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(out)])
+    assert result.exit_code == 0, result.stdout
+    assert "aisbom.io/advisories" in result.stdout
+    # Critical: no attribution tag for opt-out users.
+    assert "ref=cli" not in result.stdout
+
+
+def test_scan_footer_nudges_share_when_flag_not_used(tmp_path, monkeypatch):
+    """Without --share, the footer should hint that --share unlocks a hosted link."""
+    monkeypatch.delenv("AISBOM_NO_TELEMETRY", raising=False)
+    out = tmp_path / "sbom.json"
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(out)])
+    assert result.exit_code == 0, result.stdout
+    # The hint specifically mentions the --share flag.
+    assert "--share" in result.stdout
+
+
 def _write_malicious_pt(path: Path):
     """Create a PyTorch-style archive with a known dangerous pickle payload."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:

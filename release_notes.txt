@@ -1,18 +1,29 @@
 ### What's new
 
-**Friendlier first-touch experience.** Two small changes that make the first 30 seconds with AIsbom click.
+**Two changes you'll see on every successful scan.**
 
-* **Concrete-example default command.** Running `aisbom` with no arguments now prints a one-screen quickstart with a working example (`aisbom scan hf://google-bert/bert-base-uncased`) instead of Typer's auto-generated help dump. `aisbom --help` still shows the full command reference for power users.
-* **Zero-install path documented.** New "Zero-Install (`pipx run`)" section in the README and a third install option on aisbom.io. Try AIsbom without committing to a system install:
+* **Acquisition footer.** Every `aisbom scan` now ends with a "Next steps" panel pointing at the right place to view your SBOM (your hosted share URL if you used `--share`, otherwise the drag-and-drop offline viewer) and at the rolling [AISBOM advisories page](https://aisbom.io/advisories) for the AI/ML supply chain. Recurring re-engagement vector; no scan output formats changed.
+* **Friendlier help surface.** Several small `--help` improvements based on a coverage audit of recently shipped features:
+  - New top-level `--version` / `-V` flag — print the installed version without spinning up `aisbom info`.
+  - Top-level help now documents the `AISBOM_NO_TELEMETRY=1` env-var opt-out directly (no more "read the README" friction).
+  - `--share` help text now explicitly calls out that uploaded SBOMs are publicly viewable and expire after 30 days. `--share-yes` is flagged as CI/CD-only with a warning about interactive use.
+  - `aisbom info` adds a `Telemetry:` line showing current state (enabled vs opted-out) — one canonical place to confirm whether events are firing.
+  - `scan` target arg spells out all three forms with concrete examples (local dir, HTTP(S) URL, `hf://` slug).
 
-  ```bash
-  pipx run --spec aisbom-cli aisbom scan hf://google-bert/bert-base-uncased
-  ```
+### Privacy: attribution tagging
 
-### Housekeeping
-
-* CI: bumped `softprops/action-gh-release` from v2 to v3 in the binary-release workflow.
+The new footer URLs include `?ref=cli` so we can measure CLI → web conversion in GA4 Acquisition. **This tag is automatically stripped when `AISBOM_NO_TELEMETRY=1` is set** — opt-out users still see the URLs (still useful), just without attribution.
 
 ### What's not changing
 
-Scanner behavior, exit codes, output formats, the `--share` flow, telemetry events, and what data is collected — all identical to 0.9.1. The default-command change is presentation-only; scripts that parse `aisbom` no-args output should already be relying on `--help` instead.
+Scanner behavior, exit codes, output formats, the `--share` flow, and what data is collected — all identical to 0.9.x. The footer replaces the previous "Visualize this report" panel; everything else in scan output is unchanged.
+
+### Opting out
+
+```bash
+# Permanent
+export AISBOM_NO_TELEMETRY=1
+
+# One invocation
+AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
+```

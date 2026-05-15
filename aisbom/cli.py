@@ -1,5 +1,6 @@
 import typer
 import json
+import os
 import tomllib
 import importlib.metadata
 from enum import Enum
@@ -29,8 +30,38 @@ console = Console()
 
 
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
-    """AIsbom — AI Supply Chain Security Scanner."""
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Print the installed version and exit.",
+        is_eager=True,
+    ),
+):
+    """
+    AIsbom — AI Supply Chain Security Scanner.
+
+    Deep introspection of ML model artifacts (.pt, .safetensors, .gguf) for
+    malware, license risk, and silent drift. Run `aisbom` with no args to see
+    a working example, or `aisbom <command> --help` for details on each command.
+
+    Environment variables:
+
+      AISBOM_NO_TELEMETRY=1   Disable all anonymous usage telemetry. Honored on
+                              every code path; never overridden.
+    """
+    # Order matters: --version wins over the no-args panel so that
+    # `aisbom --version` is short and scriptable.
+    if version:
+        try:
+            ver = importlib.metadata.version("aisbom-cli")
+        except importlib.metadata.PackageNotFoundError:
+            ver = "unknown (dev build)"
+        console.print(f"aisbom {ver}")
+        raise typer.Exit(code=0)
+
     # Owns the no-args codepath. When the user runs `aisbom` with no
     # subcommand, show a one-screen quickstart instead of Typer's auto-help
     # block. `--help` still short-circuits to Typer's full reference, and
@@ -131,6 +162,69 @@ def _flush_telemetry_threads(threads: list[threading.Thread | None]) -> None:
             t.join(timeout=2.0)
 
 
+def _attribution_ref(base_url: str) -> str:
+    """Append `ref=cli` to a URL so we can attribute return visits to CLI
+    users in GA4 Acquisition reports. Strips the tag when the user has opted
+    out of telemetry — the URL stays useful, just untracked."""
+    if os.getenv("AISBOM_NO_TELEMETRY"):
+        return base_url
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}ref=cli"
+
+
+def _render_scan_footer(
+    *,
+    share_url: str | None,
+    output_path: str | None,
+    output_format: "OutputFormat",
+    share_attempted: bool,
+) -> None:
+    """Print the post-scan acquisition footer (Phase 4.3).
+
+    Drives recurring engagement with aisbom.io properties — the viewer
+    (per-scan) and the advisories page (weekly). Three flavors:
+
+    1. `--share` succeeded → point at the hosted viewer URL.
+    2. `--share` not used (or failed) and machine-readable format → drag-and-
+       drop hint + a nudge to try `--share` next time.
+    3. Markdown format → only the advisories link (no viewer hint, since
+       the markdown report isn't a viewer input).
+
+    URL attribution respects `AISBOM_NO_TELEMETRY` via `_attribution_ref`.
+    """
+    lines: list[str] = []
+
+    if share_url:
+        lines.append(
+            f"🔗 [bold]View this SBOM online:[/bold] "
+            f"[underline cyan]{_attribution_ref(share_url)}[/underline cyan]"
+        )
+    elif output_format in (OutputFormat.JSON, OutputFormat.SPDX) and output_path:
+        lines.append(
+            f"📊 [bold]Drag [cyan]{output_path}[/cyan] into the offline viewer:[/bold]\n"
+            f"   [underline cyan]{_attribution_ref('https://aisbom.io/viewer')}[/underline cyan]"
+        )
+        if not share_attempted:
+            lines.append(
+                "💡 [dim]Tip: re-run with [white]--share[/white] to get a hosted viewer link.[/dim]"
+            )
+
+    # Always: advisories. Recurring re-engagement vector independent of format.
+    lines.append(
+        f"📰 [bold]Latest model advisories:[/bold] "
+        f"[underline cyan]{_attribution_ref('https://aisbom.io/advisories')}[/underline cyan]"
+    )
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=" Next steps ",
+            border_style="blue",
+            expand=False,
+        )
+    )
+
+
 class OutputFormat(str, Enum):
     JSON = "json"
     MARKDOWN = "markdown"
@@ -171,7 +265,13 @@ def _generate_markdown(results: dict) -> str:
 
 @app.command()
 def scan(
-    target: str = typer.Argument(".", help="Directory or URL (http/hf://) to scan"),
+    target: str = typer.Argument(
+        ".",
+        help=(
+            "Local directory, HTTP(S) URL, or Hugging Face slug "
+            "(e.g. ./models, https://example.com/model.pt, hf://google-bert/bert-base-uncased)."
+        ),
+    ),
     output: str | None = typer.Option(None, help="Output file path"),
     schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
     spdx_version: str = typer.Option("2.3", help="SPDX version (2.3 or 3.0)", case_sensitive=False, rich_help_panel="Advanced Options"),
@@ -179,8 +279,23 @@ def scan(
     strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
     lint: bool = typer.Option(False, help="Enable Migration Linter (checks for weights_only=True compatibility)"),
     format: OutputFormat = typer.Option(OutputFormat.JSON, help="Output format (JSON for SBOM, MARKDOWN for Human Report, SPDX for Compliance)"),
-    share: bool = typer.Option(False, help="Upload the SBOM to aisbom.io and generate a shareable viewer link"),
-    share_yes: bool = typer.Option(False, "--share-yes", help="Skip confirmation prompt when using --share")
+    share: bool = typer.Option(
+        False,
+        help=(
+            "Upload the generated SBOM to aisbom.io and print a public viewer URL. "
+            "Anyone with the link can view the SBOM; data expires after 30 days. "
+            "Prompts for confirmation before uploading unless --share-yes is also set."
+        ),
+    ),
+    share_yes: bool = typer.Option(
+        False,
+        "--share-yes",
+        help=(
+            "Skip the --share confirmation prompt. Intended for CI/CD pipelines; "
+            "do not pass this flag interactively unless you understand that the "
+            "uploaded SBOM becomes publicly viewable for 30 days."
+        ),
+    ),
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -198,6 +313,11 @@ def scan(
     telemetry_threads: list[threading.Thread | None] = [
         _maybe_emit_install_event(),
     ]
+
+    # Phase 4.3 — captured by the --share success path below and read by the
+    # acquisition footer at scan end. Function-scope name so the inner JSON
+    # branch can write to it and the footer can read it.
+    share_url: str | None = None
 
     # 1. Run the Logic
     try:
@@ -425,20 +545,15 @@ def scan(
             f.write(markdown)
         console.print(f"\n[bold green]✔ Markdown Report Generated:[/bold green] {output}")
 
-    # Show visualization panel for machine-readable formats
-    if format in [OutputFormat.JSON, OutputFormat.SPDX]:
-        try:
-            ver = importlib.metadata.version("aisbom-cli")
-        except importlib.metadata.PackageNotFoundError:
-            ver = "unknown"
-
-        console.print(Panel(
-            f"[bold white]📊 Visualize this report:[/bold white]\n"
-            f"Drag and drop [cyan]{output}[/cyan] into our secure offline viewer:\n"
-            f"> View detailed artifact visualizer: https://aisbom.io/viewer",
-            border_style="blue",
-            expand=False
-        ))
+    # Phase 4.3 — acquisition footer (replaces the previous "Visualize this
+    # report" panel). Always shown after a successful scan. Drives recurring
+    # engagement with aisbom.io's viewer + advisories pages.
+    _render_scan_footer(
+        share_url=share_url,
+        output_path=output,
+        output_format=format,
+        share_attempted=share,
+    )
 
     # Signal exit behavior to the user
     if exit_code == 2:
@@ -466,12 +581,21 @@ def info():
     except importlib.metadata.PackageNotFoundError:
         ver = "unknown (dev build)"
 
+    # Phase 4 help-pass: surface telemetry state in `info` so users have one
+    # canonical place to confirm whether events are firing on their machine.
+    telemetry_state = (
+        "opted out via AISBOM_NO_TELEMETRY"
+        if os.getenv("AISBOM_NO_TELEMETRY")
+        else "enabled (set AISBOM_NO_TELEMETRY=1 to disable)"
+    )
+
     console.print(Panel(
         f"[bold cyan]AI SBOM[/bold cyan]: AI Software Bill of Materials - The Supply Chain for Artificial Intelligence\n"
         f"[bold]Version:[/bold] {ver}\n"
         f"[bold]License:[/bold] Apache 2.0\n"
         f"[bold]Website:[/bold] https://www.aisbom.io\n"
-        f"[bold]Repository:[/bold] https://github.com/Lab700xOrg/aisbom",
+        f"[bold]Repository:[/bold] https://github.com/Lab700xOrg/aisbom\n"
+        f"[bold]Telemetry:[/bold] {telemetry_state}",
         title=" System Info ",
         border_style="magenta",
         expand=False
