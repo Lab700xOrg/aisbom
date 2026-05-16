@@ -7,6 +7,10 @@ on:
 
 jobs:
   build-and-publish:
+    # Only fire for CLI releases (v0.x.x). v1.x.x tags are reserved for the
+    # GitHub Action (Phase 4.5) and must not trigger the PyPI publish or the
+    # `v0` major-version-tag force-push.
+    if: startsWith(github.event.release.tag_name, 'v0.')
     runs-on: ubuntu-latest
     permissions:
       contents: write

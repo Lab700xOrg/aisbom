@@ -1,28 +1,44 @@
 # LOCATION: ~/Projects/sbom/aisbom-cli/action.yml
 
 name: 'AIsbom Security Scanner'
-description: 'An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for ML models.'
+description: 'Deep introspection of ML model artifacts for malware, license risk, and silent drift. Posts a PR comment summarizing findings with a link to the hosted viewer.'
 author: 'Lab700xOrg'
 branding:
   icon: 'shield'
   color: 'purple'
 
-# Inputs match your CLI arguments
 inputs:
   directory:
-    description: 'Directory to scan for AI models'
+    description: 'Directory to scan for AI model artifacts.'
     required: true
     default: '.'
   output-file:
-    description: 'Path to save the SBOM JSON report'
+    description: 'Path to save the generated SBOM JSON file.'
     required: false
     default: 'sbom.json'
+  github-token:
+    description: 'GitHub token used to post the PR comment. Defaults to the workflow-provided token. Requires `pull-requests: write` permission on the consuming workflow.'
+    required: false
+    default: ${{ github.token }}
+  max-rows:
+    description: 'Maximum number of artifacts to list in the PR comment findings table. Overflow collapses into a "+ N more findings" row.'
+    required: false
+    default: '10'
+  comment-on-clean:
+    description: 'Post the PR comment even when no CRITICAL or HIGH findings were detected. Set to "false" to keep clean PRs silent.'
+    required: false
+    default: 'true'
+  fail-on-risk:
+    description: 'Exit the job with a non-zero status when CRITICAL findings are detected (matches the CLI default). Set to "false" to make scans informational only.'
+    required: false
+    default: 'true'
+
+outputs:
+  sbom-path:
+    description: 'Path to the generated SBOM JSON file (relative to the workspace).'
+  share-url:
+    description: 'Hosted viewer URL for the scanned SBOM (empty if --share was rejected or upload failed).'
 
 runs:
   using: 'docker'
-  image: 'Dockerfile' # This tells GitHub to look for the Dockerfile in THIS directory
-  args:
-    - 'scan'
-    - ${{ inputs.directory }}
-    - '--output'
-    - ${{ inputs.output-file }}
+  image: 'Dockerfile'
