@@ -42,3 +42,16 @@ outputs:
 runs:
   using: 'docker'
   image: 'Dockerfile'
+  # IMPORTANT: pass inputs as positional args, not env vars.
+  # GitHub auto-converts hyphenated input names into env vars whose names
+  # also contain hyphens (e.g. INPUT_GITHUB-TOKEN). POSIX shells can't
+  # reliably read those, and `printenv` behavior is implementation-defined
+  # for non-standard names. Positional args sidestep the whole mess and
+  # GitHub still masks secret values in the rendered logs.
+  args:
+    - ${{ inputs.directory }}
+    - ${{ inputs.output-file }}
+    - ${{ inputs.github-token }}
+    - ${{ inputs.max-rows }}
+    - ${{ inputs.comment-on-clean }}
+    - ${{ inputs.fail-on-risk }}

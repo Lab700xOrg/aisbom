@@ -372,10 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     # try to comment — still emit telemetry so the dashboards aren't blind.
     #
     # Token resolution order:
-    #   1. AISBOM_GITHUB_TOKEN — exported by entrypoint.sh after reading the
-    #      hyphenated `INPUT_GITHUB-TOKEN` env var that Docker actions get.
-    #   2. INPUT_GITHUB-TOKEN — direct read for the same env var, in case the
-    #      script is invoked without the entrypoint wrapper.
+    #   1. AISBOM_GITHUB_TOKEN — exported by entrypoint.sh from positional $3.
+    #   2. INPUT_GITHUB-TOKEN — direct read for the original env var, in case
+    #      the script is invoked without the entrypoint wrapper.
     #   3. GITHUB_TOKEN — last-resort fallback (Docker actions don't get this
     #      auto-injected, but JS/composite actions do).
     pr_number = _resolve_pr_number_from_event()
@@ -386,6 +385,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not (pr_number and token and repo):
+        # Granular diagnostic so the next breakage is debuggable from the log
+        # without needing to dig into the wrapper's source. We never log the
+        # token itself, only whether it was resolved.
+        missing = []
+        if not pr_number:
+            missing.append(f"pr_number (GITHUB_EVENT_PATH={os.environ.get('GITHUB_EVENT_PATH', 'unset')})")
+        if not token:
+            missing.append("github-token (positional $3 / AISBOM_GITHUB_TOKEN env)")
+        if not repo:
+            missing.append("GITHUB_REPOSITORY")
         emit_telemetry("github_action_run", {
             "risk_level_max": severity,
             "findings_critical": str(count_by_severity(findings, "CRITICAL")),
@@ -393,8 +402,14 @@ def main(argv: list[str] | None = None) -> int:
             "is_clean": "true" if is_clean else "false",
             "comment_created_or_updated": "no_pr_context",
         })
-        print("[aisbom-action] Not in a PR context (or missing token/repo); "
-              "SBOM artifact still produced, but no comment posted.")
+        print(
+            "[aisbom-action] Cannot post PR comment — missing: "
+            + ", ".join(missing)
+            + ". SBOM artifact still produced. "
+            "(If the consuming workflow is on `pull_request` and has "
+            "`pull-requests: write` permission, this is a bug — please file "
+            "an issue at https://github.com/Lab700xOrg/aisbom/issues.)"
+        )
         return 0
 
     body = render_body(

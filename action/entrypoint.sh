@@ -1,73 +1,58 @@
-#!/bin/sh
+#!/bin/bash
 # Phase 4.5 — AIsbom GitHub Action entrypoint.
 #
-# Orchestrates:
-#   1. `aisbom scan` against the consumer's chosen directory, with --share
-#      so we get a hosted viewer URL in the same step.
-#   2. `post_comment.py` to render + post the PR comment idempotently.
+# Inputs arrive as positional args (action.yml `args:` block), not env vars.
+# This sidesteps GitHub's hyphen-preserving env-var naming for Docker actions,
+# which POSIX shells can't reliably read. Argv order matches action.yml:
 #
-# Inputs arrive as INPUT_* env vars per the action.yml inputs block.
-# IMPORTANT: GitHub Actions preserves hyphens when converting hyphenated
-# input names (e.g. `inputs.output-file`) into Docker container env vars.
-# The resulting env var is `INPUT_OUTPUT-FILE`, not `INPUT_OUTPUT_FILE`.
-# Direct `${INPUT_OUTPUT-FILE}` shell expansion would clash with the
-# `${VAR-default}` operator, so we read these via `printenv`.
+#   $1  directory            (default ".")
+#   $2  output-file          (default "sbom.json")
+#   $3  github-token         (required for PR comment; auto-defaults to
+#                              ${{ github.token }} on the GitHub side)
+#   $4  max-rows             (default "10")
+#   $5  comment-on-clean     (default "true")
+#   $6  fail-on-risk         (default "true")
 #
-# GITHUB_OUTPUT, GITHUB_EVENT_PATH, GITHUB_REPOSITORY are provided by the
-# runner under their standard underscore-only names.
+# Bash (not POSIX sh) is required for the PIPESTATUS array — we need the
+# scan's exit code, not tee's, to honor fail-on-risk correctly.
 #
 # Exit codes:
 #   0 — Scan succeeded OR scan reported risks but fail-on-risk is false.
-#   2 — Scan reported CRITICAL findings AND fail-on-risk is true (matches CLI).
+#   2 — Scan reported CRITICAL findings AND fail-on-risk is true.
 #
-# Comment-posting failures NEVER fail the job (they're surfaced as log
-# messages so the user fixes their `permissions:` block, not the scan).
+# Comment-posting failures NEVER fail the job (logged but tolerated so the
+# user fixes their `permissions:` block, not the scan).
 
 set -u
 
-# Helper — read an env var that may have hyphens in its name. Returns empty
-# string when unset rather than failing the script.
-_read_input() {
-    printenv "$1" 2>/dev/null || true
-}
-
-DIRECTORY="$(_read_input 'INPUT_DIRECTORY')"
-DIRECTORY="${DIRECTORY:-.}"
-
-OUTPUT_FILE="$(_read_input 'INPUT_OUTPUT-FILE')"
-OUTPUT_FILE="${OUTPUT_FILE:-sbom.json}"
-
-MAX_ROWS="$(_read_input 'INPUT_MAX-ROWS')"
-MAX_ROWS="${MAX_ROWS:-10}"
-
-COMMENT_ON_CLEAN="$(_read_input 'INPUT_COMMENT-ON-CLEAN')"
-COMMENT_ON_CLEAN="${COMMENT_ON_CLEAN:-true}"
-
-FAIL_ON_RISK="$(_read_input 'INPUT_FAIL-ON-RISK')"
-FAIL_ON_RISK="${FAIL_ON_RISK:-true}"
+DIRECTORY="${1:-.}"
+OUTPUT_FILE="${2:-sbom.json}"
+GH_TOKEN="${3:-}"
+MAX_ROWS="${4:-10}"
+COMMENT_ON_CLEAN="${5:-true}"
+FAIL_ON_RISK="${6:-true}"
 
 # Pass the token through to post_comment.py via a clean underscore-only env
-# var so the Python side doesn't need to dance around the hyphen problem.
-AISBOM_GITHUB_TOKEN="$(_read_input 'INPUT_GITHUB-TOKEN')"
-export AISBOM_GITHUB_TOKEN
+# var. We never echo $GH_TOKEN — GitHub already masks it in the docker-run
+# command log, but using a properly-named env var keeps secret hygiene easy.
+export AISBOM_GITHUB_TOKEN="${GH_TOKEN}"
 
 SCAN_LOG="/tmp/aisbom-scan.log"
 
-# Step 1 — Run the scan.
-# `--share --share-yes` uploads the SBOM to aisbom.io and prints a viewer
-# URL we can embed in the PR comment. Skipping the confirmation prompt is
-# safe here because this is a CI context (the prompt would deadlock anyway).
-# Tee stdout to both the runner's log and a file we can grep for the URL.
+# Step 1 — Run the scan. `--share --share-yes` uploads the SBOM and emits
+# a viewer URL we can grep out for the PR comment.
 echo "::group::aisbom scan output"
+set -o pipefail
 aisbom scan "${DIRECTORY}" \
   --output "${OUTPUT_FILE}" \
   --share \
   --share-yes \
   2>&1 | tee "${SCAN_LOG}"
-SCAN_EXIT=${PIPESTATUS:-$?}
+SCAN_EXIT=${PIPESTATUS[0]}
+set +o pipefail
 echo "::endgroup::"
 
-# Echo Action outputs that consumers can reference in subsequent steps.
+# Echo Action outputs so consumers can reference them in subsequent steps.
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "sbom-path=${OUTPUT_FILE}" >> "${GITHUB_OUTPUT}"
     SHARE_URL=$(grep -oE 'https://aisbom\.io/viewer\?h=[A-Za-z0-9_-]+' "${SCAN_LOG}" | head -n1 || true)
