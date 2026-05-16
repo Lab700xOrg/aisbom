@@ -11,7 +11,6 @@ Telemetry is fire-and-forget against api.aisbom.io/v1/telemetry and honors
 AISBOM_NO_TELEMETRY just like the CLI. Never raises from telemetry; never
 fails the workflow over a comment-posting hiccup that wasn't actionable.
 
-Design doc: cloudcowork/PHASE_4_5_DESIGN.md.
 """
 from __future__ import annotations
 
@@ -371,8 +370,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve PR context. If we're not in a PR (push, schedule, etc.), do not
     # try to comment — still emit telemetry so the dashboards aren't blind.
+    #
+    # Token resolution order:
+    #   1. AISBOM_GITHUB_TOKEN — exported by entrypoint.sh after reading the
+    #      hyphenated `INPUT_GITHUB-TOKEN` env var that Docker actions get.
+    #   2. INPUT_GITHUB-TOKEN — direct read for the same env var, in case the
+    #      script is invoked without the entrypoint wrapper.
+    #   3. GITHUB_TOKEN — last-resort fallback (Docker actions don't get this
+    #      auto-injected, but JS/composite actions do).
     pr_number = _resolve_pr_number_from_event()
-    token = os.environ.get("INPUT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = (
+        os.environ.get("AISBOM_GITHUB_TOKEN")
+        or os.environ.get("INPUT_GITHUB-TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+    )
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not (pr_number and token and repo):
         emit_telemetry("github_action_run", {
