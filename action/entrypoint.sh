@@ -7,8 +7,14 @@
 #   2. `post_comment.py` to render + post the PR comment idempotently.
 #
 # Inputs arrive as INPUT_* env vars per the action.yml inputs block.
+# IMPORTANT: GitHub Actions preserves hyphens when converting hyphenated
+# input names (e.g. `inputs.output-file`) into Docker container env vars.
+# The resulting env var is `INPUT_OUTPUT-FILE`, not `INPUT_OUTPUT_FILE`.
+# Direct `${INPUT_OUTPUT-FILE}` shell expansion would clash with the
+# `${VAR-default}` operator, so we read these via `printenv`.
+#
 # GITHUB_OUTPUT, GITHUB_EVENT_PATH, GITHUB_REPOSITORY are provided by the
-# runner.
+# runner under their standard underscore-only names.
 #
 # Exit codes:
 #   0 — Scan succeeded OR scan reported risks but fail-on-risk is false.
@@ -19,11 +25,32 @@
 
 set -u
 
-DIRECTORY="${INPUT_DIRECTORY:-.}"
-OUTPUT_FILE="${INPUT_OUTPUT_FILE:-sbom.json}"
-MAX_ROWS="${INPUT_MAX_ROWS:-10}"
-COMMENT_ON_CLEAN="${INPUT_COMMENT_ON_CLEAN:-true}"
-FAIL_ON_RISK="${INPUT_FAIL_ON_RISK:-true}"
+# Helper — read an env var that may have hyphens in its name. Returns empty
+# string when unset rather than failing the script.
+_read_input() {
+    printenv "$1" 2>/dev/null || true
+}
+
+DIRECTORY="$(_read_input 'INPUT_DIRECTORY')"
+DIRECTORY="${DIRECTORY:-.}"
+
+OUTPUT_FILE="$(_read_input 'INPUT_OUTPUT-FILE')"
+OUTPUT_FILE="${OUTPUT_FILE:-sbom.json}"
+
+MAX_ROWS="$(_read_input 'INPUT_MAX-ROWS')"
+MAX_ROWS="${MAX_ROWS:-10}"
+
+COMMENT_ON_CLEAN="$(_read_input 'INPUT_COMMENT-ON-CLEAN')"
+COMMENT_ON_CLEAN="${COMMENT_ON_CLEAN:-true}"
+
+FAIL_ON_RISK="$(_read_input 'INPUT_FAIL-ON-RISK')"
+FAIL_ON_RISK="${FAIL_ON_RISK:-true}"
+
+# Pass the token through to post_comment.py via a clean underscore-only env
+# var so the Python side doesn't need to dance around the hyphen problem.
+AISBOM_GITHUB_TOKEN="$(_read_input 'INPUT_GITHUB-TOKEN')"
+export AISBOM_GITHUB_TOKEN
+
 SCAN_LOG="/tmp/aisbom-scan.log"
 
 # Step 1 — Run the scan.
