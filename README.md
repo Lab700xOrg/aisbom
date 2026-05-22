@@ -13,7 +13,7 @@ Install via **Pip** or download our **standalone, air-gapped binary** for USB/of
 
 Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
 
-![AIsbom Demo](assets/aisbom_demo.gif)
+![AIsbom CLI demo](assets/aisbom_cli_demo_v1.0.gif)
 
 ---
 
@@ -239,6 +239,45 @@ Don't like reading JSON? You can visualize your security posture using our **off
 4.  Get an instant dashboard of risks, license issues, and compliance stats.
 
 *Note: The viewer is client-side only. Your SBOM data never leaves your browser.*
+
+---
+
+## Use as a GitHub Action
+
+AIsbom is also available as a [GitHub Action](https://github.com/marketplace/actions/aisbom-security-scanner). Scan ML artifacts on every PR and post a single idempotent comment summarizing findings, with a link to the hosted viewer.
+
+```yaml
+# .github/workflows/aisbom.yml
+name: AIsbom Security Scan
+on:
+  pull_request:
+    paths: ['models/**', 'requirements.txt']
+
+permissions:
+  contents: read
+  pull-requests: write    # required for the PR comment
+
+jobs:
+  aisbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Lab700xOrg/aisbom@v1
+        with:
+          directory: models/
+```
+
+When CRITICAL or HIGH findings are detected, the Action posts a comment like this:
+
+![AIsbom Action — CRITICAL findings](assets/marketplace-critical.png)
+
+When the scan is clean, the comment collapses to a one-line ✅:
+
+![AIsbom Action — clean PR](assets/marketplace-clean.png)
+
+Re-runs update the same comment in place via a hidden `<!-- aisbom-action -->` marker — you'll never see stacked AIsbom comments on the same PR.
+
+See [`action/README_ACTION.md`](action/README_ACTION.md) for the full inputs/outputs reference, permissions block, and troubleshooting.
 
 ---
 
