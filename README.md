@@ -207,29 +207,6 @@ aisbom scan . --format spdx --output sbom.spdx.json
 
 ---
 
-## CI/CD Integration
-
-Add AIsbom to your GitHub Actions pipeline.
-**Behavior:** The scanner returns `exit code 1` if Critical risks are found, automatically blocking the build/merge.
-
-```yaml
-name: AI Security Scan
-on: [pull_request]
-
-jobs:
-  aisbom-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Scan AI Models
-        uses: Lab700xOrg/aisbom@v0
-        with:
-          directory: '.'
-```
-
----
-
 ## Visualize the Report
 Don't like reading JSON? You can visualize your security posture using our **offline** viewer.
 
