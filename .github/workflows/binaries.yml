@@ -9,9 +9,8 @@ permissions:
 
 jobs:
   build-and-upload:
-    # Only build CLI binaries for CLI releases (v0.x.x). v1.x.x tags are the
-    # GitHub Action's Marketplace release and shouldn't carry CLI artifacts.
-    if: startsWith(github.event.release.tag_name, 'v0.')
+    # Build CLI binaries for v1.x.x releases (aligned CLI + Action).
+    if: startsWith(github.event.release.tag_name, 'v1.')
     name: Build binary on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
