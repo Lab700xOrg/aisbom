@@ -7,10 +7,9 @@ on:
 
 jobs:
   build-and-publish:
-    # Only fire for CLI releases (v0.x.x). v1.x.x tags are reserved for the
-    # GitHub Action (Phase 4.5) and must not trigger the PyPI publish or the
-    # `v0` major-version-tag force-push.
-    if: startsWith(github.event.release.tag_name, 'v0.')
+    # Only fire for CLI releases (v1.x.x). CLI and GitHub Action releases
+    # are now aligned.
+    if: startsWith(github.event.release.tag_name, 'v1.')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,13 +39,13 @@ jobs:
           POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
         run: poetry publish --build
       
-      # 6. Update Major Version Tag (e.g. v0)
+      # 6. Update Major Version Tag (e.g. v1)
       - name: Update Major Version Tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f v0
-          git push origin v0 --force
+          git tag -f v1
+          git push origin v1 --force
       
       # 7. Notify ai-sbom-platform to regenerate changelog
       - name: Notify ai-sbom-platform to regenerate changelog
