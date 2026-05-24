@@ -1,84 +1,47 @@
 # AIsbom: The Supply Chain for Artificial Intelligence
 
 [![PyPI version](https://img.shields.io/pypi/v/aisbom-cli.svg)](https://pypi.org/project/aisbom-cli/)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-2088FF?logo=github)](https://github.com/marketplace/actions/aisbom-security-scanner)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Compliance](https://img.shields.io/badge/standard-CycloneDX-green)
 
-**AIsbom** is a specialized security and compliance scanner for Machine Learning artifacts.
-- **SPDX 2.3**: Standard SBOM format for industry compliance.
-- **CycloneDX**: Supported (Default output format).
+**Detect malware and license risks hidden inside ML model files — statically, before you load them.**
 
-Install via **Pip** or download our **standalone, air-gapped binary** for USB/offline audits.
+AIsbom disassembles Pickle bytecode and parses SafeTensors / GGUF binary headers to surface RCE-capable payloads and restrictive licenses that generic SBOM tools miss. Pure static analysis — no model code is ever executed.
 
-Unlike generic SBOM tools that only parse `requirements.txt`, AIsbom performs **Deep Binary Introspection** on model files (`.pt`, `.pkl`, `.safetensors`, `.gguf`) to detect malware risks and legal license violations hidden inside the serialized weights.
+> 💡 Also available as a [**GitHub Action**](#use-as-a-github-action) that posts an idempotent PR comment on every commit. See it on the [Marketplace →](https://github.com/marketplace/actions/aisbom-security-scanner)
 
 ![AIsbom CLI demo](assets/aisbom_cli_demo_v1.0.gif)
 
 ---
 
-## Quick Start
+## Try it in one command
 
-### 1. Installation
-Install directly from PyPI. No cloning required.
-
-```bash
-pip install aisbom-cli
-```
-*Note: The package name is `aisbom-cli`, but the command you run is `aisbom`.*
-
-### 1a. Zero-Install (`pipx run`)
-Want to try AIsbom without committing to an install? Run it ephemerally with [pipx](https://pipx.pypa.io/):
+Zero-install — [pipx](https://pipx.pypa.io/) fetches the latest release, runs it, then cleans up:
 
 ```bash
-# Single throwaway invocation — pipx fetches the latest, runs it, then cleans up.
 pipx run --spec aisbom-cli aisbom scan hf://google-bert/bert-base-uncased
+```
 
-# Or install into pipx's isolated venv (still no system-Python pollution):
-pipx install aisbom-cli
+That scans BERT directly **over HTTP**, without downloading 400 MB of weights to disk. You'll see a security + legal risk table in your terminal and a `sbom.json` file in your current directory. 
+
+**Want to see the same scan visualized?** [Open the live demo →](https://aisbom.io/?ref=cli-readme)
+
+For persistent install:
+
+```bash
+pipx install aisbom-cli           # or: pip install aisbom-cli
 aisbom scan hf://google-bert/bert-base-uncased
 ```
 
-`pipx run` is the fastest path from "I read about this on HN" to seeing a real scan. The `--spec aisbom-cli` is required because our PyPI package name (`aisbom-cli`) differs from the command name (`aisbom`).
+> The PyPI package name is `aisbom-cli`, but the command you run is `aisbom`. That's why `pipx run` needs `--spec aisbom-cli`.
 
-### 1b. Standalone Binary (Air-Gapped)
-For environments where installing Python is not possible, download the single-file executable from our [Releases page](https://github.com/Lab700xOrg/aisbom/releases/latest).
+---
 
-> **📚 Guide:** [How to Audit Air-Gapped / Offline Systems](docs/air-gapped-guide.md)
+## What it finds
 
-**Available Binaries:**
-*   `aisbom-linux-amd64` (Linux x86_64)
-*   `aisbom-macos-amd64` (macOS Intel)
-*   `aisbom-macos-arm64` (macOS Silicon M1/M2/M3)
-
-#### Installation & Troubleshooting (macOS)
-Due to Apple's strict security policies for unsigned binaries, you must explicitly allow the application to run.
-
-```bash
-# 1. Make the binary executable
-chmod +x aisbom-macos-*
-
-# 2. Remove the "Quarantine" attribute (Fixes "Unidentified Developer" error)
-xattr -d com.apple.quarantine aisbom-macos-*
-
-# 3. Run it
-./aisbom-macos-arm64 --help
-```
-
-*Why is `xattr` needed?*
-macOS tags downloaded files with a "quarantine" attribute. Since our open-source binary is not code-signed with an Apple Developer ID, Gatekeeper will block it by default. The `xattr -d` command removes this tag, allowing the binary to execute on your machine.
-*   **Zero Dependencies**: Everything is bundled.
-*   **Portable**: Runs on bare metal servers.
-
-### 2. Run a Local Scan
-Point it at any directory containing your ML project. It scans recursively for requirements files AND binary model artifacts.
-
-```bash
-aisbom scan ./my-project-folder
-```
-
-### 3. The Output
-You will see a combined Security & Legal risk assessment in your terminal:
+A typical scan against a project with mixed artifacts:
 
 ```text
                            🧠 AI Model Artifacts Found                           
@@ -92,93 +55,99 @@ You will see a combined Security & Legal risk assessment in your terminal:
 └─────────────────────┴─────────────┴──────────────────────┴─────────────────────────────┘
 ```
 
-A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data will be generated in your current directory.
+A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data is generated in your working directory. SPDX 2.3 export is one flag away (`--format spdx`).
 
-### 4. Share Your SBOM (New!)
-You can instantly generate a secure, hosted, and shareable link for your SBOM by appending the `--share` flag to your scan.
-
-```bash
-aisbom scan ./my-project-folder --share
-```
-*Note: Your SBOM will be uploaded to aisbom.io and available publicly to anyone with the link for 30 days. You will be prompted for confirmation unless you also pass `--share-yes`.*
+Don't like reading JSON? [Open the viewer →](https://aisbom.io/viewer?ref=cli-readme), drag your `sbom.json` in, and get an instant dashboard of risks, license issues, and compliance stats. *The viewer is client-side only — your data never leaves your browser.*
 
 ---
 
-## Advanced Usage
+## Install
 
-### Remote Scanning (Hugging Face)
-Scan models directly on Hugging Face **without downloading** terabytes of weights. We use HTTP Range requests to inspect headers over the wire.
+| Method | Best for |
+|---|---|
+| `pipx run --spec aisbom-cli aisbom ...` | Trying it without committing |
+| `pipx install aisbom-cli` | Daily use; isolated venv |
+| `pip install aisbom-cli` | Python projects with their own venv |
+| [Standalone binary](https://github.com/Lab700xOrg/aisbom/releases/latest) | Air-gapped / offline / no-Python environments |
+
+### Standalone binaries
+
+Single-file executables for Linux x86_64, macOS Intel, and macOS Silicon. Download from the [Releases page](https://github.com/Lab700xOrg/aisbom/releases/latest). Zero dependencies. Runs on bare metal.
+
+📚 [How to Audit Air-Gapped / Offline Systems](docs/air-gapped-guide.md)
+
+#### macOS quarantine note
+
+macOS tags downloaded files with a "quarantine" attribute, and unsigned open-source binaries get blocked by Gatekeeper. Run once:
+
+```bash
+chmod +x aisbom-macos-*
+xattr -d com.apple.quarantine aisbom-macos-*
+./aisbom-macos-arm64 --help
+```
+
+---
+
+## Common workflows
+
+### Scan a Hugging Face model
 
 ```bash
 aisbom scan hf://google-bert/bert-base-uncased
 ```
-*   **Speed:** Scans in seconds, not minutes.
-*   **Storage:** Zero disk usage.
-*   **Security:** Verify "SafeTensors" compliance before you even `git clone`.
 
-### Config Drift Detection
-Detect "Silent Regressions" in your AI Supply Chain. The `diff` command compares your current SBOM against a known baseline JSON.
+We use HTTP Range requests to inspect just the headers — scans complete in seconds and use zero disk. Verify SafeTensors compliance before you `git clone`.
+
+### Share a scan with your team
+
+```bash
+aisbom scan ./my-project-folder --share
+```
+
+Generates a hosted, shareable link. The SBOM is uploaded to `aisbom.io` and remains viewable for 30 days. You'll be prompted to confirm before upload (use `--share-yes` to skip the prompt in CI).
+
+### Detect drift between two scans
 
 ```bash
 aisbom diff baseline_sbom.json new_sbom.json
 ```
 
-**Drift Analysis Output:**
+Exits with **code 1** when:
+- A new **CRITICAL** risk is introduced
+- A component's risk level escalates (e.g., LOW → CRITICAL)
+- A verified file's hash changes (marked **INTEGRITY FAIL**)
 
 ```text
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
-┃ Component     ┃ Type     ┃ Change  ┃ Security Risk  ┃ Legal Risk      ┃ Details        ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
-│ drift-risk.pt │ Modified │ DRIFT   │ LOW ->         │ -               │                │
-│               │          │         │ CRITICAL       │                 │                │
-│ drift-license │ Modified │ DRIFT   │ -              │ UNKNOWN ->      │ Lic: MIT ->    │
-│               │          │         │                │ LEGAL RISK      │ CC-BY-NC       │
-│ drift-hash.pt │ Modified │ DRIFT   │ INTEGRITY FAIL │ -               │ Hash: ...      │
-└───────────────┴──────────┴─────────┴────────────────┴─────────────────┴────────────────┘
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Component     ┃ Type     ┃ Change  ┃ Security Risk        ┃ Legal Risk         ┃ Details        ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ drift-risk.pt │ Modified │ DRIFT   │ LOW → CRITICAL       │ -                  │                │
+│ drift-license │ Modified │ DRIFT   │ -                    │ UNKNOWN →          │ Lic: MIT →     │
+│               │          │         │                      │ LEGAL RISK         │ CC-BY-NC       │
+│ drift-hash.pt │ Modified │ DRIFT   │ INTEGRITY FAIL       │ -                  │ Hash: ...      │
+└───────────────┴──────────┴─────────┴──────────────────────┴────────────────────┴────────────────┘
 ```
 
-It enforces Quality Gates by exiting with **code 1** if:
-*   A new **CRITICAL** risk is introduced.
-*   A Component's risk level escalates (e.g., LOW -> CRITICAL).
-*   **Hash Drift**: A verified file has been tampered with (Marked as INTEGRITY FAIL).
+### Strict mode (allowlist)
 
-### Strict Mode (Allowlisting)
-For high-security environments, switch from "Blocklisting" (looking for malware) to "Allowlisting" (blocking everything unknown).
+For high-security environments, switch from blocklisting (looking for known-bad imports) to allowlisting (blocking everything unknown):
 
 ```bash
 aisbom scan model.pkl --strict
 ```
 
-This will report **any** import that is not in the safe-list.
-**Allowed Libraries**: `torch` (and submodules), `numpy`, `collections`, `typing`, `datetime`, `re`, `pathlib`, `copy`, `functools`, `dataclasses`, `uuid`.
-**Allowed Builtins**: `dict`, `list`, `set`, `tuple`, `int`, `float`, `str`, `bytes`, etc., etc.).
-*   Flags *any* unknown global import as `CRITICAL`.
+Allowed modules: `torch` (and submodules), `numpy`, `collections`, `typing`, `datetime`, `re`, `pathlib`, `copy`, `functools`, `dataclasses`, `uuid`. Any unknown global import is flagged **CRITICAL**.
 
-### Migration Readiness (PyTorch weights_only=True)
-Prepare your models for the upcoming PyTorch security defaults. PyTorch 2.6+ will default to `weights_only=True`, which breaks many legacy models.
+### Migration readiness (`weights_only=True`)
+
+PyTorch 2.6+ defaults to `weights_only=True`, which breaks many legacy models:
 
 ```bash
 aisbom scan model.pt --lint
 ```
 
-The `--lint` flag activates the Migration Linter, which statically simulates the unpickling stack to predict runtime failures without executing code.
+The Migration Linter statically simulates the unpickling stack to predict runtime failures without executing code.
 
-### Strategy: Defense in Depth
-
-AIsbom advocates for a two-layer security approach:
-
-1.  **Layer 1 (Pre-Execution):** Use `aisbom scan --lint` to statically analyze the file structure. This catches 99% of obvious malware and incompatible globals without ever loading the file.
-2.  **Layer 2 (Runtime Isolation):** If you *must* load a model that uses `REDUCE` or unsafe globals (common in legacy files), do not run it on bare metal.
-    *   **Recommendation:** Use [Sandboxed Execution](docs/sandboxed-execution.md) (e.g., `uvx` + `amazing-sandbox`) to contain any potential RCE.
-
-> [!TIP]
-> **Why both?** Static analysis is fast but can be tricked by complex obfuscation. Runtime sandboxing is secure but slow. Together, they provide speed and safety.
-
-**It detects:**
-*   **Custom Class Imports**: Objects that are not in the PyTorch default allowlist.
-*   **Unsafe Globals**: Usage of `posix.system` or other unsafe modules.
-
-**Output:**
 ```text
 🛡️  Migration Readiness (weights_only=True)
 ┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -187,19 +156,18 @@ AIsbom advocates for a two-layer security approach:
 │ mock_broken.pt │ Custom Class Import Detected: │ Module 'aisbom' is not in PyTorch      │
 │                │ aisbom.mock.Layer             │ default allowlist. Use                 │
 │                │                               │ `torch.serialization.add_safe_globals` │
-│                │                               │ .                                      │
 └────────────────┴───────────────────────────────┴────────────────────────────────────────┘
 ```
 
-### Markdown Reporting (CI/CD)
-Generate a GitHub-flavored Markdown report suitable for Pull Request comments.
+### Markdown report (CI/CD)
 
 ```bash
 aisbom scan . --format markdown --output report.md
 ```
 
-### SPDX Export (Enterprise Compliance)
-Generate SPDX 2.3 Software Bill of Materials.
+Generates a GitHub-flavored Markdown report suitable for PR comments and CI artifacts.
+
+### SPDX 2.3 export (enterprise compliance)
 
 ```bash
 aisbom scan . --format spdx --output sbom.spdx.json
@@ -207,21 +175,9 @@ aisbom scan . --format spdx --output sbom.spdx.json
 
 ---
 
-## Visualize the Report
-Don't like reading JSON? You can visualize your security posture using our **offline** viewer.
-
-1.  Run the scan to generate `sbom.json`.
-2.  Go to [aisbom.io/viewer.html](https://aisbom.io/viewer.html).
-3.  Drag and drop your JSON file.
-4.  Get an instant dashboard of risks, license issues, and compliance stats.
-
-*Note: The viewer is client-side only. Your SBOM data never leaves your browser.*
-
----
-
 ## Use as a GitHub Action
 
-AIsbom is also available as a [GitHub Action](https://github.com/marketplace/actions/aisbom-security-scanner). Scan ML artifacts on every PR and post a single idempotent comment summarizing findings, with a link to the hosted viewer.
+Scan ML artifacts on every PR and post a single idempotent comment summarizing findings, with a link to the hosted viewer:
 
 ```yaml
 # .github/workflows/aisbom.yml
@@ -258,13 +214,56 @@ See [`action/README_ACTION.md`](action/README_ACTION.md) for the full inputs/out
 
 ---
 
+## Try it on a real pickle bomb
+
+Don't trust the scanner? Scan a bomb yourself. AIsbom ships a built-in mock-malware generator so you can confirm the scanner catches a real RCE payload (and that it's not just lighting up false positives on safe files).
+
+```bash
+# 1. Generate the mock artifacts
+aisbom generate-test-artifacts
+
+# 2. Scan them
+aisbom scan .
+```
+
+You'll see `mock_malware.pt` flagged as **CRITICAL**, license issues flagged on the restricted models, and (with `--lint`) `mock_broken.pt` appear in the Migration Readiness table.
+
+---
+
+## Defense in Depth
+
+AIsbom advocates for a two-layer approach:
+
+1. **Layer 1 — Pre-execution.** `aisbom scan --lint` statically analyzes the file structure. Catches obvious malware and incompatible globals without ever loading the file.
+2. **Layer 2 — Runtime isolation.** If you *must* load a model with `REDUCE` opcodes or unsafe globals (common in legacy files), don't run it on bare metal. Use [Sandboxed Execution](docs/sandboxed-execution.md) (e.g., `uvx` + `amazing-sandbox`) to contain any potential RCE.
+
+> [!TIP]
+> **Why both?** Static analysis is fast but can be defeated by complex obfuscation. Runtime sandboxing is secure but slow. Together, they give you speed *and* safety.
+
+---
+
 ## Why AIsbom?
 
-AI models are not just text files; they are executable programs and IP assets.
+AI models aren't just text files — they're executable programs and IP assets.
 
-*   **The Security Risk:** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model can execute arbitrary code (RCE) instantly when loaded.
-*   **The Legal Risk:** A developer might download a "Non-Commercial" model (CC-BY-NC) and deploy it to production. Since the license is hidden inside the binary header, standard tools miss it.
-*   **The Solution:** **We look inside.** We decompile bytecode and parse internal metadata headers without loading the heavy weights into RAM.
+- **The security risk.** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model executes arbitrary code (RCE) the moment it's loaded.
+- **The legal risk.** A developer might download a "non-commercial" model (e.g., CC-BY-NC) and ship it to production. The license is embedded in the binary header — standard SBOM tools miss it entirely.
+- **The solution.** AIsbom looks *inside*. We decompile bytecode and parse binary metadata headers without loading the heavy weights into memory.
+
+---
+
+## How it works
+
+AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It looks for specific `GLOBAL` and `STACK_GLOBAL` instructions referencing dangerous modules:
+
+- `os` / `posix` (system calls)
+- `subprocess` (shell execution)
+- `builtins.eval` / `exec` (dynamic code execution)
+- `socket` (network reverse shells)
+
+SafeTensors and GGUF use binary formats with structured headers — AIsbom parses these headers directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
+
+For weekly scan findings on the top 50 most-downloaded Hugging Face text-generation models, see [aisbom.io/advisories](https://aisbom.io/advisories?ref=cli-readme).
 
 ---
 
@@ -314,35 +313,14 @@ As of **0.9.1**, telemetry is **on by default**. `AISBOM_NO_TELEMETRY=1` is the 
 
 ---
 
-## How to Verify (The "Trust Factor")
+## Links
 
-Security tools require trust. **We do not distribute malicious binaries.**
-
-However, AIsbom includes a built-in generator so you can create safe "mock artifacts" to verify the scanner works.
-
-**1. Install:**
-```bash
-pip install aisbom-cli
-```
-
-**2. Generate Test Artifacts:**
-Run this command to create a mock "Pickle Bomb" and a "Restricted License" model in your current folder.
-```bash
-aisbom generate-test-artifacts
-```
-*Result: Files named `mock_malware.pt`, `mock_restricted.safetensors`, `mock_restricted.gguf`, and `mock_broken.pt` are created.*
-
-**3. Scan them:**
-```bash
-aisbom scan .
-```
-*Result: You will see `mock_malware.pt` flagged as **CRITICAL**, legal risks flagged, and if you run with `--lint`, `mock_broken.pt` will appear in the Migration Readiness table.*
+- [aisbom.io](https://aisbom.io/?ref=cli-readme) — landing page + live viewer demo
+- [Live SBOM viewer](https://aisbom.io/viewer?ref=cli-readme) — drag-and-drop dashboard
+- [Public advisories](https://aisbom.io/advisories?ref=cli-readme) — weekly scans of the top 50 HF models
+- [Changelog](https://aisbom.io/changelog?ref=cli-readme) — release history with RSS feed
+- [GitHub Marketplace](https://github.com/marketplace/actions/aisbom-security-scanner) — the Action listing
 
 ---
 
-## Security Logic Details
-AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It looks for specific `GLOBAL` and `STACK_GLOBAL` instructions that reference dangerous modules:
-*   `os` / `posix` (System calls)
-*   `subprocess` (Shell execution)
-*   `builtins.eval` / `exec` (Dynamic code execution)
-*   `socket` (Network reverse shells)
+*Built with ❤️ in Austin, San Francisco, Berlin, and Tokyo.*
