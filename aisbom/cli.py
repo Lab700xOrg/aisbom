@@ -26,7 +26,10 @@ from . import telemetry
 import requests
 
 app = typer.Typer()
-console = Console()
+# highlight=False disables Rich's auto-decoration of numbers/paths/IPs in
+# plain f-strings. Without it, things like "aisbom 1.0.3" or "v1.6" get
+# partial cyan coloring that looks like markup bugs.
+console = Console(highlight=False)
 
 
 @app.callback(invoke_without_command=True)
