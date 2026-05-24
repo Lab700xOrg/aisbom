@@ -112,6 +112,7 @@ class DeepScanner:
             "hash": "remote_unhashed" if is_remote else self._calculate_hash(local_path),
             "details": {}
         }
+        stream = None
         try:
             # Choose stream
             if local_path:
@@ -200,10 +201,14 @@ class DeepScanner:
                          except Exception as e:
                              meta["details"]["lint_error"] = str(e)
                      meta["risk_level"] = "CRITICAL (Legacy Binary)"
-            if local_path and not stream.closed:
-                stream.close()
         except Exception as e:
             meta["error"] = str(e)
+        finally:
+            if local_path and stream:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
         return meta
 
     def _inspect_safetensors(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
@@ -224,6 +229,7 @@ class DeepScanner:
             "hash": "remote_unhashed" if is_remote else self._calculate_hash(local_path),
             "details": {}
         }
+        f = None
         try:
             f = open(local_path, "rb") if local_path else source
             f.seek(0)
@@ -244,10 +250,14 @@ class DeepScanner:
                     "tensors": len(header_json.keys()),
                     "metadata": metadata
                 }
-            if local_path:
-                f.close()
         except Exception as e:
             meta["error"] = str(e)
+        finally:
+            if local_path and f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
         return meta
 
     def _inspect_gguf(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
@@ -272,6 +282,7 @@ class DeepScanner:
             "details": {}
         }
 
+        f = None
         try:
             f = open(local_path, "rb") if local_path else source
             f.seek(0)
@@ -333,7 +344,7 @@ class DeepScanner:
                         extracted_meta[key] = value
                     if "architecture" in key:
                         extracted_meta["arch"] = value
-
+ 
             # 4. Analyze License
             # GGUF usually stores it as "general.license"
             lic = extracted_meta.get("general.license") or extracted_meta.get("license") or "Unknown"
@@ -345,7 +356,10 @@ class DeepScanner:
             meta['details']['error'] = str(e)
         finally:
             if local_path and f:
-                f.close()
+                try:
+                    f.close()
+                except Exception:
+                    pass
             
         return meta
 
