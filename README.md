@@ -323,4 +323,4 @@ As of **0.9.1**, telemetry is **on by default**. `AISBOM_NO_TELEMETRY=1` is the 
 
 ---
 
-*Built with ❤️ in Austin, San Francisco, Berlin, and Tokyo.*
+*Built with ❤️ in Austin.*
