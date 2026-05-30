@@ -69,6 +69,8 @@ When there are no CRITICAL or HIGH findings, the comment collapses to a one-line
 | `max-rows` | `10` | Maximum rows shown in the findings table; overflow collapses into a "+ N more" line. |
 | `comment-on-clean` | `true` | Post a comment when no CRITICAL/HIGH findings detected. Set to `"false"` for silence on clean PRs. |
 | `fail-on-risk` | `true` | Exit non-zero on CRITICAL findings. Set to `"false"` to make scans informational. |
+| `token` | _(empty)_ | Optional. Per-repo API token for posting the generated SBOM to a persistent inventory dashboard. Leave unset for purely local PR-comment behavior. (The dashboard is in private early access.) |
+| `fail-on-platform-error` | `false` | Default false. When true, a failed upload fails the CI job. |
 
 ## Outputs
 

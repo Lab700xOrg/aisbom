@@ -12,6 +12,9 @@
 #   $4  max-rows             (default "10")
 #   $5  comment-on-clean     (default "true")
 #   $6  fail-on-risk         (default "true")
+#   $7  token                (optional — opt-in for platform upload)
+#   $8  platform-url         (optional override; blank → default in helper)
+#   $9  fail-on-platform-error  (default "false")
 #
 # Bash (not POSIX sh) is required for the PIPESTATUS array — we need the
 # scan's exit code, not tee's, to honor fail-on-risk correctly.
@@ -19,6 +22,7 @@
 # Exit codes:
 #   0 — Scan succeeded OR scan reported risks but fail-on-risk is false.
 #   2 — Scan reported CRITICAL findings AND fail-on-risk is true.
+#   3 — Platform upload failed AND fail-on-platform-error is true.
 #
 # Comment-posting failures NEVER fail the job (logged but tolerated so the
 # user fixes their `permissions:` block, not the scan).
@@ -31,6 +35,9 @@ GH_TOKEN="${3:-}"
 MAX_ROWS="${4:-10}"
 COMMENT_ON_CLEAN="${5:-true}"
 FAIL_ON_RISK="${6:-true}"
+INPUT_TOKEN="${7:-}"
+INPUT_PLATFORM_URL="${8:-}"
+INPUT_FAIL_ON_PLATFORM_ERROR="${9:-false}"
 
 # Pass the token through to post_comment.py via a clean underscore-only env
 # var. We never echo $GH_TOKEN — GitHub already masks it in the docker-run
@@ -80,6 +87,27 @@ fi
 if [ "${FAIL_ON_RISK}" = "true" ] && [ "${SCAN_EXIT}" -eq 2 ]; then
     echo "[aisbom-action] CRITICAL risks detected; failing the job (fail-on-risk=true)."
     exit 2
+fi
+
+# Step 4 — Optional platform upload. Silent skip when no token,
+# preserving CLI-only behavior for the broad user base. Opted-in users see
+# the loud log group emitted by platform_upload.py.
+PLATFORM_EXIT=0
+if [ -n "${INPUT_TOKEN}" ] && [ -f "${OUTPUT_FILE}" ]; then
+    FAIL_FLAG=""
+    if [ "${INPUT_FAIL_ON_PLATFORM_ERROR}" = "true" ]; then
+        FAIL_FLAG="--fail-on-error"
+    fi
+    python /aisbom-action/platform_upload.py \
+      --sbom "${OUTPUT_FILE}" \
+      --token "${INPUT_TOKEN}" \
+      --platform-url "${INPUT_PLATFORM_URL}" \
+      --trigger "${GITHUB_EVENT_NAME:-unknown}" \
+      ${FAIL_FLAG} || PLATFORM_EXIT=$?
+fi
+
+if [ "${PLATFORM_EXIT}" -ne 0 ]; then
+    exit "${PLATFORM_EXIT}"
 fi
 
 exit 0

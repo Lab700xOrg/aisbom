@@ -32,6 +32,18 @@ inputs:
     description: 'Exit the job with a non-zero status when CRITICAL findings are detected (matches the CLI default). Set to "false" to make scans informational only.'
     required: false
     default: 'true'
+  token:
+    description: 'Optional. Per-repo API token for posting the generated SBOM to a persistent inventory dashboard. Leave unset for purely local PR-comment behavior. (The dashboard is in private early access.)'
+    required: false
+    default: ''
+  platform-url:
+    description: 'Override for the platform webhook URL. Leave blank to use the default. Only meaningful when `token:` is set.'
+    required: false
+    default: ''
+  fail-on-platform-error:
+    description: 'Default false. When true, a failed upload fails the CI job.'
+    required: false
+    default: 'false'
 
 outputs:
   sbom-path:
@@ -55,3 +67,6 @@ runs:
     - ${{ inputs.max-rows }}
     - ${{ inputs.comment-on-clean }}
     - ${{ inputs.fail-on-risk }}
+    - ${{ inputs.token }}
+    - ${{ inputs.platform-url }}
+    - ${{ inputs.fail-on-platform-error }}
