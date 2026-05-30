@@ -98,16 +98,26 @@ if [ -n "${INPUT_TOKEN}" ] && [ -f "${OUTPUT_FILE}" ]; then
     if [ "${INPUT_FAIL_ON_PLATFORM_ERROR}" = "true" ]; then
         FAIL_FLAG="--fail-on-error"
     fi
+    # Use `--key=value` form (not space-separated) so argparse never confuses
+    # a value that starts with `-` for another option flag. Platform-issued
+    # tokens are base64url and ~1.5% of them legitimately start with `-`.
     python /aisbom-action/platform_upload.py \
-      --sbom "${OUTPUT_FILE}" \
-      --token "${INPUT_TOKEN}" \
-      --platform-url "${INPUT_PLATFORM_URL}" \
-      --trigger "${GITHUB_EVENT_NAME:-unknown}" \
+      --sbom="${OUTPUT_FILE}" \
+      --token="${INPUT_TOKEN}" \
+      --platform-url="${INPUT_PLATFORM_URL}" \
+      --trigger="${GITHUB_EVENT_NAME:-unknown}" \
       ${FAIL_FLAG} || PLATFORM_EXIT=$?
 fi
 
-if [ "${PLATFORM_EXIT}" -ne 0 ]; then
+# Honour fail-on-platform-error even when the helper exited before its own
+# error-handling could fire (e.g. argparse usage error). Without this gate,
+# the default `fail-on-platform-error: false` silently degraded into "fail
+# the job on any helper crash", which contradicts the documented contract.
+if [ "${PLATFORM_EXIT}" -ne 0 ] && [ "${INPUT_FAIL_ON_PLATFORM_ERROR}" = "true" ]; then
     exit "${PLATFORM_EXIT}"
+fi
+if [ "${PLATFORM_EXIT}" -ne 0 ]; then
+    echo "[aisbom-action] Platform upload exited ${PLATFORM_EXIT}; tolerated (fail-on-platform-error=false)."
 fi
 
 exit 0

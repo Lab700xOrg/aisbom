@@ -277,3 +277,43 @@ def test_main_passes_fail_on_error_flag(sbom_file: Path):
         ])
     assert rc == 3
     assert mock_upload.call_args.kwargs["fail_on_error"] is True
+
+
+# ---------------------------------------------------------------------------
+# parse_args — argparse strictness around dash-leading values
+#
+# Regression for 2026-05-30: roughly 1.5% of platform-issued base64url tokens
+# begin with `-`. The entrypoint must use `--key=value` form so argparse
+# doesn't misread the token as another option. These tests lock the
+# contract from BOTH directions: `=` form must accept dash-leading values,
+# space form must STILL fail for them (so a future regression in the
+# entrypoint surfaces immediately rather than going silent).
+# ---------------------------------------------------------------------------
+
+def test_parse_args_accepts_dash_leading_token_with_equals_form():
+    ns = platform_upload.parse_args([
+        "--sbom=any.json",
+        "--token=-DashLeading_xyz",
+        "--platform-url=",
+        "--trigger=push",
+    ])
+    assert ns.token == "-DashLeading_xyz"
+    assert ns.sbom == "any.json"
+
+
+def test_parse_args_accepts_double_dash_token_with_equals_form():
+    ns = platform_upload.parse_args(["--sbom=x", "--token=--weird"])
+    assert ns.token == "--weird"
+
+
+def test_parse_args_rejects_dash_leading_token_with_space_form():
+    # This is the actual production bug. We assert the failure mode so that
+    # if the entrypoint ever drifts back to space-separated args, this test
+    # fails loudly at PR time instead of silently in customer CI.
+    with pytest.raises(SystemExit):
+        platform_upload.parse_args(["--sbom", "x", "--token", "-x"])
+
+
+def test_parse_args_empty_token_with_equals_form_is_allowed():
+    ns = platform_upload.parse_args(["--sbom=x", "--token="])
+    assert ns.token == ""
