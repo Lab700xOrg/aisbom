@@ -51,6 +51,46 @@ def test_cli_scan_subprocess_creates_sbom(tmp_path):
     assert {"mock_malware.pt", "mock_restricted.safetensors", "mock_restricted.gguf", "torch", "requests"} <= names
 
 
+def test_cli_scan_emits_namespaced_properties_per_format(tmp_path):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+
+    output_path = tmp_path / "sbom.json"
+    _run_cli(["scan", str(tmp_path), "--output", str(output_path)], cwd=tmp_path)
+
+    sbom = json.loads(output_path.read_text())
+    by_name = {c["name"]: c for c in sbom["components"]}
+
+    def props(comp):
+        out = {}
+        for p in comp.get("properties", []):
+            out.setdefault(p["name"], []).append(p["value"])
+        return out
+
+    # Pickle: format + at least one opcode + a count, all aisbom:* namespaced.
+    pkl = props(by_name["mock_malware.pt"])
+    assert pkl["aisbom:format"] == ["pickle"]
+    assert len(pkl["aisbom:pickle:opcode"]) >= 1
+    assert pkl["aisbom:pickle:opcode_count"][0] == str(len(pkl["aisbom:pickle:opcode"]))
+
+    # SafeTensors: format + tensor count.
+    st = props(by_name["mock_restricted.safetensors"])
+    assert st["aisbom:format"] == ["safetensors"]
+    assert "aisbom:safetensors:tensor_count" in st
+
+    # GGUF: format + metadata keys.
+    gg = props(by_name["mock_restricted.gguf"])
+    assert gg["aisbom:format"] == ["gguf"]
+    assert "aisbom:gguf:metadata_keys" in gg
+
+    # Backwards compatibility: the human description string is unchanged.
+    assert by_name["mock_malware.pt"]["description"].startswith("Risk:")
+    for comp in (by_name["mock_malware.pt"], by_name["mock_restricted.safetensors"]):
+        for name in props(comp):
+            assert name.startswith("aisbom:")
+
+
 def test_cli_info_shows_version(tmp_path):
     result = _run_cli(["info"], cwd=tmp_path)
     assert result.returncode == 0, result.stderr
