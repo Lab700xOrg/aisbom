@@ -246,9 +246,22 @@ class DeepScanner:
                 meta["license"] = license_info
                 meta["legal_status"] = self._assess_legal_risk(license_info)
 
+                # Structured per-format findings (consumed by the platform's
+                # artifact drawer as CycloneDX properties). "__metadata__" is a
+                # header key but not a tensor, so exclude it from the count.
+                tensor_entries = {
+                    k: v for k, v in header_json.items() if k != "__metadata__"
+                }
+                dtypes = sorted({
+                    v.get("dtype")
+                    for v in tensor_entries.values()
+                    if isinstance(v, dict) and v.get("dtype")
+                })
                 meta["details"] = {
-                    "tensors": len(header_json.keys()),
-                    "metadata": metadata
+                    "tensors": len(tensor_entries),
+                    "metadata": metadata,
+                    "dtypes": dtypes,
+                    "header_keys": list(header_json.keys()),
                 }
         except Exception as e:
             meta["error"] = str(e)
@@ -304,52 +317,74 @@ class DeepScanner:
             kv_count = struct.unpack('<Q', kv_count_bytes)[0]
             
             extracted_meta = {}
-            
+            metadata_keys = []   # every KV key we successfully read (for properties)
+            quantization = None  # general.file_type / quantization_version (scalar)
+
+            # Little-endian struct formats for the integer scalar types, so we
+            # can decode quantization enums rather than blindly skipping them.
+            int_fmt = {0: '<B', 1: '<b', 2: '<H', 3: '<h', 4: '<I', 5: '<i', 10: '<Q', 11: '<q'}
+
             # 3. Parse Key-Value Pairs
-            # We interpret just enough to find the license
+            # We interpret just enough to find the license, architecture, and
+            # quantization, and to enumerate the metadata keys present.
             for _ in range(kv_count):
                 # Read Key (String: Length (Q) + Bytes)
                 key_len_b = f.read(8)
                 if not key_len_b: break
                 key_len = struct.unpack('<Q', key_len_b)[0]
                 key = f.read(key_len).decode('utf-8', errors='ignore')
-                
+
                 # Read Value Type (uint32)
                 type_b = f.read(4)
                 val_type = struct.unpack('<I', type_b)[0]
-                
+
                 # GGUF Value Types: 8=String, others are numbers/bools/arrays
                 # We strictly care about Strings (8) for metadata
                 value = "N/A"
                 if val_type == 8: # String
                     val_len = struct.unpack('<Q', f.read(8))[0]
                     value = f.read(val_len).decode('utf-8', errors='ignore')
-                elif val_type in [0, 1, 2, 3, 4, 5, 10, 11, 12]: 
-                    # Simple scalar types (1-8 bytes), skip them to get to next key
-                    # Mapping sizes roughly: 
+                elif val_type in [0, 1, 2, 3, 4, 5, 10, 11, 12]:
+                    # Simple scalar types (1-8 bytes), read them to get to next key
+                    # Mapping sizes roughly:
                     # 0(uint8):1, 1(int8):1, 2(uint16):2, 3(int16):2, 4(uint32):4, 5(int32):4
                     # 10(uint64):8, 11(int64):8, 12(float64):8
                     skip_map = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:8, 10:8, 11:8, 12:8}
                     skip = skip_map.get(val_type, 0)
-                    if skip > 0: f.read(skip)
+                    raw = f.read(skip) if skip > 0 else b""
                     if val_type == 12: value = "float" # Placeholder
+                    # Quantization is stored as an integer enum, usually under
+                    # general.file_type (or general.quantization_version).
+                    if ("file_type" in key or "quantization" in key) and val_type in int_fmt:
+                        try:
+                            quantization = struct.unpack(int_fmt[val_type], raw)[0]
+                        except struct.error:
+                            pass
                 elif val_type == 9: # Array
                     # Arrays are complex to skip without recursion, abort parsing to avoid crash
                     # Most metadata strings are at the top of the file anyway
-                    break 
-                
+                    metadata_keys.append(key)
+                    break
+
+                metadata_keys.append(key)
+
                 # Capture interesting keys
                 if val_type == 8:
                     if "license" in key:
                         extracted_meta[key] = value
                     if "architecture" in key:
                         extracted_meta["arch"] = value
- 
+
             # 4. Analyze License
             # GGUF usually stores it as "general.license"
             lic = extracted_meta.get("general.license") or extracted_meta.get("license") or "Unknown"
             meta["license"] = lic
             meta["legal_status"] = self._assess_legal_risk(lic)
+            # Structured per-format findings for CycloneDX properties.
+            extracted_meta["architecture"] = extracted_meta.get("arch")
+            if quantization is not None:
+                extracted_meta["quantization"] = quantization
+            extracted_meta["metadata_keys"] = metadata_keys
             meta["details"] = extracted_meta
 
         except Exception as e:

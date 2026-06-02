@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.panel import Panel
 from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
-from cyclonedx.model import HashAlgorithm, HashType
+from cyclonedx.model import HashAlgorithm, HashType, Property
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
 from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms, create_mock_broken_file
@@ -17,6 +17,7 @@ from pathlib import Path
 import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
+from .properties import build_component_properties
 
 import threading
 import time
@@ -465,7 +466,13 @@ def scan(
             # Create a License object (using name since we don't have SPDX ID validation yet)
             lic = lf.make_from_string(art['license'])
             c.licenses.add(lic)
-        
+
+        # Attach structured, namespaced per-format findings as CycloneDX
+        # properties so consumers can render them directly (the description
+        # string above is kept unchanged for backwards compatibility).
+        for prop_name, prop_value in build_component_properties(art):
+            c.properties.add(Property(name=prop_name, value=prop_value))
+
         bom.components.add(c)
 
     # Add Libraries
