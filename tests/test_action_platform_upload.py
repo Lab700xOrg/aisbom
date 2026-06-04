@@ -68,6 +68,28 @@ def test_compute_run_id_missing_run_id_returns_unknown():
 
 
 # ---------------------------------------------------------------------------
+# compute_ref
+# ---------------------------------------------------------------------------
+
+def test_compute_ref_returns_branch_name():
+    env = {"GITHUB_REF_NAME": "release/v2"}
+    assert platform_upload.compute_ref(env) == "release/v2"
+
+
+def test_compute_ref_strips_whitespace():
+    env = {"GITHUB_REF_NAME": "  main  "}
+    assert platform_upload.compute_ref(env) == "main"
+
+
+def test_compute_ref_missing_returns_none():
+    assert platform_upload.compute_ref({}) is None
+
+
+def test_compute_ref_blank_returns_none():
+    assert platform_upload.compute_ref({"GITHUB_REF_NAME": "   "}) is None
+
+
+# ---------------------------------------------------------------------------
 # summarize_response
 # ---------------------------------------------------------------------------
 
@@ -206,7 +228,48 @@ def test_upload_sets_required_headers(sbom_file: Path):
     assert headers["Content-Type"] == "application/json"
     assert headers["X-Aisbom-Trigger"] == "pull_request"
     assert headers["X-Aisbom-Run-Id"] == "999-3"
+    # No GITHUB_REF_NAME in env above → the ref header must be omitted entirely
+    # (never sent as an empty string).
+    assert "X-Aisbom-Ref" not in headers
     assert captured["url"].endswith("/v1/scan-result")
+
+
+def test_upload_sends_ref_header_when_present(sbom_file: Path):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["headers"] = kwargs["headers"]
+        return _mock_response(200, "ok")
+
+    with patch("requests.post", side_effect=fake_post):
+        platform_upload.upload(
+            sbom_path=str(sbom_file),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=False,
+            env={"GITHUB_REF_NAME": "feature/foo"},
+        )
+    assert captured["headers"]["X-Aisbom-Ref"] == "feature/foo"
+
+
+def test_upload_omits_ref_header_when_absent(sbom_file: Path):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["headers"] = kwargs["headers"]
+        return _mock_response(200, "ok")
+
+    with patch("requests.post", side_effect=fake_post):
+        platform_upload.upload(
+            sbom_path=str(sbom_file),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=False,
+            env={},  # no GITHUB_REF_NAME
+        )
+    assert "X-Aisbom-Ref" not in captured["headers"]
 
 
 def test_upload_emits_log_group_with_disable_hint(sbom_file: Path, capsys):
