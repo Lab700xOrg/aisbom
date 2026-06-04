@@ -29,6 +29,16 @@ def compute_run_id(env: Mapping[str, str]) -> str:
     return f"{run_id}-{attempt}"
 
 
+def compute_ref(env: Mapping[str, str]) -> str | None:
+    """The branch/tag actually scanned, sourced from GITHUB_REF_NAME.
+
+    Returns None when unset or blank so callers can omit the header entirely
+    rather than send an empty string (mirrors compute_run_id's env sourcing).
+    """
+    ref = (env.get("GITHUB_REF_NAME") or "").strip()
+    return ref or None
+
+
 def summarize_response(status: int, body: str) -> str:
     snippet = (body or "")[:400]
     return f"status={status} body={snippet!r}"
@@ -51,13 +61,25 @@ def upload(
     base = normalize_platform_url(platform_url)
     url = f"{base}{WEBHOOK_PATH}"
     run_id = compute_run_id(env)
+    ref = compute_ref(env)
 
     # Loud, neutral log group — opted-in users see exactly where the data goes
     # and how to turn it off.
     print("::group::aisbom platform upload")
     print(f"[aisbom-action] POST {url}")
-    print(f"[aisbom-action] trigger={trigger} run-id={run_id}")
+    print(f"[aisbom-action] trigger={trigger} run-id={run_id} ref={ref or '-'}")
     print("[aisbom-action] To disable, unset AISBOM_TOKEN in the repo secrets.")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Aisbom-Trigger": trigger,
+        "X-Aisbom-Run-Id": run_id,
+    }
+    # Only send the ref when we actually know it — an empty header would be a
+    # lie the receiver can't distinguish from "real branch named ''".
+    if ref:
+        headers["X-Aisbom-Ref"] = ref
 
     try:
         with open(sbom_path, "rb") as fh:
@@ -65,12 +87,7 @@ def upload(
         resp = requests.post(
             url,
             data=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "X-Aisbom-Trigger": trigger,
-                "X-Aisbom-Run-Id": run_id,
-            },
+            headers=headers,
             timeout=REQUEST_TIMEOUT_SEC,
         )
     except (requests.RequestException, OSError) as exc:
