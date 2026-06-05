@@ -98,6 +98,32 @@ aisbom scan hf://google-bert/bert-base-uncased
 
 We use HTTP Range requests to inspect just the headers — scans complete in seconds and use zero disk. Verify SafeTensors compliance before you `git clone`.
 
+### Authentication (private & gated Hugging Face models)
+
+To scan a **private or gated** Hugging Face model, set a Hugging Face access token in the environment. AIsbom reads `HF_TOKEN` first, then `HUGGING_FACE_HUB_TOKEN` (the same precedence as `huggingface_hub`):
+
+```bash
+export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
+aisbom scan hf://your-org/private-model
+```
+
+The token is sent **only** to `huggingface.co` as a bearer credential on the model-metadata requests; it is dropped on the redirect to the presigned LFS CDN and is never attached to any other host. It is **never written to logs and never included in telemetry** — the only token-related field we emit is a `token_present` boolean (whether *a* token was set), never the value itself. See [Telemetry & Privacy](#telemetry--privacy).
+
+In CI, supply the token from a secret and make sure the runner can reach Hugging Face:
+
+```yaml
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install aisbom-cli
+      - run: aisbom scan hf://your-org/private-model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+```
+
+> **Egress note:** hosted/firewalled CI runners must allow outbound HTTPS to `huggingface.co` **and** its LFS CDN (`cdn-lfs.huggingface.co` and the presigned object-storage hosts it redirects to). A blocked CDN hop surfaces as a network/timeout error, not an auth failure.
+
 ### Share a scan with your team
 
 ```bash
@@ -279,7 +305,7 @@ If you explicitly use `--share`: the generated `sbom.json` document is uploaded 
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 
-On unhandled exceptions: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`) — never the message, traceback, or any file content.
+On a scan fetch failure or unhandled exception: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`), a low-cardinality `http_status` bucket (e.g. `401`, `timeout`), and a `token_present` boolean (whether an `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` was set) — never the token value, the message, the traceback, a URL, or any file content.
 
 Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC address plus an app salt, truncated to 16 hex chars. Stored in `~/.aisbom/config.json`. Lets us see returning users without identifying anyone.
 
