@@ -14,6 +14,7 @@ from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
 from cyclonedx.factory.license import LicenseFactory
 from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms, create_mock_broken_file
 from pathlib import Path
+from urllib.parse import urlparse
 import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
@@ -31,6 +32,9 @@ app = typer.Typer()
 # plain f-strings. Without it, things like "aisbom 1.0.3" or "v1.6" get
 # partial cyan coloring that looks like markup bugs.
 console = Console(highlight=False)
+# Fetch-failure messages (#58) go to stderr so they don't pollute piped stdout
+# (SBOM JSON, markdown) and survive `aisbom scan … > out.json`.
+err_console = Console(stderr=True, highlight=False)
 
 
 @app.callback(invoke_without_command=True)
@@ -158,6 +162,63 @@ def _token_present() -> str:
     """
     has_token = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
     return "true" if has_token else "false"
+
+
+def _scan_error_payload(exc: BaseException, target: str) -> dict:
+    """Build the `cli_error` telemetry payload for a scan-path failure.
+
+    Single source of truth for the event shape (parent #55) so every emit
+    site — the top-level `except` and the per-target fetch-failure path —
+    sends exactly the same low-cardinality keys and never a URL, repo id,
+    hostname, or response body.
+    """
+    return {
+        "command": "scan",
+        "error_type": type(exc).__name__,
+        "http_status": _classify_http_status(exc),
+        "token_present": _token_present(),
+        "target_type": _classify_target(target),
+    }
+
+
+def _format_fetch_error(exc: BaseException, url: str) -> str:
+    """Status-aware, traceback-free message for a fetch failure.
+
+    Reactive (parent #55, #58): we make the request, then adapt the wording to
+    the *observed* status — the message never claims a cause it can't see. Auth
+    branches additionally split on whether a token was present, so a gated repo
+    with no token and a bad/insufficient token get different remediation.
+    """
+    status = _classify_http_status(exc)
+    if url.startswith("hf://"):
+        # Resolve-time failure: the raw target is a repo id, not a byte URL.
+        host = "huggingface.co"
+        name = url[len("hf://"):] or url
+    else:
+        host = urlparse(url).hostname or "the remote host"
+        name = Path(urlparse(url).path).name or url
+
+    if status in ("401", "403"):
+        if _token_present() == "true":
+            return (
+                f"Authentication failed for {name} despite a token being set. "
+                "Verify HF_TOKEN is valid and has read access — you may need to "
+                "accept the model's license on huggingface.co."
+            )
+        return (
+            f"Authentication failed for {name}; the model appears to be private "
+            "or gated. Set HF_TOKEN with a token that has read access."
+        )
+    if status in ("timeout", "connection_error"):
+        return (
+            f"Network error reaching {host}. In CI, check that egress/firewall "
+            "allows HTTPS to huggingface.co and its LFS CDN."
+        )
+    if status == "404":
+        return f"{name} not found (HTTP 404); check the repo id / URL."
+    if status.isdigit():
+        return f"Failed to fetch {name} (HTTP {status})."
+    return f"Failed to fetch {name}."
 
 
 def _summarize_model_format(artifacts: list[dict]) -> str:
@@ -364,18 +425,12 @@ def scan(
         else:
             results = scanner.scan()
     except Exception as e:
+        # Safety net for unexpected scan crashes. Per-target *fetch* failures are
+        # caught inside the scanner now (recorded as structured errors, no
+        # traceback); anything reaching here is genuinely unexpected.
         err_thread = telemetry.post_event(
             "cli_error",
-            {
-                "command": "scan",
-                "error_type": type(e).__name__,
-                # Diagnostic buckets (parent #55): distinguish auth (401/403),
-                # firewall (timeout/connection_error), and typos (404) in GA4
-                # without ever sending a URL, repo id, hostname, or response body.
-                "http_status": _classify_http_status(e),
-                "token_present": _token_present(),
-                "target_type": _classify_target(target),
-            },
+            _scan_error_payload(e, target),
             scan_id=scan_id,
         )
         _flush_telemetry_threads(telemetry_threads + [err_thread])
@@ -397,6 +452,24 @@ def scan(
         exit_code = max(exit_code, 1)
     if fail_on_risk and highest_risk >= 3:
         exit_code = 2
+
+    # Reactive fetch-failure handling (#58). The scanner caught these per-target
+    # and kept going, so other targets still rendered above. For each one, print
+    # a clean status-aware message to stderr (no traceback) and emit a cli_error
+    # carrying the same diagnostic buckets as the top-level except — so a single
+    # failed scan emits both a cli_error (the failure) and the normal cli_scan
+    # (context) below. Intentional; see the slice notes.
+    fetch_failures = [e for e in results['errors'] if e.get('fetch_failure')]
+    for err in fetch_failures:
+        exc = err.get('exception')
+        err_console.print(
+            f"[bold red]✖[/bold red] {_format_fetch_error(exc, err.get('file', ''))}"
+        )
+        telemetry_threads.append(
+            telemetry.post_event(
+                "cli_error", _scan_error_payload(exc, target), scan_id=scan_id
+            )
+        )
 
     # Telemetry: fire cli_scan plus any conditional follow-ups now that the
     # scan completed and risk is known. Non-blocking; flushed before exit.
@@ -480,9 +553,12 @@ def scan(
     if results['dependencies']:
         console.print(f"\n📦 Found [bold]{len(results['dependencies'])}[/bold] Python libraries.")
 
-    if results['errors']:
+    # Parse errors only — fetch failures already printed their status-aware
+    # message to stderr above and don't fit the "Could not parse" framing.
+    parse_errors = [e for e in results['errors'] if not e.get('fetch_failure')]
+    if parse_errors:
         console.print("\n[bold red]⚠️ Errors Encountered:[/bold red]")
-        for err in results['errors']:
+        for err in parse_errors:
             console.print(f"  - Could not parse [yellow]{err['file']}[/yellow]: {err['error']}")
     
     # 3. Generate CycloneDX SBOM (Standard Compliance)

@@ -134,12 +134,14 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
         repo_id = repo_id[len("hf://") :]
 
     api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
-    try:
-        resp = requests.get(api_url, headers=_auth_headers(api_url))
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
+    # Let fetch failures propagate (no broad swallow): a 401/403 on a
+    # private/gated repo, a 404 typo, or a network error must surface to the
+    # scanner as a real error with a status-aware hint — returning [] here is
+    # what produced the silent "0 artifacts found" (#58). A successful 200 with
+    # no supported files still returns [] below, which is correct.
+    resp = requests.get(api_url, headers=_auth_headers(api_url))
+    resp.raise_for_status()
+    data = resp.json()
 
     supported_exts = (".pt", ".pth", ".bin", ".safetensors", ".gguf")
     urls = []

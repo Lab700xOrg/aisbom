@@ -573,3 +573,133 @@ def test_cli_error_payload_leaks_no_token_url_or_body(monkeypatch):
         "target_type",
     }
 
+
+# ---------------------------------------------------------------------------
+# #58 — Reactive status-aware fetch-failure messages (no traceback)
+# ---------------------------------------------------------------------------
+
+from aisbom.cli import _format_fetch_error
+
+_HF_FILE_URL = "https://huggingface.co/acme/private-model/resolve/main/model.safetensors"
+
+
+def test_format_fetch_error_401_without_token(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    msg = _format_fetch_error(_http_error(401), _HF_FILE_URL)
+    assert "private" in msg or "gated" in msg
+    assert "HF_TOKEN" in msg
+    assert "despite" not in msg  # not the token-present branch
+    assert "model.safetensors" in msg
+
+
+def test_format_fetch_error_403_with_token(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "x")
+    msg = _format_fetch_error(_http_error(403), _HF_FILE_URL)
+    assert "despite a token" in msg
+    assert "read access" in msg
+    assert "license on huggingface.co" in msg
+
+
+def test_format_fetch_error_timeout_names_host():
+    msg = _format_fetch_error(requests.exceptions.Timeout(), _HF_FILE_URL)
+    assert "huggingface.co" in msg
+    assert "egress" in msg or "firewall" in msg
+
+
+def test_format_fetch_error_connection_error_names_host():
+    msg = _format_fetch_error(requests.exceptions.ConnectionError(), _HF_FILE_URL)
+    assert "Network error reaching huggingface.co" in msg
+
+
+def test_format_fetch_error_404():
+    msg = _format_fetch_error(_http_error(404), _HF_FILE_URL)
+    assert "not found" in msg
+    assert "repo id" in msg or "URL" in msg
+
+
+def test_format_fetch_error_other_status_includes_code():
+    msg = _format_fetch_error(_http_error(500), _HF_FILE_URL)
+    assert "Failed to fetch" in msg
+    assert "HTTP 500" in msg
+
+
+def test_format_fetch_error_non_http_has_no_code():
+    msg = _format_fetch_error(ValueError("boom"), _HF_FILE_URL)
+    assert msg == "Failed to fetch model.safetensors."
+
+
+def test_format_fetch_error_hf_resolve_target_uses_repo_id_and_host():
+    # A resolve-time failure passes the raw hf:// target, not a byte URL.
+    msg = _format_fetch_error(_http_error(404), "hf://acme/private-model")
+    assert "acme/private-model not found" in msg
+    timeout_msg = _format_fetch_error(requests.exceptions.Timeout(), "hf://acme/private-model")
+    assert "reaching huggingface.co" in timeout_msg
+
+
+class _FetchFailingScanner:
+    """Real-shaped DeepScanner stub: scan() returns a structured fetch error
+    (mirroring what the patched scanner now does) instead of raising."""
+
+    _exc: BaseException
+    _target: str
+
+    def __init__(self, target, *args, **kwargs):
+        self._target_value = target
+
+    def scan(self):
+        return {
+            "artifacts": [],
+            "dependencies": [],
+            "errors": [
+                {
+                    "file": self._target_value,
+                    "error": str(type(self)._exc),
+                    "fetch_failure": True,
+                    "exception": type(self)._exc,
+                }
+            ],
+        }
+
+
+def _scanner_fetch_failing(exc: BaseException):
+    return type("_FFS", (_FetchFailingScanner,), {"_exc": exc})
+
+
+def test_scan_gated_without_token_prints_clean_message_and_exits_1(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    captured = _capture_cli_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module, "DeepScanner", _scanner_fetch_failing(_http_error(401))
+    )
+
+    result = runner.invoke(app, ["scan", "hf://acme/private-model"])
+
+    # Exit 1 via the errors path; the only exception is the controlled Exit.
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    # Status-aware hint (printed via the stderr console; merged into output here).
+    assert "private" in result.output or "gated" in result.output
+    assert "HF_TOKEN" in result.output
+
+
+def test_scan_fetch_failure_emits_both_cli_error_and_cli_scan(monkeypatch):
+    captured_events: list[str] = []
+
+    def _record(event, params=None, scan_id=None):
+        captured_events.append(event)
+        return None
+
+    monkeypatch.setattr("aisbom.telemetry.post_event", _record)
+    monkeypatch.setattr(
+        cli_module, "DeepScanner", _scanner_fetch_failing(_http_error(403))
+    )
+
+    runner.invoke(app, ["scan", "hf://acme/model"])
+
+    # The slice notes: one failed scan emits both a cli_error and a cli_scan.
+    assert "cli_error" in captured_events
+    assert "cli_scan" in captured_events
+

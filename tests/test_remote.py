@@ -196,3 +196,86 @@ def test_resolve_huggingface_repo_sends_bearer(monkeypatch):
     monkeypatch.setattr(remote.requests, "get", fake_get)
     resolve_huggingface_repo("org/model")
     assert seen_headers and seen_headers[0].get("Authorization") == "Bearer secret-tok"
+
+
+# ---------------------------------------------------------------------------
+# #58 — Resolve failures surface as real errors (not a swallowed empty list),
+# and per-target fetch failures isolate to that target.
+# ---------------------------------------------------------------------------
+
+import io
+import struct
+import requests as _requests
+import aisbom.scanner as scanner_module
+
+
+def _http_error(status: int) -> _requests.exceptions.HTTPError:
+    resp = _requests.Response()
+    resp.status_code = status
+    return _requests.exceptions.HTTPError(response=resp)
+
+
+def test_resolve_huggingface_repo_propagates_401(monkeypatch):
+    """A private/gated repo must raise (caller surfaces a hint), not return []."""
+
+    def fake_get(url, headers=None):
+        raise _http_error(401)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    with pytest.raises(_requests.exceptions.HTTPError):
+        resolve_huggingface_repo("acme/private-model")
+
+
+def test_scanner_records_resolve_failure_as_fetch_error(monkeypatch):
+    def boom(target):
+        raise _http_error(403)
+
+    monkeypatch.setattr(scanner_module, "resolve_huggingface_repo", boom)
+    results = DeepScanner("hf://acme/private-model").scan()
+
+    assert results["artifacts"] == []
+    fetch_errors = [e for e in results["errors"] if e.get("fetch_failure")]
+    assert len(fetch_errors) == 1
+    err = fetch_errors[0]
+    assert err["file"] == "hf://acme/private-model"
+    assert isinstance(err["exception"], _requests.exceptions.HTTPError)
+
+
+def _safetensors_stream() -> io.BytesIO:
+    header = b'{"__metadata__":{}}'
+    return io.BytesIO(struct.pack("<Q", len(header)) + header)
+
+
+class _FakeRemoteStream:
+    """Raises on construction for any URL containing 'boom' (mirroring a
+    fetch failure in RemoteStream.__init__), else yields a tiny valid
+    SafeTensors stream."""
+
+    def __init__(self, url):
+        if "boom" in url:
+            raise _http_error(403)
+        self._buf = _safetensors_stream()
+
+    def __enter__(self):
+        return self._buf
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_scanner_isolates_one_gated_file_and_scans_the_rest(monkeypatch):
+    urls = [
+        "https://huggingface.co/o/m/resolve/main/boom.safetensors",
+        "https://huggingface.co/o/m/resolve/main/good.safetensors",
+    ]
+    monkeypatch.setattr(scanner_module, "resolve_huggingface_repo", lambda t: urls)
+    monkeypatch.setattr(scanner_module, "RemoteStream", _FakeRemoteStream)
+
+    results = DeepScanner("hf://o/m").scan()
+
+    # The good file still produced an artifact; the gated one became an error.
+    assert [a["name"] for a in results["artifacts"]] == ["good.safetensors"]
+    fetch_errors = [e for e in results["errors"] if e.get("fetch_failure")]
+    assert len(fetch_errors) == 1
+    assert fetch_errors[0]["file"].endswith("boom.safetensors")
