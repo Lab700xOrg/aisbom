@@ -36,18 +36,31 @@ class DeepScanner:
     def scan(self):
         """Orchestrates the scan of the directory."""
         if self.is_remote:
-            targets = self._resolve_remote_targets(self.root_path)
+            # Resolving the repo is itself a network call; a 401/403/404 here
+            # must surface as a structured error (not a swallowed empty list or
+            # a raw traceback) so the CLI can render a status-aware hint.
+            try:
+                targets = self._resolve_remote_targets(self.root_path)
+            except Exception as e:
+                self._record_fetch_error(self.root_path, e)
+                targets = []
             for url in targets:
                 ext = Path(url).suffix.lower()
-                if ext in PYTORCH_EXTENSIONS:
-                    with RemoteStream(url) as stream:
-                        self.artifacts.append(self._inspect_pytorch(stream, Path(url).name, is_remote=True))
-                elif ext == SAFETENSORS_EXTENSION:
-                    with RemoteStream(url) as stream:
-                        self.artifacts.append(self._inspect_safetensors(stream, Path(url).name, is_remote=True))
-                elif ext == GGUF_EXTENSION:
-                    with RemoteStream(url) as stream:
-                        self.artifacts.append(self._inspect_gguf(stream, Path(url).name, is_remote=True))
+                # Per-target isolation: one gated/missing file in a multi-file
+                # repo records its error and continues, so the rest still scan.
+                try:
+                    if ext in PYTORCH_EXTENSIONS:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(self._inspect_pytorch(stream, Path(url).name, is_remote=True))
+                    elif ext == SAFETENSORS_EXTENSION:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(self._inspect_safetensors(stream, Path(url).name, is_remote=True))
+                    elif ext == GGUF_EXTENSION:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(self._inspect_gguf(stream, Path(url).name, is_remote=True))
+                except Exception as e:
+                    self._record_fetch_error(url, e)
+                    continue
         else:
             root = Path(self.root_path)
             for full_path in root.rglob("*"):
@@ -71,6 +84,22 @@ class DeepScanner:
         if target.startswith("http://") or target.startswith("https://"):
             return [target]
         return []
+
+    def _record_fetch_error(self, target: str, exc: Exception) -> None:
+        """Record a remote fetch failure as a structured, non-fatal error.
+
+        Lands in results['errors'] so the CLI's `errors → exit 1` path fires.
+        Tagged `fetch_failure` (vs. a parse error) and carries the live
+        exception so the CLI can render a status-aware, traceback-free message
+        and emit the enriched cli_error telemetry. The exception object stays
+        in-process — errors are never serialized into the SBOM.
+        """
+        self.errors.append({
+            "file": target,
+            "error": str(exc),
+            "fetch_failure": True,
+            "exception": exc,
+        })
 
     def _calculate_hash(self, path: Path) -> str:
         sha256_hash = hashlib.sha256()
