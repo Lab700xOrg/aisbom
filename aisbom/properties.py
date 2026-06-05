@@ -36,16 +36,29 @@ def _csv(values) -> str:
 def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
     """Return ``(name, value)`` property pairs for a scanned artifact.
 
-    Returns an empty list for non-model artifacts (e.g. config files) or
-    formats we don't emit structured findings for. Property names that would
-    have an empty value are omitted.
+    Property names that would have an empty value are omitted. Risk/legal
+    properties are emitted for any artifact carrying those fields; format and
+    per-format findings are added only for recognised model formats.
     """
+    props: List[Tuple[str, str]] = []
+
+    # Risk and legal status are carried by every ML-model component (regardless
+    # of format) so the platform receiver can read them structurally instead of
+    # re-parsing the human ``description`` string. These mirror the ``Risk:`` /
+    # ``Legal:`` description segments verbatim and are purely additive.
+    risk = art.get("risk_level")
+    if risk:
+        props.append(("aisbom:risk", str(risk)))
+    legal = art.get("legal_status")
+    if legal:
+        props.append(("aisbom:legal", str(legal)))
+
     fmt = _format_for(art)
     if fmt is None:
-        return []
+        return props
 
     details = art.get("details") or {}
-    props: List[Tuple[str, str]] = [("aisbom:format", fmt)]
+    props.append(("aisbom:format", fmt))
 
     if fmt == "pickle":
         threats = details.get("threats") or []

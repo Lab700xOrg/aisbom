@@ -103,6 +103,60 @@ def test_gguf_omits_missing_optional_fields():
     assert d["aisbom:gguf:metadata_keys"] == ["general.license"]
 
 
+def test_risk_and_legal_emitted_for_each_format():
+    for framework in ("PyTorch", "SafeTensors", "GGUF"):
+        art = {
+            "framework": framework,
+            "risk_level": "LOW",
+            "legal_status": "OK",
+            "details": {},
+        }
+        d = _props_dict(build_component_properties(art))
+        assert d["aisbom:risk"] == ["LOW"]
+        assert d["aisbom:legal"] == ["OK"]
+
+
+def test_risk_and_legal_emitted_for_non_format_model_component():
+    # A "Python Path Config" .pth is still emitted as an ML-model component by
+    # cli.py, so it must carry risk/legal even though it has no aisbom:format.
+    art = {
+        "framework": "Python Path Config",
+        "risk_level": "LOW",
+        "legal_status": "UNKNOWN",
+        "details": {},
+    }
+    d = _props_dict(build_component_properties(art))
+    assert "aisbom:format" not in d
+    assert d["aisbom:risk"] == ["LOW"]
+    assert d["aisbom:legal"] == ["UNKNOWN"]
+
+
+def test_risk_value_carries_full_label_matching_description_segment():
+    # aisbom:risk mirrors the Risk: description segment verbatim, parens and all.
+    art = {
+        "framework": "PyTorch",
+        "risk_level": "CRITICAL (RCE Detected: os.system)",
+        "legal_status": "OK",
+        "details": {"threats": ["os.system"]},
+    }
+    description = (
+        f"Risk: {art['risk_level']} | Framework: {art['framework']} | "
+        f"Legal: {art['legal_status']} | License: {art.get('license')}"
+    )
+    d = _props_dict(build_component_properties(art))
+    risk_segment = description.split(" | ")[0][len("Risk: "):]
+    legal_segment = description.split(" | ")[2][len("Legal: "):]
+    assert d["aisbom:risk"] == [risk_segment]
+    assert d["aisbom:legal"] == [legal_segment]
+
+
+def test_risk_and_legal_omitted_when_keys_absent():
+    art = {"framework": "PyTorch", "details": {"threats": []}}
+    d = _props_dict(build_component_properties(art))
+    assert "aisbom:risk" not in d
+    assert "aisbom:legal" not in d
+
+
 def test_all_keys_are_namespaced():
     for art in (
         {"framework": "PyTorch", "details": {"threats": ["os.system"]}},
