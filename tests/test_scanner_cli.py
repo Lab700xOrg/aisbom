@@ -433,3 +433,143 @@ def test_cli_scan_share_yes_uploads_and_prints_url(tmp_path, monkeypatch):
     assert "application/json" in kwargs["headers"]["Content-Type"]
     assert "data" in kwargs
 
+
+# ---------------------------------------------------------------------------
+# Slice #56 — cli_error telemetry enrichment (http_status / token_present /
+# target_type). The diagnostic must make auth vs firewall vs typo
+# distinguishable in GA4 without ever leaking a URL, repo id, token, or body.
+# ---------------------------------------------------------------------------
+
+import pytest
+import requests
+from aisbom.cli import _classify_http_status, _token_present
+
+
+def _http_error(status: int) -> requests.exceptions.HTTPError:
+    resp = requests.Response()
+    resp.status_code = status
+    return requests.exceptions.HTTPError(response=resp)
+
+
+class _RaisingScanner:
+    """Stub DeepScanner whose scan() raises a preset exception."""
+
+    _exc: BaseException
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def scan(self):
+        raise type(self)._exc
+
+
+def _scanner_raising(exc: BaseException):
+    return type("_RS", (_RaisingScanner,), {"_exc": exc})
+
+
+def _capture_cli_error(monkeypatch):
+    """Patch telemetry.post_event to record cli_error payloads; return the list."""
+    captured: list[dict] = []
+
+    def _record(event, params=None, scan_id=None):
+        if event == "cli_error":
+            captured.append(dict(params or {}))
+        return None
+
+    monkeypatch.setattr("aisbom.telemetry.post_event", _record)
+    return captured
+
+
+def test_classify_http_status_buckets_http_error_by_status():
+    assert _classify_http_status(_http_error(401)) == "401"
+    assert _classify_http_status(_http_error(403)) == "403"
+    assert _classify_http_status(_http_error(404)) == "404"
+
+
+def test_classify_http_status_buckets_timeout_and_connection_error():
+    assert _classify_http_status(requests.exceptions.Timeout()) == "timeout"
+    assert _classify_http_status(requests.exceptions.ConnectionError()) == "connection_error"
+    # ConnectTimeout is a subclass of both — must bucket as timeout, not connection_error.
+    assert _classify_http_status(requests.exceptions.ConnectTimeout()) == "timeout"
+
+
+def test_classify_http_status_falls_back_to_other():
+    assert _classify_http_status(ValueError("boom")) == "other"
+    # HTTPError with no usable response also degrades to the generic bucket.
+    assert _classify_http_status(requests.exceptions.HTTPError()) == "other"
+
+
+def test_token_present_reflects_env(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    assert _token_present() == "false"
+    monkeypatch.setenv("HF_TOKEN", "x")
+    assert _token_present() == "true"
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "y")
+    assert _token_present() == "true"
+
+
+def test_scan_fetch_failure_emits_enriched_cli_error(tmp_path, monkeypatch):
+    captured = _capture_cli_error(monkeypatch)
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_raising(_http_error(401)))
+    monkeypatch.setenv("HF_TOKEN", "secret-token-value")
+
+    result = runner.invoke(app, ["scan", "hf://acme/private-model"])
+
+    assert result.exit_code != 0
+    assert len(captured) == 1
+    payload = captured[0]
+    assert payload["command"] == "scan"
+    assert payload["error_type"] == "HTTPError"
+    assert payload["http_status"] == "401"
+    assert payload["token_present"] == "true"
+    assert payload["target_type"] == "huggingface"
+
+
+def test_scan_fetch_failure_buckets_timeout(monkeypatch):
+    captured = _capture_cli_error(monkeypatch)
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_raising(requests.exceptions.Timeout()))
+
+    runner.invoke(app, ["scan", "https://example.com/model.safetensors"])
+
+    assert captured and captured[0]["http_status"] == "timeout"
+    assert captured[0]["target_type"] == "https"
+
+
+def test_scan_fetch_failure_buckets_connection_error(monkeypatch):
+    captured = _capture_cli_error(monkeypatch)
+    monkeypatch.setattr(
+        cli_module, "DeepScanner", _scanner_raising(requests.exceptions.ConnectionError())
+    )
+
+    runner.invoke(app, ["scan", "hf://acme/model"])
+
+    assert captured and captured[0]["http_status"] == "connection_error"
+
+
+def test_cli_error_payload_leaks_no_token_url_or_body(monkeypatch):
+    captured = _capture_cli_error(monkeypatch)
+    secret_token = "hf_supersecrettokenvalue"
+    monkeypatch.setenv("HF_TOKEN", secret_token)
+    body = "<html>internal error trace at 10.0.0.1</html>"
+    err = _http_error(403)
+    err.response._content = body.encode()  # attach a body the bucket must ignore
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_raising(err))
+
+    runner.invoke(app, ["scan", "hf://secret-org/secret-repo"])
+
+    assert captured
+    joined = " ".join(str(v) for v in captured[0].values())
+    # No token value, repo id, URL, hostname, or response body may appear.
+    for leak in (secret_token, "secret-org", "secret-repo", "hf://", body, "10.0.0.1"):
+        assert leak not in joined
+    # Only the agreed-upon keys are present.
+    assert set(captured[0]) == {
+        "command",
+        "error_type",
+        "http_status",
+        "token_present",
+        "target_type",
+    }
+
