@@ -1,4 +1,34 @@
-from typing import List, Optional, Any
+import os
+from typing import List, Optional, Any, Dict
+from urllib.parse import urlparse
+
+# Per ADR-0001: bearer credentials are sent only to this exact host. HF's
+# resolve endpoint 302-redirects byte fetches to a presigned LFS CDN / S3 host;
+# requests' default cross-host auth-stripping drops the header on that hop, so
+# the token is validated at huggingface.co and never leaks to the CDN.
+_HF_HOST = "huggingface.co"
+
+
+def _hf_token() -> Optional[str]:
+    """Read the HF access token from the environment only (ADR-0001).
+
+    Matches huggingface_hub precedence: HF_TOKEN, then HUGGING_FACE_HUB_TOKEN.
+    The cached ~/.cache/huggingface/token login file is deliberately not read.
+    """
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+
+def _auth_headers(url: str) -> Dict[str, str]:
+    """Per-request Authorization header, gated on an exact huggingface.co host match.
+
+    Returns an empty dict when there is no token or the host is anything other
+    than huggingface.co — the security guard that keeps the token off the CDN /
+    S3 / arbitrary-mirror hosts.
+    """
+    token = _hf_token()
+    if token and urlparse(url).hostname == _HF_HOST:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 
 class _RequestsStub:
@@ -29,7 +59,9 @@ class RemoteStream:
 
     def _fetch_size(self) -> int:
         # Use a range request to learn total size from Content-Range header
-        resp = self.session.get(self.url, headers={"Range": "bytes=0-0"})
+        headers = {"Range": "bytes=0-0"}
+        headers.update(_auth_headers(self.url))
+        resp = self.session.get(self.url, headers=headers)
         resp.raise_for_status()
         content_range = resp.headers.get("Content-Range")
         if content_range and "/" in content_range:
@@ -53,6 +85,7 @@ class RemoteStream:
             end = min(self.pos + size - 1, self.size - 1)
 
         headers = {"Range": f"bytes={self.pos}-{end}"}
+        headers.update(_auth_headers(self.url))
         resp = self.session.get(self.url, headers=headers)
         resp.raise_for_status()
         data = resp.content
@@ -102,7 +135,7 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
 
     api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
     try:
-        resp = requests.get(api_url)
+        resp = requests.get(api_url, headers=_auth_headers(api_url))
         resp.raise_for_status()
         data = resp.json()
     except Exception:
