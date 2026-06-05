@@ -59,6 +59,9 @@ demo_data/*.gguf
 aisbom-report.md
 SESSION_CONTEXT.md
 
+# --- Local domain glossary (not for the public repo) ---
+CONTEXT.md
+
 # --- Agent ---
 .agent/
 !.agent/features/
