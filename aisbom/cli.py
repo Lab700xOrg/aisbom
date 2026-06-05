@@ -128,6 +128,38 @@ def _classify_target(target: str) -> str:
     return "local"
 
 
+def _classify_http_status(exc: BaseException) -> str:
+    """Bucket a fetch exception into a low-cardinality status label.
+
+    Returns the numeric HTTP status as a string for an HTTPError (e.g. "401",
+    "404"), "timeout" / "connection_error" for the corresponding network
+    failures, or "other" for anything else. Never includes a response body or
+    any URL — only the diagnostic bucket. Timeout is checked before
+    ConnectionError so a ConnectTimeout (a subclass of both) buckets as a
+    timeout.
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            return str(status)
+        return "other"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "connection_error"
+    return "other"
+
+
+def _token_present() -> str:
+    """Report whether an HF token env var is set, as "true"/"false".
+
+    Only presence is reported — the token value is never read into telemetry.
+    """
+    has_token = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    return "true" if has_token else "false"
+
+
 def _summarize_model_format(artifacts: list[dict]) -> str:
     """Reduce per-artifact `framework` values to a single label.
 
@@ -334,7 +366,16 @@ def scan(
     except Exception as e:
         err_thread = telemetry.post_event(
             "cli_error",
-            {"command": "scan", "error_type": type(e).__name__},
+            {
+                "command": "scan",
+                "error_type": type(e).__name__,
+                # Diagnostic buckets (parent #55): distinguish auth (401/403),
+                # firewall (timeout/connection_error), and typos (404) in GA4
+                # without ever sending a URL, repo id, hostname, or response body.
+                "http_status": _classify_http_status(e),
+                "token_present": _token_present(),
+                "target_type": _classify_target(target),
+            },
             scan_id=scan_id,
         )
         _flush_telemetry_threads(telemetry_threads + [err_thread])
