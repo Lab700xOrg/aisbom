@@ -69,7 +69,8 @@ When there are no CRITICAL or HIGH findings, the comment collapses to a one-line
 | `max-rows` | `10` | Maximum rows shown in the findings table; overflow collapses into a "+ N more" line. |
 | `comment-on-clean` | `true` | Post a comment when no CRITICAL/HIGH findings detected. Set to `"false"` for silence on clean PRs. |
 | `fail-on-risk` | `true` | Exit non-zero on CRITICAL findings. Set to `"false"` to make scans informational. |
-| `token` | _(empty)_ | Optional. Per-repo API token for posting the generated SBOM to a persistent inventory dashboard. Leave unset for purely local PR-comment behavior. (The dashboard is in private early access.) |
+| `token` | _(empty)_ | Optional. Per-repo API token for posting the generated SBOM to your hosted inventory dashboard at app.aisbom.io. Leave unset for purely local PR-comment behavior. Get a token at <https://app.aisbom.io/connect>. |
+| `platform-url` | `https://app.aisbom.io` | Override for the platform webhook URL. Only meaningful when `token` is set. |
 | `fail-on-platform-error` | `false` | Default false. When true, a failed upload fails the CI job. |
 
 ## Outputs
@@ -108,12 +109,13 @@ The Action embeds a hidden `<!-- aisbom-action -->` marker in the comment body. 
 
 ## Privacy
 
-Scans run inside the Action container; the model files themselves never leave the GitHub runner. Two things are sent over the wire:
+Scans run inside the Action container; the model files themselves never leave the GitHub runner. Three things can be sent over the wire:
 
 1. **SBOM upload (`--share`):** the rendered CycloneDX JSON is POSTed to `aisbom.io/api/sbom-share` so the comment can link to a hosted viewer. The SBOM is publicly viewable to anyone with the URL and expires after 30 days. The unguessable 12-char URL token is the only access control.
-2. **Anonymous telemetry:** two events (`github_action_run` and `github_action_comment_posted`) are POSTed to `api.aisbom.io/v1/telemetry`. No repo identifier, no file paths, no findings content — just severity buckets and whether the comment was created vs updated.
+2. **Hosted dashboard upload (opt-in via `token`):** when you set the `token` input, the same CycloneDX JSON is POSTed to `https://app.aisbom.io/v1/scan-result` (or your `platform-url` override) along with the branch/tag name (`GITHUB_REF_NAME`), so your dashboard at [app.aisbom.io](https://app.aisbom.io) can track the repo's SBOM history. Data is stored in the EU. The upload is logged loudly in your CI output every time it happens. Remove the token (or the input) to stop. Without a token, nothing is sent to the dashboard.
+3. **Anonymous telemetry:** two events (`github_action_run` and `github_action_comment_posted`) are POSTed to `api.aisbom.io/v1/telemetry`. No repo identifier, no file paths, no findings content — just severity buckets and whether the comment was created vs updated.
 
-To disable both, set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block. The Action still posts the comment and produces the SBOM; the upload and telemetry pings are skipped.
+To disable 1 and 3, set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block. The Action still posts the comment and produces the SBOM; the share upload and telemetry pings are skipped. The dashboard upload (2) is controlled solely by whether `token` is set.
 
 ## Troubleshooting
 
