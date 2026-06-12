@@ -236,6 +236,23 @@ When the scan is clean, the comment collapses to a one-line ✅:
 
 Re-runs update the same comment in place via a hidden `<!-- aisbom-action -->` marker — you'll never see stacked AIsbom comments on the same PR.
 
+### Hosted dashboard (optional)
+
+The PR comment shows you each scan; the hosted dashboard at [app.aisbom.io](https://app.aisbom.io) keeps the history. Set the optional `token` input and every scan's SBOM is posted to your inventory dashboard, where you can browse artifacts across repos and branches, track drift over time, and share an executive view with compliance stakeholders:
+
+```yaml
+      - uses: Lab700xOrg/aisbom@v1
+        with:
+          directory: models/
+          token: ${{ secrets.AISBOM_TOKEN }}
+```
+
+Get a per-repo token at <https://app.aisbom.io/connect> (sign in with GitHub). Leave `token` unset and the Action stays purely local — nothing is sent to the dashboard.
+
+#### Data flow & privacy
+
+When (and only when) `token` is set, the Action POSTs the generated CycloneDX SBOM JSON to `https://app.aisbom.io/v1/scan-result`, along with the branch/tag name (`GITHUB_REF_NAME`) so the dashboard can attribute results to the right ref. That's the entire payload: the SBOM describes the *structure and findings* of your model files (names, hashes, licenses, risk levels) — never the weights or file contents, which don't leave the GitHub runner. Data is stored in the EU (Cloudflare R2/D1, EU jurisdiction). Every upload is announced in a loud log group in your CI output, so your logs always show when a network call happened and where the data went. To stop uploading, remove the `token` input — there is no background or implicit sending.
+
 See [`action/README_ACTION.md`](action/README_ACTION.md) for the full inputs/outputs reference, permissions block, and troubleshooting.
 
 ---
