@@ -119,9 +119,15 @@ To disable 1 and 3, set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block.
 
 ## Troubleshooting
 
-**"Resource not accessible by integration"** — the workflow is missing `pull-requests: write`. See the Permissions section above.
+### Why isn't the Action posting comments on my PRs?
 
-**Comment didn't appear** — the Action only comments on `pull_request` events. On `push` / `schedule` / `workflow_dispatch` triggers, the SBOM artifact is produced but no comment is posted (there's no PR to comment on).
+Three known causes, all distinguishable from the Action's own log output:
+
+1. **The workflow isn't triggered on `pull_request`.** On `push` / `schedule` / `workflow_dispatch` triggers there is no PR to comment on — the SBOM artifact is still produced, but commenting is impossible. The log shows `Cannot post PR comment — missing: pr_number …` (reported as `no_pr_context`). Fix: add a `pull_request:` trigger to the workflow.
+
+2. **The PR comes from a fork.** GitHub restricts `${{ github.token }}` to **read-only** on `pull_request` events from forked repositories, regardless of what your `permissions:` block requests. The scan runs and the SBOM is produced; the comment post fails with a permission error in the log. This is a GitHub security policy, not a configuration issue — there is no safe way around it with the default token.
+
+3. **The workflow is missing `permissions: pull-requests: write`.** The log shows `Could not post PR comment … Check the workflow has pull-requests: write permission` (you may also see GitHub's "Resource not accessible by integration"). Fix: add the Permissions block shown above. The job still succeeds — the Action never fails your CI over a comment-permission issue.
 
 **Re-runs create duplicate comments** — please file an issue. The marker-based idempotency is meant to be unbreakable, but if you're seeing duplicates we want to know.
 

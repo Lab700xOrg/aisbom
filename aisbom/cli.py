@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from .version_check import check_latest_version
+from . import loop_state
 from . import telemetry
 import requests
 
@@ -179,6 +180,51 @@ def _scan_error_payload(exc: BaseException, target: str) -> dict:
         "token_present": _token_present(),
         "target_type": _classify_target(target),
     }
+
+
+def _maybe_print_loop_warning(count: int, http_status: str) -> None:
+    """Stale-loop nudge (#99): warn once the same failure repeats N runs.
+
+    Printed to stderr only, after the per-file error messages, so CI log
+    parsers and `--output` consumers are unaffected. The upgrade line rides
+    on the background version check that scan already started — when that
+    thread hasn't reported a newer version, the line is simply omitted (no
+    extra network call, no blocking).
+    """
+    if count < loop_state.LOOP_WARN_THRESHOLD:
+        return
+    # Wording note: the fingerprint is target-blind by design (no URLs/repo
+    # ids on disk), so consecutive failures on *different* models with the
+    # same error shape share one counter — say "your scans", not "this scan".
+    lines = [
+        f"[bold yellow]⚠ Your scans have hit the same error "
+        f"{count} times in a row.[/bold yellow]"
+    ]
+    if http_status in ("401", "403"):
+        if _token_present() == "true":
+            lines.append(
+                "• A token is set but authentication keeps failing — verify "
+                "HF_TOKEN is valid and the model's license is accepted "
+                '(see README "Authentication").'
+            )
+        else:
+            lines.append(
+                "• If this is a gated/private Hugging Face repo: set HF_TOKEN "
+                '(see README "Authentication").'
+            )
+    newer = update_result.get("version")
+    if newer:
+        try:
+            curr = importlib.metadata.version("aisbom-cli")
+        except Exception:
+            curr = "unknown"
+        lines.append(
+            f"• You are on v{curr}; v{newer} includes fixes for repeated "
+            "fetch failures — run: pip install --upgrade aisbom-cli"
+        )
+    err_console.print(
+        Panel("\n".join(lines), border_style="yellow", expand=False)
+    )
 
 
 def _format_fetch_error(exc: BaseException, url: str) -> str:
@@ -427,10 +473,17 @@ def scan(
     except Exception as e:
         # Safety net for unexpected scan crashes. Per-target *fetch* failures are
         # caught inside the scanner now (recorded as structured errors, no
-        # traceback); anything reaching here is genuinely unexpected.
+        # traceback); anything reaching here is genuinely unexpected. Crashes
+        # still feed the loop detector (#99) — a repeating crash is a loop too.
+        payload = _scan_error_payload(e, target)
+        crash_count = loop_state.record_failure(
+            payload["error_type"], payload["http_status"], payload["target_type"]
+        )
+        payload["consecutive_failures"] = loop_state.bucket_count(crash_count)
+        _maybe_print_loop_warning(crash_count, payload["http_status"])
         err_thread = telemetry.post_event(
             "cli_error",
-            _scan_error_payload(e, target),
+            payload,
             scan_id=scan_id,
         )
         _flush_telemetry_threads(telemetry_threads + [err_thread])
@@ -460,16 +513,42 @@ def scan(
     # failed scan emits both a cli_error (the failure) and the normal cli_scan
     # (context) below. Intentional; see the slice notes.
     fetch_failures = [e for e in results['errors'] if e.get('fetch_failure')]
+    # Loop detection (#99) works at scan granularity ("N runs in a row"): the
+    # first fetch failure's fingerprint represents the invocation. A scan with
+    # no fetch failures breaks any recorded loop for this target class.
+    if fetch_failures:
+        first_payload = _scan_error_payload(fetch_failures[0].get('exception'), target)
+        loop_count = loop_state.record_failure(
+            first_payload["error_type"],
+            first_payload["http_status"],
+            first_payload["target_type"],
+        )
+    else:
+        loop_state.record_success(_classify_target(target))
+        loop_count = 0
+    # Sharded models fail one-per-shard with near-identical messages (12
+    # shards → 12 lines differing only in filename). Group by status bucket
+    # and print each distinct failure mode once, naming the first file and
+    # counting the rest. Telemetry below stays per-file (#58 semantics).
+    failures_by_status: dict[str, list[dict]] = {}
     for err in fetch_failures:
-        exc = err.get('exception')
-        err_console.print(
-            f"[bold red]✖[/bold red] {_format_fetch_error(exc, err.get('file', ''))}"
-        )
+        status = _classify_http_status(err.get('exception'))
+        failures_by_status.setdefault(status, []).append(err)
+    for group in failures_by_status.values():
+        first = group[0]
+        msg = _format_fetch_error(first.get('exception'), first.get('file', ''))
+        if len(group) > 1:
+            plural = "file" if len(group) == 2 else "files"
+            msg += f" [dim](+{len(group) - 1} more {plural} with the same error)[/dim]"
+        err_console.print(f"[bold red]✖[/bold red] {msg}")
+    for err in fetch_failures:
+        payload = _scan_error_payload(err.get('exception'), target)
+        payload["consecutive_failures"] = loop_state.bucket_count(loop_count)
         telemetry_threads.append(
-            telemetry.post_event(
-                "cli_error", _scan_error_payload(exc, target), scan_id=scan_id
-            )
+            telemetry.post_event("cli_error", payload, scan_id=scan_id)
         )
+    if fetch_failures:
+        _maybe_print_loop_warning(loop_count, first_payload["http_status"])
 
     # Telemetry: fire cli_scan plus any conditional follow-ups now that the
     # scan completed and risk is known. Non-blocking; flushed before exit.
