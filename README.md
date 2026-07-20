@@ -124,6 +124,8 @@ jobs:
 
 > **Egress note:** hosted/firewalled CI runners must allow outbound HTTPS to `huggingface.co` **and** its LFS CDN (`cdn-lfs.huggingface.co` and the presigned object-storage hosts it redirects to). A blocked CDN hop surfaces as a network/timeout error, not an auth failure.
 
+If the **same scan keeps failing identically** (common in unattended cron/CI jobs pointed at a gated repo with no token), AIsbom notices: from the third consecutive identical failure it prints a loud stderr warning with the likely fix — set `HF_TOKEN` as above, or upgrade if a newer CLI has fixes for that failure mode. The counter lives in a small local state file; see [Telemetry & Privacy](#telemetry--privacy).
+
 ### Share a scan with your team
 
 ```bash
@@ -322,7 +324,11 @@ If you explicitly use `--share`: the generated `sbom.json` document is uploaded 
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 
-On a scan fetch failure or unhandled exception: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`), a low-cardinality `http_status` bucket (e.g. `401`, `timeout`), and a `token_present` boolean (whether an `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` was set) — never the token value, the message, the traceback, a URL, or any file content.
+On a scan fetch failure or unhandled exception: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`), a low-cardinality `http_status` bucket (e.g. `401`, `timeout`), a `token_present` boolean (whether an `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` was set), and a `consecutive_failures` bucket (`1`–`9` or `10+` — how many runs in a row hit the same failure shape) — never the token value, the message, the traceback, a URL, or any file content.
+
+### Local state (no network)
+
+To detect failure loops (see [Authentication](#authentication-private--gated-hugging-face-models)), AIsbom keeps `~/.aisbom/loop_state.json`: the failure *shape* of the last failing scan (exception class name, HTTP status bucket, target-type bucket — never a URL, repo id, or path), a consecutive-run counter, and a timestamp. This file is purely local UX state and involves no network, so it is written **even when `AISBOM_NO_TELEMETRY` is set**; it is cleared automatically when a scan of the same target class succeeds, and deleting it is always safe.
 
 Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC address plus an app salt, truncated to 16 hex chars. Stored in `~/.aisbom/config.json`. Lets us see returning users without identifying anyone.
 
@@ -332,7 +338,7 @@ File paths, directory contents, model names, target URLs, file hashes from your 
 
 ### Opt out
 
-Set `AISBOM_NO_TELEMETRY=1`. This wins over every other setting — telemetry will not fire and `~/.aisbom/config.json` will not be written.
+Set `AISBOM_NO_TELEMETRY=1`. This wins over every other setting — telemetry will not fire and `~/.aisbom/config.json` will not be written. (The [local, network-free `loop_state.json`](#local-state-no-network) is the one file still maintained, since it never leaves your machine.)
 
 ```bash
 # Permanent

@@ -571,7 +571,12 @@ def test_cli_error_payload_leaks_no_token_url_or_body(monkeypatch):
         "http_status",
         "token_present",
         "target_type",
+        "consecutive_failures",
     }
+    # The loop-detector dimension (#99) is a bucketed count, never raw data.
+    assert captured[0]["consecutive_failures"] in (
+        [str(n) for n in range(1, 10)] + ["10+"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +688,74 @@ def test_scan_gated_without_token_prints_clean_message_and_exits_1(monkeypatch):
     # Status-aware hint (printed via the stderr console; merged into output here).
     assert "private" in result.output or "gated" in result.output
     assert "HF_TOKEN" in result.output
+
+
+class _MultiFetchFailingScanner:
+    """DeepScanner stub returning several structured fetch failures at once
+    (the sharded-model case: model-0000N-of-00012.safetensors × N)."""
+
+    _errors: list[dict]
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def scan(self):
+        return {"artifacts": [], "dependencies": [], "errors": list(type(self)._errors)}
+
+
+def _scanner_multi_failing(errors: list[dict]):
+    return type("_MFS", (_MultiFetchFailingScanner,), {"_errors": errors})
+
+
+def _shard_error(i: int, exc: BaseException) -> dict:
+    url = (
+        "https://huggingface.co/acme/model/resolve/main/"
+        f"model-{i:05d}-of-00012.safetensors"
+    )
+    return {"file": url, "error": str(exc), "fetch_failure": True, "exception": exc}
+
+
+def test_sharded_identical_fetch_failures_print_one_deduped_line(monkeypatch):
+    # 12 shards, all 401: one ✖ line naming the first shard + a count,
+    # not 12 near-identical lines (verification feedback on #99).
+    errors = [_shard_error(i, _http_error(401)) for i in range(1, 13)]
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_multi_failing(errors))
+
+    result = runner.invoke(app, ["scan", "hf://acme/model"])
+
+    # Rich wraps at the test terminal width; normalize before matching.
+    flat = " ".join(result.output.split())
+    assert flat.count("Authentication failed") == 1
+    assert "model-00001-of-00012.safetensors" in flat
+    assert "11 more files with the same error" in flat
+
+
+def test_mixed_failure_modes_print_one_line_each(monkeypatch):
+    # Distinct failure modes must NOT collapse together.
+    errors = [
+        _shard_error(1, _http_error(401)),
+        _shard_error(2, _http_error(401)),
+        _shard_error(3, requests.exceptions.Timeout()),
+    ]
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_multi_failing(errors))
+
+    result = runner.invoke(app, ["scan", "hf://acme/model"])
+
+    flat = " ".join(result.output.split())
+    assert flat.count("Authentication failed") == 1
+    assert "1 more file with the same error" in flat
+    assert flat.count("Network error") == 1
+
+
+def test_sharded_failures_still_emit_one_cli_error_per_file(monkeypatch):
+    # Display is deduped; telemetry emission stays per-file (#58 semantics).
+    captured = _capture_cli_error(monkeypatch)
+    errors = [_shard_error(i, _http_error(401)) for i in range(1, 13)]
+    monkeypatch.setattr(cli_module, "DeepScanner", _scanner_multi_failing(errors))
+
+    runner.invoke(app, ["scan", "hf://acme/model"])
+
+    assert len(captured) == 12
 
 
 def test_scan_fetch_failure_emits_both_cli_error_and_cli_scan(monkeypatch):
