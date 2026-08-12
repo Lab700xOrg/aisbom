@@ -1,0 +1,56 @@
+{
+  "cases": {
+    "benign-allowlisted-globals": {
+      "blocklist": "clean",
+      "strict": "clean"
+    },
+    "checkmarx-bdb-gadget": {
+      "blocklist": "partial",
+      "strict": "detected"
+    },
+    "control-os-system-zip": {
+      "blocklist": "detected",
+      "strict": "detected"
+    },
+    "cve-2025-10155-extension-confusion": {
+      "blocklist": "missed",
+      "strict": "missed"
+    },
+    "cve-2025-10156-zip-crc": {
+      "blocklist": "missed",
+      "strict": "missed"
+    },
+    "cve-2025-10157-asyncio-subclass": {
+      "blocklist": "partial",
+      "strict": "detected"
+    },
+    "cve-2025-1716-pip-main": {
+      "blocklist": "partial",
+      "strict": "detected"
+    },
+    "cve-2025-1889-nonstandard-extension": {
+      "blocklist": "missed",
+      "strict": "missed"
+    },
+    "cve-2025-1944-zip-filename-tamper": {
+      "blocklist": "missed",
+      "strict": "missed"
+    },
+    "cve-2025-1945-zip-flag-bits": {
+      "blocklist": "detected",
+      "strict": "detected"
+    },
+    "nullifai-7z-container": {
+      "blocklist": "partial",
+      "strict": "partial"
+    },
+    "nullifai-broken-stream": {
+      "blocklist": "detected",
+      "strict": "detected"
+    },
+    "shadowpickle-allowlist-overwrite": {
+      "blocklist": "partial",
+      "strict": "partial"
+    }
+  }
+}

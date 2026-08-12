@@ -1,6 +1,7 @@
 import typer
 import json
 import os
+import tempfile
 import tomllib
 import importlib.metadata
 from enum import Enum
@@ -848,6 +849,123 @@ def generate_test_artifacts(
     console.print(f"  [magenta]• Created:[/magenta] {broken_path.name} (Safe, but fails weights_only=True)")
     
     console.print("\n[bold green]Done.[/bold green] Now run: [code]aisbom scan .[/code]")
+
+
+@app.command()
+def bypass_scorecard(
+    output_dir: str = typer.Option(
+        None,
+        "--output-dir",
+        help="Where to materialize the corpus artifacts (default: a temp dir, discarded).",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Rewrite the committed baseline, raise the floor, and refresh docs/bypass-scorecard.md.",
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Release gate: exit 2 if any case scores below tests/corpus/floor.json.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the machine-readable result only."),
+):
+    """
+    Scan the pickle-evasion corpus and report what AIsbom catches.
+
+    Regenerates the corpus of publicly-documented scanner bypasses, scans each
+    one in both blocklist and strict mode, and prints the scorecard. Artifacts
+    are synthesized and only ever disassembled — nothing is executed.
+
+    Use --write after changing detection to refresh the committed baseline.
+    """
+    from aisbom import corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(output_dir) if output_dir else Path(tmp)
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            generated = corpus.generate_corpus(target)
+        except corpus.CorpusDependencyError as exc:
+            console.print(f"[bold red]Cannot build the corpus:[/bold red] {exc}")
+            raise typer.Exit(code=1)
+        results = corpus.score_corpus(generated)
+
+    if json_output:
+        console.print_json(json.dumps(results))
+        return
+
+    table = Table(title="Pickle-evasion bypass scorecard", show_lines=False)
+    table.add_column("Case", style="cyan", no_wrap=True)
+    table.add_column("Evasion class", style="white")
+    table.add_column("Blocklist")
+    table.add_column("Strict")
+
+    styles = {
+        "detected": "[green]detected[/green]",
+        "clean": "[green]clean[/green]",
+        "partial": "[yellow]partial[/yellow]",
+        "missed": "[red]missed[/red]",
+        "false-positive": "[red]false positive[/red]",
+    }
+    for case in corpus.CASES:
+        row = results["cases"][case.id]
+        table.add_row(
+            case.id,
+            case.evasion_class,
+            styles[row["blocklist"]],
+            styles[row["strict"]],
+        )
+    console.print(table)
+
+    evasions = [c for c in corpus.CASES if not corpus.is_control(c)]
+    caught = sum(
+        1
+        for c in evasions
+        if results["cases"][c.id]["blocklist"] == "detected"
+        or results["cases"][c.id]["strict"] == "detected"
+    )
+    console.print(
+        f"\n[bold]{caught}/{len(evasions)}[/bold] evasion cases caught in at least one mode."
+    )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    baseline_path = repo_root / "tests" / "corpus" / "baseline.json"
+    floor_path = repo_root / "tests" / "corpus" / "floor.json"
+    doc_path = repo_root / "docs" / "bypass-scorecard.md"
+
+    if write:
+        existing_floor = json.loads(floor_path.read_text()) if floor_path.exists() else None
+        floor = corpus.merge_floor(results, existing_floor)
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(corpus.render_baseline(results))
+        floor_path.write_text(corpus.render_floor(floor))
+        doc_path.write_text(corpus.render_markdown(results))
+        console.print(f"[green]Wrote[/green] {baseline_path}")
+        console.print(f"[green]Wrote[/green] {floor_path}")
+        console.print(f"[green]Wrote[/green] {doc_path}")
+
+    if check:
+        if not floor_path.exists():
+            console.print(f"[bold red]No floor to check against:[/bold red] {floor_path} is missing.")
+            raise typer.Exit(code=2)
+        regressions = corpus.check_floor(results, json.loads(floor_path.read_text()))
+        if regressions:
+            console.print(
+                "\n[bold red]Detection regressed below the committed floor.[/bold red]"
+            )
+            for item in regressions:
+                console.print(
+                    f"  [red]•[/red] {item['case']} ({item['mode']}): "
+                    f"was [green]{item['floor']}[/green], now [red]{item['current']}[/red]"
+                )
+            console.print(
+                "\nThis gate does not accept regeneration. Either restore detection, or "
+                "edit tests/corpus/floor.json by hand so the downgrade is reviewed."
+            )
+            raise typer.Exit(code=2)
+        console.print("\n[green]Scorecard gate passed[/green] — no case below the floor.")
 
 
 @app.command()

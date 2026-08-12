@@ -275,6 +275,22 @@ You'll see `mock_malware.pt` flagged as **CRITICAL**, license issues flagged on 
 
 ---
 
+## Does AIsbom catch known scanner bypasses?
+
+Some of them. Run the scorecard and see for yourself:
+
+```bash
+aisbom bypass-scorecard
+```
+
+This rebuilds a corpus of publicly-documented pickle-evasion techniques — the nullifAI 7z and broken-stream tricks, Sonatype's four picklescan CVEs, JFrog's three zero-days, ShadowPickle, and the Checkmarx `bdb.Bdb.run` gadget — scans each one, and prints what was caught in blocklist mode and in `--strict`.
+
+The results are published verbatim in [docs/bypass-scorecard.md](docs/bypass-scorecard.md), including the cases we currently **miss**. Static analysis is not magic, and a scanner that only advertises its wins isn't worth trusting; the misses are tracked as work in progress and the corpus is the regression gate that keeps them from silently coming back.
+
+The corpus is synthesized, never copied from live malware — every artifact carries a harmless `echo` where real malware would carry a payload, and the harness proves it never executes what it scans. See [tests/corpus/README.md](tests/corpus/README.md).
+
+---
+
 ## Defense in Depth
 
 AIsbom advocates for a two-layer approach:

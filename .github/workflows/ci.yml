@@ -22,8 +22,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install poetry
-          poetry install
-          
+          poetry install --with dev
+
+      # Catch a detection regression at PR time rather than at release time,
+      # when the fix is cheap and the author still has the context.
+      - name: Bypass scorecard must not regress
+        run: poetry run aisbom bypass-scorecard --check
+
       - name: Smoke Test #1 - Generate test artifacts
         run: poetry run aisbom generate-test-artifacts
         

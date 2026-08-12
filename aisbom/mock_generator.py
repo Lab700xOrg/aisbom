@@ -6,6 +6,84 @@ import json
 import struct
 from pathlib import Path
 
+# --- BYPASS-CORPUS PRIMITIVES ---
+# The evasion corpus (aisbom/corpus.py) needs pickles that reference globals we
+# must never actually import (pip.main, bdb.Bdb, asyncio internals). Pickling a
+# real object cannot produce those, so the streams are assembled opcode by
+# opcode here. Every one names the same inert echo below — there is no payload
+# in this repo, only a recognizable signature for the disassembler to find.
+HARMLESS_COMMAND = "echo [TEST] AIsbom bypass-corpus simulation - no payload executed"
+
+
+def _short_binunicode(text: str) -> bytes:
+    """SHORT_BINUNICODE (protocol 4) frame for a short string."""
+    raw = text.encode("utf-8")
+    if len(raw) > 255:
+        raise ValueError("string too long for SHORT_BINUNICODE")
+    return b"\x8c" + bytes([len(raw)]) + raw
+
+
+def harmless_reduce_pickle(module: str, name: str, command: str = HARMLESS_COMMAND) -> bytes:
+    """
+    A protocol-0 pickle equivalent to `module.name(command)`.
+
+    Uses the GLOBAL opcode ('c' module '\\n' name '\\n'), which is what the
+    blocklist path in safety.py matches on.
+    """
+    return (
+        b"c" + module.encode("utf-8") + b"\n" + name.encode("utf-8") + b"\n"
+        + b"("                                   # MARK
+        + b"S" + repr(command).encode("utf-8") + b"\n"   # STRING
+        + b"t"                                   # TUPLE
+        + b"R"                                   # REDUCE
+        + b"."                                   # STOP
+    )
+
+
+def harmless_stack_global_pickle(module: str, name: str, command: str = HARMLESS_COMMAND) -> bytes:
+    """
+    A protocol-4 pickle equivalent to `module.name(command)`.
+
+    Uses STACK_GLOBAL, which resolves the module and name from the stack rather
+    than from an inline argument — the opcode path that scanners relying on
+    GLOBAL-only string matching miss.
+    """
+    return (
+        b"\x80\x04"                              # PROTO 4
+        + _short_binunicode(module)
+        + _short_binunicode(name)
+        + b"\x93"                                # STACK_GLOBAL
+        + _short_binunicode(command)
+        + b"\x85"                                # TUPLE1
+        + b"R"                                   # REDUCE
+        + b"."                                   # STOP
+    )
+
+
+def truncate_pickle(payload: bytes, junk: bytes = b"\x99\x99\x99") -> bytes:
+    """
+    Drop the STOP opcode and append an invalid opcode.
+
+    Reproduces the nullifAI shape: the pickle VM executes the opcodes at the
+    front of the stream before it ever reaches the corruption, so a scanner
+    that bails on a malformed stream never sees the payload that still runs.
+    """
+    return payload.rstrip(b".") + junk
+
+
+def pytorch_zip_bytes(
+    payload: bytes,
+    inner_name: str = "archive/data.pkl",
+    compression: int = zipfile.ZIP_DEFLATED,
+) -> bytes:
+    """Wrap a pickle stream in the ZIP layout torch.save() produces."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression) as z:
+        z.writestr(inner_name, payload)
+        z.writestr("archive/version", "3")
+    return buffer.getvalue()
+
+
 # --- SIMULATION LOGIC ---
 class MockExploitPayload(object):
     """

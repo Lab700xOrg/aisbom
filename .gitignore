@@ -48,6 +48,12 @@ demo_data/*.gguf
 # ...but explicitly allow the generator script and text files
 !demo_data/requirements.txt
 
+# --- Bypass Corpus (Binaries) ---
+# Same rule as demo_data: aisbom/corpus.py generates these on demand, and the
+# mock-malicious artifacts never land in the repo. baseline.json and the README
+# ARE committed — they are the regression gate and the docs.
+tests/corpus/artifacts/
+
 # --- VS Code ---
 .vscode/
 *.code-workspace

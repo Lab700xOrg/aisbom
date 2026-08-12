@@ -8,9 +8,38 @@ permissions:
   contents: write
 
 jobs:
+  # Same release gate as publish.yml. Standalone binaries are a distribution
+  # channel like any other, so a regressed scanner must not reach users through
+  # this door either.
+  gate:
+    if: startsWith(github.event.release.tag_name, 'v1.')
+    name: Release gate (tests + bypass scorecard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      # --with dev: the corpus needs py7zr to build the 7z container case.
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Run tests
+        run: poetry run pytest
+
+      - name: Bypass scorecard must not regress
+        run: poetry run aisbom bypass-scorecard --check
+
   build-and-upload:
     # Build CLI binaries for v1.x.x releases (aligned CLI + Action).
     if: startsWith(github.event.release.tag_name, 'v1.')
+    needs: gate
     name: Build binary on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
