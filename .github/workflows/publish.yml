@@ -6,10 +6,41 @@ on:
     types: [published]
 
 jobs:
+  # Release gate. Nothing reaches PyPI until the suite passes AND the pickle-
+  # evasion scorecard is at or above its committed floor. A scanner that has
+  # quietly stopped catching a known bypass must not ship: the release still
+  # looks green everywhere else, which is exactly why this has to block here
+  # rather than rely on someone reading a report.
+  gate:
+    if: startsWith(github.event.release.tag_name, 'v1.')
+    name: Release gate (tests + bypass scorecard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      # --with dev: the corpus needs py7zr to build the 7z container case.
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Run tests
+        run: poetry run pytest
+
+      - name: Bypass scorecard must not regress
+        run: poetry run aisbom bypass-scorecard --check
+
   build-and-publish:
     # Only fire for CLI releases (v1.x.x). CLI and GitHub Action releases
     # are now aligned.
     if: startsWith(github.event.release.tag_name, 'v1.')
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: write
