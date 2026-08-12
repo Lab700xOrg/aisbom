@@ -1,18 +1,42 @@
 import os
 import json
+import re
 import zipfile
 import struct
 import hashlib
 from typing import List, Dict, Any
 from pathlib import Path
 from pip_requirements_parser import RequirementsFile
-from aisbom.safety import scan_pickle_stream
+from aisbom.safety import scan_keras_config, scan_keras_config_bytes, scan_pickle_stream
 
 # Constants
 PYTORCH_EXTENSIONS = {'.pt', '.pth', '.bin'}
 SAFETENSORS_EXTENSION = '.safetensors'
 GGUF_EXTENSION = '.gguf'
+KERAS_EXTENSIONS = {'.keras', '.h5', '.hdf5'}
 REQUIREMENTS_FILENAME = 'requirements.txt'
+
+# HDF5 files start with this signature; a `.keras` file is a plain zip.
+HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
+
+# Keras stores the model architecture as a JSON string in the root group's
+# `model_config` attribute. HDF5 writes attribute values as literal,
+# uncompressed bytes, so the JSON can be recovered by locating the attribute
+# name and brace-matching the object that follows — no HDF5 library needed,
+# which keeps the PyInstaller bundle unchanged. Verified against files written
+# by h5py (what Keras itself uses) with configs from 300 bytes to 300KB.
+KERAS_H5_CONFIG_ATTR = b"model_config"
+KERAS_H5_VERSION_ATTR = b"keras_version"
+
+# Cap on how many bytes of a container are searched for the config. The
+# attribute sits in the root group's object header near the start of the file,
+# so this is generous; it exists to bound memory on a multi-GB weights file.
+KERAS_MAX_SCAN_BYTES = 16 * 1024 * 1024
+
+# Remote scans pay for every byte over HTTP Range requests, so they get a much
+# tighter cap — the config is at the head of the file, and pulling 16MB per
+# model would break the "scans complete in seconds" property of a remote scan.
+KERAS_MAX_REMOTE_SCAN_BYTES = 2 * 1024 * 1024
 
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
@@ -58,6 +82,9 @@ class DeepScanner:
                     elif ext == GGUF_EXTENSION:
                         with RemoteStream(url) as stream:
                             self.artifacts.append(self._inspect_gguf(stream, Path(url).name, is_remote=True))
+                    elif ext in KERAS_EXTENSIONS:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(self._inspect_keras(stream, Path(url).name, is_remote=True))
                 except Exception as e:
                     self._record_fetch_error(url, e)
                     continue
@@ -73,6 +100,8 @@ class DeepScanner:
                         self.artifacts.append(self._inspect_safetensors(full_path))
                     elif ext == GGUF_EXTENSION:
                         self.artifacts.append(self._inspect_gguf(full_path))
+                    elif ext in KERAS_EXTENSIONS:
+                        self.artifacts.append(self._inspect_keras(full_path))
                     elif full_path.name == REQUIREMENTS_FILENAME:
                         self._parse_requirements(full_path)
 
@@ -425,6 +454,225 @@ class DeepScanner:
                 except Exception:
                     pass
             
+        return meta
+
+    @staticmethod
+    def _brace_match(blob: bytes, start: int) -> bytes | None:
+        """Return the JSON object beginning at ``start``, or None if unbalanced.
+
+        String-aware: a ``{`` or ``}`` inside a JSON string literal is skipped,
+        so a config that embeds braces in a layer name (or does so deliberately
+        to break a naive matcher) still delimits correctly.
+        """
+        depth = 0
+        in_string = False
+        escaped = False
+        for i in range(start, len(blob)):
+            ch = blob[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == 0x5C:  # backslash
+                    escaped = True
+                elif ch == 0x22:  # closing quote
+                    in_string = False
+                continue
+            if ch == 0x22:
+                in_string = True
+            elif ch == 0x7B:  # {
+                depth += 1
+            elif ch == 0x7D:  # }
+                depth -= 1
+                if depth == 0:
+                    return blob[start:i + 1]
+        return None
+
+    def _extract_h5_config(self, blob: bytes) -> bytes | None:
+        """Recover the `model_config` JSON from raw HDF5 bytes.
+
+        HDF5 stores attribute values uncompressed and contiguous, so the JSON
+        is located by finding the attribute name and brace-matching the first
+        object that parses after it. Several candidates are tried because other
+        attribute data can sit between the name and its value.
+        """
+        search_from = 0
+        while True:
+            attr_at = blob.find(KERAS_H5_CONFIG_ATTR, search_from)
+            if attr_at == -1:
+                return None
+            cursor = attr_at
+            for _ in range(5):
+                brace_at = blob.find(b"{", cursor)
+                if brace_at == -1:
+                    break
+                candidate = self._brace_match(blob, brace_at)
+                if candidate is not None:
+                    try:
+                        if isinstance(json.loads(candidate), dict):
+                            return candidate
+                    except (ValueError, UnicodeDecodeError):
+                        pass
+                cursor = brace_at + 1
+            search_from = attr_at + len(KERAS_H5_CONFIG_ATTR)
+
+    @staticmethod
+    def _extract_h5_keras_version(blob: bytes) -> str | None:
+        """Read the `keras_version` attribute value, if it is present."""
+        attr_at = blob.find(KERAS_H5_VERSION_ATTR)
+        if attr_at == -1:
+            return None
+        window = blob[attr_at:attr_at + 128]
+        match = re.search(rb"\d+\.\d+(?:\.\d+)?", window)
+        return match.group(0).decode("ascii") if match else None
+
+    @staticmethod
+    def _keras_risk_label(threats: List[str], lambda_layers: List[str]) -> str:
+        """Summarize Keras findings for the risk column.
+
+        The full threat list stays in ``details``; this is the one-line version,
+        so it names the Lambda layers (the part a user acts on) and counts the
+        embedded code objects rather than pasting every JSON path into the
+        terminal table. Must contain "CRITICAL" — that substring is what the
+        CLI's ``--fail-on-risk`` exit-code check matches on.
+        """
+        parts = []
+        named = list(dict.fromkeys(lambda_layers))  # de-duplicated, order kept
+        if named:
+            parts.append(f"Lambda layer(s): {', '.join(named)}")
+        code_objects = sum(1 for t in threats if t.startswith("KERAS_MARSHALLED_CODE:"))
+        if code_objects:
+            parts.append(f"{code_objects} embedded code object(s)")
+        serialized = sum(1 for t in threats if t.startswith("KERAS_SERIALIZED_LAMBDA:"))
+        if serialized and not named:
+            parts.append(f"{serialized} serialized callable(s)")
+        detail = "; ".join(parts) if parts else "; ".join(threats)
+        return f"CRITICAL (Keras Lambda Code Execution — {detail})"
+
+    def _inspect_keras(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
+        """Scans a Keras model for Lambda-layer code execution.
+
+        Handles both containers Keras writes: the newer `.keras` zip (config as
+        a `config.json` member) and the legacy HDF5 `.h5` (config as the root
+        group's `model_config` attribute). Neither path loads the model, and an
+        embedded code object is identified from its header bytes without ever
+        being unmarshalled.
+
+        A container that cannot be parsed is still scanned: the raw bytes go
+        through a signature check, so truncating or corrupting a file is not a
+        way to hide a Lambda layer.
+        """
+        local_path = None
+        if isinstance(source, (str, Path)):
+            local_path = Path(source)
+            name = name or local_path.name
+            is_remote = False
+        name = name or getattr(source, "name", "unknown")
+
+        meta = {
+            "name": name,
+            "type": "machine-learning-model",
+            "framework": "Keras",
+            "risk_level": "LOW",
+            "license": "Unknown",  # Keras containers carry no license metadata
+            "legal_status": "UNKNOWN",
+            "hash": "remote_unhashed" if is_remote else self._calculate_hash(local_path),
+            "details": {},
+        }
+
+        f = None
+        try:
+            f = open(local_path, "rb") if local_path else source
+
+            # A remote scan pays per byte, so it reads a smaller window.
+            budget = KERAS_MAX_SCAN_BYTES if local_path else KERAS_MAX_REMOTE_SCAN_BYTES
+
+            container = None
+            config_bytes = None      # the config JSON, if we could isolate it
+            fallback_bytes = b""     # what the signature scan reads if JSON fails
+            keras_version = None
+
+            if zipfile.is_zipfile(f):
+                container = "keras-zip"
+                f.seek(0)
+                with zipfile.ZipFile(f, "r") as z:
+                    members = z.namelist()
+                    meta["details"]["internal_files"] = len(members)
+                    if "config.json" in members:
+                        with z.open("config.json") as cfg:
+                            config_bytes = cfg.read(budget)
+                            fallback_bytes = config_bytes
+                    if "metadata.json" in members:
+                        try:
+                            with z.open("metadata.json") as md:
+                                keras_version = json.loads(md.read(65536)).get("keras_version")
+                        except Exception:
+                            pass
+            else:
+                f.seek(0)
+                if f.read(len(HDF5_MAGIC)) == HDF5_MAGIC:
+                    container = "hdf5"
+                    f.seek(0)
+                    blob = f.read(budget)
+                    fallback_bytes = blob
+                    config_bytes = self._extract_h5_config(blob)
+                    keras_version = self._extract_h5_keras_version(blob)
+
+            if container is None:
+                meta["risk_level"] = "UNKNOWN (Unrecognized Container)"
+                meta["details"]["container"] = None
+                meta["details"]["config_found"] = False
+                meta["details"]["threats"] = []
+                return meta
+
+            parsed = None
+            if config_bytes:
+                try:
+                    parsed = json.loads(config_bytes)
+                except (ValueError, UnicodeDecodeError):
+                    parsed = None
+
+            if parsed is not None:
+                threats = scan_keras_config(parsed)
+                config_parsed = True
+            else:
+                # No usable JSON — fall back to the coarse signature scan
+                # rather than declining to report on a file we can't fully read.
+                threats = scan_keras_config_bytes(fallback_bytes)
+                config_parsed = False
+
+            layer_count = None
+            if isinstance(parsed, dict):
+                layers = (parsed.get("config") or {}).get("layers")
+                if isinstance(layers, list):
+                    layer_count = len(layers)
+                keras_version = keras_version or parsed.get("keras_version")
+
+            lambda_layers = [
+                t.split(": ", 1)[1] for t in threats if t.startswith("KERAS_LAMBDA:")
+            ]
+
+            meta["details"].update({
+                "container": container,
+                "config_found": parsed is not None or bool(threats),
+                "config_parsed": config_parsed,
+                "threats": threats,
+                "lambda_layers": lambda_layers,
+                "layer_count": layer_count,
+                "keras_version": keras_version,
+            })
+
+            if threats:
+                meta["risk_level"] = self._keras_risk_label(threats, lambda_layers)
+            elif parsed is None:
+                meta["risk_level"] = "LOW"
+        except Exception as e:
+            meta["error"] = str(e)
+        finally:
+            if local_path and f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
         return meta
 
     def _parse_requirements(self, path: Path):

@@ -194,6 +194,71 @@ def create_mock_gguf(target_dir: Path):
         
     return output_path
 
+# --- KERAS ARTIFACTS ---
+# A `.keras` file is a zip holding the model config as JSON, so a realistic
+# fixture needs nothing but the standard library. The legacy `.h5` container is
+# HDF5 and cannot be written without h5py, which is a dev-only dependency — so
+# HDF5 fixtures are built in the test suite instead of here, and the shipped
+# package stays free of that dependency.
+
+def _marshalled_code_b64() -> str:
+    """Base64 of a marshalled code object, as a Keras Lambda layer stores one.
+
+    This is the *signature* a scanner must recognize, not a payload: the code
+    object returned here computes ``x + 1``. It is never unmarshalled or called.
+    """
+    import base64
+    import marshal
+
+    harmless = lambda x: x + 1  # noqa: E731
+    return base64.b64encode(marshal.dumps(harmless.__code__)).decode("ascii")
+
+
+def create_mock_keras_zip(output_path, with_lambda: bool = False) -> Path:
+    """Write a `.keras` archive, optionally carrying a Lambda layer.
+
+    Takes an explicit output path (rather than a target directory like the
+    older generators) because each Keras case wants its own filename.
+    """
+    output_path = Path(output_path)
+    layers = [
+        {
+            "module": "keras.layers",
+            "class_name": "Dense",
+            "config": {"name": "dense_0", "units": 64, "activation": "relu"},
+            "registered_name": None,
+        }
+    ]
+    if with_lambda:
+        layers.insert(0, {
+            "module": "keras.layers",
+            "class_name": "Lambda",
+            "config": {
+                "name": "lambda_exec",
+                "function": {
+                    "class_name": "__lambda__",
+                    "config": {"code": _marshalled_code_b64(), "defaults": None, "closure": None},
+                },
+            },
+            "registered_name": None,
+        })
+
+    config = {
+        "module": "keras",
+        "class_name": "Sequential",
+        "config": {"name": "sequential", "layers": layers},
+        "registered_name": None,
+    }
+    metadata = {"keras_version": "3.5.0", "date_saved": "2026-01-01@00:00:00"}
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("metadata.json", json.dumps(metadata, indent=2))
+        z.writestr("config.json", json.dumps(config, indent=2))
+
+    return output_path
+
+
 # --- DIFF DEMO LOGIC ---
 import uuid
 import random

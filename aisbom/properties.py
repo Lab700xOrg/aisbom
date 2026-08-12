@@ -21,6 +21,7 @@ _FRAMEWORK_TO_FORMAT = {
     "PyTorch": "pickle",
     "SafeTensors": "safetensors",
     "GGUF": "gguf",
+    "Keras": "keras",
 }
 
 
@@ -87,5 +88,23 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
         metadata_keys = details.get("metadata_keys") or []
         if metadata_keys:
             props.append(("aisbom:gguf:metadata_keys", _csv(metadata_keys)))
+
+    elif fmt == "keras":
+        container = details.get("container")
+        if container:
+            props.append(("aisbom:keras:container", str(container)))
+        threats = details.get("threats") or []
+        for threat in threats:
+            props.append(("aisbom:keras:threat", str(threat)))
+        props.append(("aisbom:keras:threat_count", str(len(threats))))
+        lambda_layers = details.get("lambda_layers") or []
+        if lambda_layers:
+            props.append(("aisbom:keras:lambda_layers", _csv(lambda_layers)))
+        layer_count = details.get("layer_count")
+        if layer_count is not None:
+            props.append(("aisbom:keras:layer_count", str(layer_count)))
+        keras_version = details.get("keras_version")
+        if keras_version:
+            props.append(("aisbom:keras:version", str(keras_version)))
 
     return props
