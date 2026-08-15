@@ -10,7 +10,10 @@ from pathlib import Path
 from pip_requirements_parser import RequirementsFile
 from aisbom import protobuf_reader as pb
 from aisbom.safety import (
+    _threat_kind as _jinja_threat_kind,
+    jinja_threats_are_critical,
     onnx_domain_is_custom,
+    scan_jinja_template,
     scan_keras_config,
     scan_keras_config_bytes,
     scan_onnx_model,
@@ -111,11 +114,55 @@ KERAS_MAX_SCAN_BYTES = 16 * 1024 * 1024
 # tighter cap — the config is at the head of the file, and pulling 16MB per
 # model would break the "scans complete in seconds" property of a remote scan.
 KERAS_MAX_REMOTE_SCAN_BYTES = 2 * 1024 * 1024
+# --- GGUF metadata value types ---
+# Every scalar type with its struct format and byte width. Two of these matter
+# more than they look: BOOL is one byte (not eight), and FLOAT32 is four. Both
+# appear in essentially every real model — `add_bos_token` and the attention
+# epsilon — so getting either width wrong desynchronises the whole key-value
+# walk and silently loses every field after it.
+GGUF_SCALAR_TYPES = {
+    0: ('<B', 1),   # UINT8
+    1: ('<b', 1),   # INT8
+    2: ('<H', 2),   # UINT16
+    3: ('<h', 2),   # INT16
+    4: ('<I', 4),   # UINT32
+    5: ('<i', 4),   # INT32
+    6: ('<f', 4),   # FLOAT32
+    7: ('<?', 1),   # BOOL
+    10: ('<Q', 8),  # UINT64
+    11: ('<q', 8),  # INT64
+    12: ('<d', 8),  # FLOAT64
+}
+GGUF_TYPE_STRING = 8
+GGUF_TYPE_ARRAY = 9
+
+# The chat template lives here, after the tokenizer arrays.
+GGUF_CHAT_TEMPLATE_KEY = "tokenizer.chat_template"
+
+# How much of a GGUF file is read to cover its metadata block. The metadata sits
+# at the head, but the token/merge arrays in front of the chat template run to
+# megabytes on a large vocabulary, so the window has to clear them.
+GGUF_METADATA_WINDOW = 16 * 1024 * 1024
+
+# Remote reads are HTTP Range requests, so a remote scan starts with a small
+# window and widens once if the metadata block did not fit. Two requests at
+# worst, against one request per field if the stream were walked directly.
+GGUF_REMOTE_FIRST_WINDOW = 1 * 1024 * 1024
+GGUF_REMOTE_MAX_WINDOW = 16 * 1024 * 1024
+
+# Array contents are never retained — only the element type and count — but a
+# declared count still has to be sanity-bounded before it is trusted.
+GGUF_MAX_ARRAY_ELEMENTS = 50_000_000
 
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 
 from aisbom.remote import RemoteStream, resolve_huggingface_repo
+
+
+class _GGUFTruncated(Exception):
+    """The GGUF metadata block ran past the end of the buffer we read."""
+
 
 class DeepScanner:
     def __init__(self, root_path: str, strict_mode: bool = False, lint: bool = False):
@@ -410,9 +457,172 @@ class DeepScanner:
                     pass
         return meta
 
+    @staticmethod
+    def _read_gguf_window(f, is_remote: bool) -> bytes:
+        """Read enough of the file to cover its metadata block.
+
+        Local files get one generous read. A remote scan starts small and widens
+        once, because the chat template sits behind the tokenizer arrays and a
+        window that stops short of them would systematically miss it — while
+        always pulling the full window would make every remote GGUF scan
+        expensive. Each attempt is a single Range request.
+        """
+        f.seek(0)
+        if not is_remote:
+            return f.read(GGUF_METADATA_WINDOW)
+
+        buf = f.read(GGUF_REMOTE_FIRST_WINDOW)
+        if len(buf) < GGUF_REMOTE_FIRST_WINDOW:
+            return buf  # the whole file already fits
+
+        probe = DeepScanner._parse_gguf_metadata(buf)
+        if not probe["truncated"]:
+            return buf
+
+        f.seek(0)
+        return f.read(GGUF_REMOTE_MAX_WINDOW)
+
+    @staticmethod
+    def _parse_gguf_metadata(buf: bytes) -> Dict[str, Any]:
+        """Walk a GGUF metadata block into ``{key: value}``.
+
+        Operates on the buffer rather than the stream, and treats running out of
+        buffer as an ordinary outcome: ``truncated`` says the block did not fit,
+        and the keys read so far are still returned. Array *contents* are never
+        retained — a token array holds hundreds of thousands of strings — only
+        the element type and count, but the bytes are still stepped over exactly
+        so that every key after an array is read from the right offset.
+
+        Every declared length comes from the file, so each one is checked
+        against the bytes actually present before being used.
+        """
+        result: Dict[str, Any] = {
+            "values": {},
+            "metadata_keys": [],
+            "kv_count": 0,
+            "pairs_read": 0,
+            "truncated": False,
+            "version": None,
+        }
+
+        # Magic (4) | version (4) | tensor count (8) | kv count (8)
+        if len(buf) < 24:
+            result["truncated"] = True
+            return result
+
+        result["version"] = struct.unpack('<I', buf[4:8])[0]
+        kv_count = struct.unpack('<Q', buf[16:24])[0]
+        result["kv_count"] = kv_count
+
+        pos = 24
+
+        def read_scalar(offset: int, val_type: int):
+            fmt, width = GGUF_SCALAR_TYPES[val_type]
+            if offset + width > len(buf):
+                raise _GGUFTruncated()
+            return struct.unpack(fmt, buf[offset:offset + width])[0], offset + width
+
+        def read_string(offset: int):
+            if offset + 8 > len(buf):
+                raise _GGUFTruncated()
+            length = struct.unpack('<Q', buf[offset:offset + 8])[0]
+            offset += 8
+            if length > len(buf) - offset:
+                raise _GGUFTruncated()
+            return buf[offset:offset + length].decode('utf-8', errors='replace'), offset + length
+
+        def skip_value(offset: int, val_type: int, depth: int = 0):
+            """Step over one value, returning the offset just past it."""
+            if val_type in GGUF_SCALAR_TYPES:
+                _value, offset = read_scalar(offset, val_type)
+                return offset
+            if val_type == GGUF_TYPE_STRING:
+                _value, offset = read_string(offset)
+                return offset
+            if val_type == GGUF_TYPE_ARRAY:
+                # Arrays may nest; bound the recursion rather than trusting the
+                # file's structure.
+                if depth > 8:
+                    raise _GGUFTruncated()
+                if offset + 12 > len(buf):
+                    raise _GGUFTruncated()
+                elem_type = struct.unpack('<I', buf[offset:offset + 4])[0]
+                count = struct.unpack('<Q', buf[offset + 4:offset + 12])[0]
+                offset += 12
+                if count > GGUF_MAX_ARRAY_ELEMENTS:
+                    raise _GGUFTruncated()
+                if elem_type in GGUF_SCALAR_TYPES:
+                    # Fixed-width elements step in one jump.
+                    width = GGUF_SCALAR_TYPES[elem_type][1]
+                    end = offset + width * count
+                    if end > len(buf):
+                        raise _GGUFTruncated()
+                    return end
+                for _ in range(count):
+                    offset = skip_value(offset, elem_type, depth + 1)
+                return offset
+            # An unknown type means the framing is lost; there is no safe width
+            # to skip, so stop rather than guess and read garbage as keys.
+            raise _GGUFTruncated()
+
+        for _ in range(kv_count):
+            try:
+                key, pos = read_string(pos)
+                if pos + 4 > len(buf):
+                    raise _GGUFTruncated()
+                val_type = struct.unpack('<I', buf[pos:pos + 4])[0]
+                pos += 4
+
+                if val_type == GGUF_TYPE_STRING:
+                    value, pos = read_string(pos)
+                    result["values"][key] = value
+                elif val_type in GGUF_SCALAR_TYPES:
+                    value, pos = read_scalar(pos, val_type)
+                    result["values"][key] = value
+                elif val_type == GGUF_TYPE_ARRAY:
+                    before = pos
+                    pos = skip_value(pos, GGUF_TYPE_ARRAY)
+                    elem_type = struct.unpack('<I', buf[before:before + 4])[0]
+                    count = struct.unpack('<Q', buf[before + 4:before + 12])[0]
+                    result["values"][key] = {
+                        "array_type": elem_type,
+                        "array_count": count,
+                    }
+                else:
+                    raise _GGUFTruncated()
+
+                result["metadata_keys"].append(key)
+                result["pairs_read"] += 1
+            except (_GGUFTruncated, struct.error):
+                result["truncated"] = True
+                return result
+
+        return result
+
+    @staticmethod
+    def _gguf_template_risk_label(threats: List[str]) -> str:
+        """Summarize chat-template findings for the risk column.
+
+        Full findings stay in ``details``; this stays short because the terminal
+        table truncates. "CRITICAL" and "MEDIUM" are the substrings the CLI's
+        exit-code mapping reads, so the wording is load-bearing.
+        """
+        # Findings may carry a leading "[template key] " tag on a model that
+        # ships several templates; severity does not depend on which one.
+        kinds = [_jinja_threat_kind(t) for t in threats]
+        escapes = [k.split(": ", 1)[-1] for k in kinds if k.startswith("JINJA_SANDBOX_ESCAPE:")]
+        calls = [k.split(": ", 1)[-1] for k in kinds if k.startswith("JINJA_DANGEROUS_CALL:")]
+
+        if jinja_threats_are_critical(threats):
+            named = ", ".join((escapes + calls)[:3]) or "sandbox escape"
+            return f"CRITICAL (Chat Template Code Execution: {named})"
+        return f"MEDIUM (Chat Template: {len(threats)} anomalous construct(s))"
+
     def _inspect_gguf(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
         """
-        Parses GGUF header to extract metadata/licenses.
+        Parses GGUF header to extract metadata/licenses and inspect the
+        embedded Jinja chat template.
+
         GGUF format: Magic (4b) | Version (4b) | TensorCount (8b) | KVCount (8b) | KV Pairs...
         """
         local_path = None
@@ -442,87 +652,107 @@ class DeepScanner:
                 meta['risk_level'] = "UNKNOWN (Invalid Header)"
                 return meta
 
-            # 2. Read Header Info
-            # Version (I), Tensor Count (Q), KV Count (Q)
-            # I = uint32 (4 bytes), Q = uint64 (8 bytes)
-            ver_bytes = f.read(4)
-            version = struct.unpack('<I', ver_bytes)[0]
-            
-            f.read(8) # Skip Tensor Count
-            
-            kv_count_bytes = f.read(8)
-            kv_count = struct.unpack('<Q', kv_count_bytes)[0]
-            
-            extracted_meta = {}
-            metadata_keys = []   # every KV key we successfully read (for properties)
-            quantization = None  # general.file_type / quantization_version (scalar)
+            # 2. Read the metadata block in as few reads as possible.
+            # Walking the stream field by field costs one HTTP Range request per
+            # field on a remote scan, so the block is buffered and parsed from
+            # memory instead.
+            buf = self._read_gguf_window(f, is_remote)
+            parsed = self._parse_gguf_metadata(buf)
+            kv = parsed["values"]
+            metadata_keys = parsed["metadata_keys"]
 
-            # Little-endian struct formats for the integer scalar types, so we
-            # can decode quantization enums rather than blindly skipping them.
-            int_fmt = {0: '<B', 1: '<b', 2: '<H', 3: '<h', 4: '<I', 5: '<i', 10: '<Q', 11: '<q'}
+            extracted_meta: Dict[str, Any] = {}
 
-            # 3. Parse Key-Value Pairs
-            # We interpret just enough to find the license, architecture, and
-            # quantization, and to enumerate the metadata keys present.
-            for _ in range(kv_count):
-                # Read Key (String: Length (Q) + Bytes)
-                key_len_b = f.read(8)
-                if not key_len_b: break
-                key_len = struct.unpack('<Q', key_len_b)[0]
-                key = f.read(key_len).decode('utf-8', errors='ignore')
-
-                # Read Value Type (uint32)
-                type_b = f.read(4)
-                val_type = struct.unpack('<I', type_b)[0]
-
-                # GGUF Value Types: 8=String, others are numbers/bools/arrays
-                # We strictly care about Strings (8) for metadata
-                value = "N/A"
-                if val_type == 8: # String
-                    val_len = struct.unpack('<Q', f.read(8))[0]
-                    value = f.read(val_len).decode('utf-8', errors='ignore')
-                elif val_type in [0, 1, 2, 3, 4, 5, 10, 11, 12]:
-                    # Simple scalar types (1-8 bytes), read them to get to next key
-                    # Mapping sizes roughly:
-                    # 0(uint8):1, 1(int8):1, 2(uint16):2, 3(int16):2, 4(uint32):4, 5(int32):4
-                    # 10(uint64):8, 11(int64):8, 12(float64):8
-                    skip_map = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:8, 10:8, 11:8, 12:8}
-                    skip = skip_map.get(val_type, 0)
-                    raw = f.read(skip) if skip > 0 else b""
-                    if val_type == 12: value = "float" # Placeholder
-                    # Quantization is stored as an integer enum, usually under
-                    # general.file_type (or general.quantization_version).
-                    if ("file_type" in key or "quantization" in key) and val_type in int_fmt:
-                        try:
-                            quantization = struct.unpack(int_fmt[val_type], raw)[0]
-                        except struct.error:
-                            pass
-                elif val_type == 9: # Array
-                    # Arrays are complex to skip without recursion, abort parsing to avoid crash
-                    # Most metadata strings are at the top of the file anyway
-                    metadata_keys.append(key)
+            # 3. License. GGUF usually stores it as "general.license".
+            lic = "Unknown"
+            for key in ("general.license", "license"):
+                candidate = kv.get(key)
+                if isinstance(candidate, str) and candidate:
+                    lic = candidate
+                    extracted_meta[key] = candidate
                     break
-
-                metadata_keys.append(key)
-
-                # Capture interesting keys
-                if val_type == 8:
-                    if "license" in key:
-                        extracted_meta[key] = value
-                    if "architecture" in key:
-                        extracted_meta["arch"] = value
-
-            # 4. Analyze License
-            # GGUF usually stores it as "general.license"
-            lic = extracted_meta.get("general.license") or extracted_meta.get("license") or "Unknown"
             meta["license"] = lic
             meta["legal_status"] = self._assess_legal_risk(lic)
-            # Structured per-format findings for CycloneDX properties.
-            extracted_meta["architecture"] = extracted_meta.get("arch")
+
+            # 4. Structured per-format findings for CycloneDX properties.
+            arch = kv.get("general.architecture")
+            if not isinstance(arch, str):
+                arch = next(
+                    (v for k, v in kv.items() if "architecture" in k and isinstance(v, str)),
+                    None,
+                )
+            extracted_meta["arch"] = arch
+            extracted_meta["architecture"] = arch
+
+            quantization = None
+            for key, value in kv.items():
+                if ("file_type" in key or "quantization" in key) and isinstance(value, int):
+                    quantization = value
+                    break
             if quantization is not None:
                 extracted_meta["quantization"] = quantization
+
             extracted_meta["metadata_keys"] = metadata_keys
+            extracted_meta["kv_count"] = parsed["kv_count"]
+            extracted_meta["kv_parsed"] = parsed["pairs_read"]
+            if parsed["truncated"]:
+                extracted_meta["metadata_truncated"] = True
+
+            # 5. The chat templates. These are Jinja templates that run on every
+            # inference request, so they are inspected as strings — never
+            # rendered. A model may ship several: llama.cpp stores named variants
+            # under `tokenizer.chat_template.default`, `.tool_use` and friends,
+            # so an exact-key lookup would miss every one of them.
+            templates = {
+                key: value
+                for key, value in kv.items()
+                if isinstance(value, str)
+                and value
+                and (
+                    key == GGUF_CHAT_TEMPLATE_KEY
+                    or key.startswith(GGUF_CHAT_TEMPLATE_KEY + ".")
+                )
+            }
+
+            template_threats: List[str] = []
+            template_digests = {}
+            for key in sorted(templates):
+                body = templates[key]
+                template_digests[key] = hashlib.sha256(
+                    body.encode("utf-8", errors="replace")
+                ).hexdigest()
+                for threat in scan_jinja_template(body):
+                    # Name the variant when there is more than one, so a finding
+                    # points at the template it came from.
+                    tagged = threat if len(templates) == 1 else f"[{key}] {threat}"
+                    if tagged not in template_threats:
+                        template_threats.append(tagged)
+
+            extracted_meta["chat_template_present"] = bool(templates)
+            if templates:
+                extracted_meta["chat_template_keys"] = sorted(templates)
+                extracted_meta["chat_template_length"] = sum(
+                    len(v) for v in templates.values()
+                )
+                extracted_meta["chat_template_sha256"] = template_digests[
+                    sorted(templates)[0]
+                ]
+                extracted_meta["chat_template_digests"] = template_digests
+            extracted_meta["chat_template_threats"] = template_threats
+
             meta["details"] = extracted_meta
+
+            if template_threats:
+                meta["risk_level"] = self._gguf_template_risk_label(template_threats)
+            elif parsed["truncated"]:
+                # The metadata block did not fit the window, so the chat
+                # template may simply not have been reached. Reporting LOW here
+                # would let a hostile template hide behind a large vocabulary
+                # array; "we did not finish looking" is not "nothing is there".
+                meta["risk_level"] = (
+                    "MEDIUM (GGUF metadata incomplete: "
+                    f"{parsed['pairs_read']}/{parsed['kv_count']} keys read)"
+                )
 
         except Exception as e:
             meta['details']['error'] = str(e)

@@ -362,6 +362,122 @@ def create_mock_onnx(
     return output_path
 
 
+# --- GGUF ARTIFACTS WITH FULL METADATA ---
+# `create_mock_gguf` above writes a single string key, which exercises none of
+# the value types that make a real model's metadata block hard to walk. These
+# helpers build one with the shape llama.cpp actually emits: scalar values, a
+# float, a bool, the big tokenizer arrays, and the chat template behind them.
+
+# GGUF metadata value type tags.
+GGUF_UINT32 = 4
+GGUF_FLOAT32 = 6
+GGUF_BOOL = 7
+GGUF_STRING = 8
+GGUF_ARRAY = 9
+
+# A benign chat template, in the shape models really ship.
+BENIGN_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|' + message['role'] + '|>' }}\n{{ message['content'] + eos_token }}"
+    "{% endfor %}"
+)
+
+# A template that reaches for the standard Jinja sandbox-escape chain. It is a
+# recognizable signature for the analyzer, not a working exploit: nothing here
+# is ever rendered, and the scanner never hands a template to a template engine.
+MALICIOUS_CHAT_TEMPLATE = (
+    "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    "{{ ''.__class__.__mro__[1].__subclasses__() }}"
+)
+
+
+def _gguf_string(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw
+
+
+def _gguf_kv(key: str, val_type: int, payload: bytes) -> bytes:
+    return _gguf_string(key) + struct.pack("<I", val_type) + payload
+
+
+def _gguf_kv_string(key: str, value: str) -> bytes:
+    return _gguf_kv(key, GGUF_STRING, _gguf_string(value))
+
+
+def _gguf_kv_uint32(key: str, value: int) -> bytes:
+    return _gguf_kv(key, GGUF_UINT32, struct.pack("<I", value))
+
+
+def _gguf_kv_float32(key: str, value: float) -> bytes:
+    return _gguf_kv(key, GGUF_FLOAT32, struct.pack("<f", value))
+
+
+def _gguf_kv_bool(key: str, value: bool) -> bytes:
+    return _gguf_kv(key, GGUF_BOOL, struct.pack("<B", 1 if value else 0))
+
+
+def _gguf_kv_string_array(key: str, values) -> bytes:
+    values = list(values)
+    payload = struct.pack("<I", GGUF_STRING) + struct.pack("<Q", len(values))
+    for value in values:
+        payload += _gguf_string(value)
+    return _gguf_kv(key, GGUF_ARRAY, payload)
+
+
+def _gguf_kv_float_array(key: str, values) -> bytes:
+    values = list(values)
+    payload = struct.pack("<I", GGUF_FLOAT32) + struct.pack("<Q", len(values))
+    for value in values:
+        payload += struct.pack("<f", value)
+    return _gguf_kv(key, GGUF_ARRAY, payload)
+
+
+def create_mock_gguf_with_template(
+    output_path,
+    chat_template: str | None = None,
+    license_name: str = "apache-2.0",
+    vocab_size: int = 8,
+) -> Path:
+    """Write a GGUF whose metadata block mirrors a real model's.
+
+    The tokenizer arrays are placed *before* the chat template deliberately —
+    that is the ordering llama.cpp's converter produces, and it is what makes
+    correct array traversal a prerequisite for reading the template at all.
+    """
+    output_path = Path(output_path)
+
+    pairs = [
+        _gguf_kv_string("general.architecture", "llama"),
+        _gguf_kv_string("general.name", "mock-model"),
+        _gguf_kv_string("general.license", license_name),
+        _gguf_kv_uint32("general.file_type", 15),
+        # A float and a bool: the two widths that break a naive walker.
+        _gguf_kv_float32("llama.attention.layer_norm_rms_epsilon", 1e-5),
+        _gguf_kv_uint32("llama.block_count", 32),
+        _gguf_kv_string_array(
+            "tokenizer.ggml.tokens", [f"tok{i}" for i in range(vocab_size)]
+        ),
+        _gguf_kv_float_array(
+            "tokenizer.ggml.scores", [float(i) for i in range(vocab_size)]
+        ),
+        _gguf_kv_bool("tokenizer.ggml.add_bos_token", True),
+    ]
+    if chat_template is not None:
+        pairs.append(_gguf_kv_string("tokenizer.chat_template", chat_template))
+
+    blob = (
+        b"GGUF"
+        + struct.pack("<I", 3)            # version
+        + struct.pack("<Q", 0)            # tensor count
+        + struct.pack("<Q", len(pairs))   # kv count
+        + b"".join(pairs)
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(blob)
+    return output_path
+
+
 # --- DIFF DEMO LOGIC ---
 import uuid
 import random

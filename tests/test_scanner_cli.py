@@ -356,7 +356,14 @@ def test_gguf_scalar_kv_parsing_skips_numeric_entries(tmp_path):
     assert gguf["risk_level"] == "LOW"
 
 
-def test_gguf_array_entry_causes_parse_break(tmp_path):
+def test_gguf_truncated_array_entry_is_reported_not_called_clean(tmp_path):
+    """An array header that runs off the end must not read as a clean scan.
+
+    The array declares its element type and count in 12 bytes; only 8 are
+    written here, so the metadata block cannot be walked. This used to abort
+    the parse and report LOW. Reporting "we did not finish reading" is the
+    honest answer — an unread metadata block is where a chat template hides.
+    """
     path = tmp_path / "array.gguf"
     with open(path, "wb") as f:
         f.write(b"GGUF")
@@ -366,13 +373,18 @@ def test_gguf_array_entry_causes_parse_break(tmp_path):
         key = "general.arch"
         f.write(struct.pack("<Q", len(key)))
         f.write(key.encode())
-        f.write(struct.pack("<I", 9))  # val_type array -> triggers break
-        f.write(struct.pack("<Q", 0))
+        f.write(struct.pack("<I", 9))  # val_type array
+        f.write(struct.pack("<Q", 0))  # truncated: no element type + count
 
     scanner = DeepScanner(tmp_path)
     results = scanner.scan()
     gguf = {a["name"]: a for a in results["artifacts"]}[path.name]
-    assert gguf["risk_level"] == "LOW"
+
+    assert "MEDIUM" in gguf["risk_level"]
+    assert "incomplete" in gguf["risk_level"]
+    assert gguf["details"]["metadata_truncated"] is True
+    # MEDIUM must not trip the CI gate.
+    assert "CRITICAL" not in gguf["risk_level"]
 
 
 def test_cli_scan_allows_success_when_fail_on_risk_disabled(tmp_path):
