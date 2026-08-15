@@ -334,6 +334,123 @@ def test_unreadable_keras_file_records_an_error_not_a_crash(tmp_path):
     assert "CRITICAL" not in art["risk_level"]
 
 
+# --- containers that do not present cleanly -------------------------------
+
+def test_hdf5_behind_a_user_block_is_still_recognized(tmp_path):
+    """HDF5 allows a user block before the superblock.
+
+    Its size is 512 bytes or a larger power of two, and h5py opens such files
+    normally — so demanding the signature at offset 0 would dismiss a real
+    Keras model, Lambda layer and all, as an unrecognized container.
+    """
+    real = write_h5(tmp_path / "real.h5", _keras2_config(with_lambda=True)).read_bytes()
+    (tmp_path / "real.h5").unlink()
+    (tmp_path / "userblock.h5").write_bytes(b"\x00" * 512 + real)
+
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert art["details"]["container"] == "hdf5"
+    assert "CRITICAL" in art["risk_level"]
+    assert any(t.startswith("KERAS_LAMBDA:") for t in art["details"]["threats"])
+
+
+@pytest.mark.parametrize("block", [512, 1024, 2048])
+def test_hdf5_user_block_sizes_are_all_found(tmp_path, block):
+    real = write_h5(tmp_path / "real.h5", _keras2_config(with_lambda=True)).read_bytes()
+    (tmp_path / "real.h5").unlink()
+    (tmp_path / "ub.h5").write_bytes(b"\x00" * block + real)
+
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+    assert "CRITICAL" in art["risk_level"]
+
+
+def test_damaged_keras_archive_still_yields_its_signature(tmp_path):
+    """A wrecked central directory must not stop the byte-level fallback.
+
+    `zipfile.is_zipfile` returns False once the directory is gone, so the file
+    reaches the unrecognized-container path — but the Lambda signature is still
+    sitting in the bytes, and corrupting the container must not hide it.
+    """
+    full = create_mock_keras_zip(
+        tmp_path / "full.keras", with_lambda=True
+    ).read_bytes()
+    (tmp_path / "full.keras").unlink()
+    # Drop the central directory at the end; the stored member survives.
+    (tmp_path / "broken.keras").write_bytes(full[: full.rfind(b"PK\x01\x02")])
+
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert "CRITICAL" in art["risk_level"]
+    assert any(t.startswith("KERAS_LAMBDA:") for t in art["details"]["threats"])
+
+
+def test_unrecognized_container_with_no_signature_stays_unknown(tmp_path):
+    (tmp_path / "junk.keras").write_bytes(b"not a container at all" * 10)
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert art["risk_level"] == "UNKNOWN (Unrecognized Container)"
+    assert "CRITICAL" not in art["risk_level"]
+
+
+def test_config_larger_than_the_read_budget_is_not_called_clean(tmp_path, monkeypatch):
+    """A config past the read window must not report LOW.
+
+    Padding a config with ordinary layers so the Lambda falls beyond the cut is
+    cheap, and the compressed archive stays small and loadable.
+    """
+    import aisbom.scanner as scanner_mod
+
+    cfg = _keras2_config(with_lambda=False)
+    cfg["config"]["layers"].extend(
+        {"class_name": "Dense", "config": {"name": f"pad_{i}", "units": 64}}
+        for i in range(2000)
+    )
+    path = tmp_path / "big.keras"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("config.json", json.dumps(cfg))
+        z.writestr("metadata.json", json.dumps({"keras_version": "3.5.0"}))
+
+    monkeypatch.setattr(scanner_mod, "KERAS_MAX_SCAN_BYTES", 4096)
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert art["details"]["truncated"] is True
+    assert "MEDIUM" in art["risk_level"]
+    assert "CRITICAL" not in art["risk_level"]
+
+
+# --- Hugging Face resolution ----------------------------------------------
+
+@pytest.mark.parametrize("filename", [
+    "model.keras", "model.h5", "model.hdf5",
+])
+def test_keras_files_are_resolved_from_a_hugging_face_repo(monkeypatch, filename):
+    """The dispatch arm is unreachable for `hf://` unless the resolver lists it.
+
+    Without this the remote scan of a repo holding a backdoored Keras model
+    returns no artifacts and no errors — a silent pass.
+    """
+    import aisbom.remote as remote
+
+    def fake_get(url, headers=None):
+        class Resp:
+            status_code = 200
+            headers = {}
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return [{"path": filename}, {"path": "README.md"}]
+
+        return Resp()
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+
+    urls = remote.resolve_huggingface_repo("hf://org/model")
+    assert any(u.endswith(filename) for u in urls), urls
+
+
 # --- SBOM plumbing --------------------------------------------------------
 
 def test_keras_format_token_is_registered():

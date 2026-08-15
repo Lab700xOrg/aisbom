@@ -2,6 +2,7 @@ import os
 import json
 import re
 import zipfile
+import zlib
 import struct
 import hashlib
 from typing import List, Dict, Any
@@ -487,6 +488,69 @@ class DeepScanner:
                     return blob[start:i + 1]
         return None
 
+    @staticmethod
+    def _recover_zip_members(blob: bytes, limit: int = 32) -> bytes:
+        """Rebuild member contents from local headers alone.
+
+        A `.keras` archive whose central directory is truncated or damaged is
+        rejected by ``zipfile``, but its local file headers — and the member
+        data behind them — are usually intact. Reading those directly means a
+        wrecked container is not a way to hide a Lambda layer, whether the
+        member was stored or deflated.
+
+        Returns the concatenated recovered members, for signature scanning.
+        """
+        recovered = []
+        offset = 0
+        for _ in range(limit):
+            offset = blob.find(b"PK\x03\x04", offset)
+            if offset == -1:
+                break
+            header = blob[offset:offset + 30]
+            if len(header) < 30:
+                break
+            try:
+                method = struct.unpack("<H", header[8:10])[0]
+                compressed_size = struct.unpack("<I", header[18:22])[0]
+                name_len = struct.unpack("<H", header[26:28])[0]
+                extra_len = struct.unpack("<H", header[28:30])[0]
+            except struct.error:
+                break
+
+            start = offset + 30 + name_len + extra_len
+            # A damaged header can carry a zero size; take what remains.
+            end = start + compressed_size if compressed_size else len(blob)
+            payload = blob[start:min(end, len(blob))]
+
+            if method == zipfile.ZIP_STORED:
+                recovered.append(payload)
+            elif method == zipfile.ZIP_DEFLATED:
+                try:
+                    # -15 selects raw deflate: no wrapper, no checksum, so a
+                    # damaged trailer does not prevent reading the front.
+                    recovered.append(zlib.decompressobj(-15).decompress(payload))
+                except zlib.error:
+                    pass
+            offset = start + max(compressed_size, 1)
+
+        return b"".join(recovered)
+
+    @staticmethod
+    def _hdf5_signature_offset(blob: bytes) -> int | None:
+        """Find the HDF5 superblock, which need not sit at offset zero.
+
+        The format permits a *user block* before the superblock, whose size is
+        512 bytes or any larger power of two. h5py opens such files normally, so
+        requiring the signature at offset 0 would let a Keras model with a user
+        block — Lambda layer and all — be dismissed as an unrecognized container.
+        """
+        offset = 0
+        while offset < len(blob):
+            if blob[offset:offset + len(HDF5_MAGIC)] == HDF5_MAGIC:
+                return offset
+            offset = 512 if offset == 0 else offset * 2
+        return None
+
     def _extract_h5_config(self, blob: bytes) -> bytes | None:
         """Recover the `model_config` JSON from raw HDF5 bytes.
 
@@ -590,6 +654,7 @@ class DeepScanner:
             config_bytes = None      # the config JSON, if we could isolate it
             fallback_bytes = b""     # what the signature scan reads if JSON fails
             keras_version = None
+            truncated = False        # did the read stop at the budget?
 
             if zipfile.is_zipfile(f):
                 container = "keras-zip"
@@ -601,6 +666,7 @@ class DeepScanner:
                         with z.open("config.json") as cfg:
                             config_bytes = cfg.read(budget)
                             fallback_bytes = config_bytes
+                            truncated = len(config_bytes) >= budget
                     if "metadata.json" in members:
                         try:
                             with z.open("metadata.json") as md:
@@ -609,19 +675,39 @@ class DeepScanner:
                             pass
             else:
                 f.seek(0)
-                if f.read(len(HDF5_MAGIC)) == HDF5_MAGIC:
+                blob = f.read(budget)
+                fallback_bytes = blob
+                truncated = len(blob) >= budget
+                if self._hdf5_signature_offset(blob) is not None:
                     container = "hdf5"
-                    f.seek(0)
-                    blob = f.read(budget)
-                    fallback_bytes = blob
                     config_bytes = self._extract_h5_config(blob)
                     keras_version = self._extract_h5_keras_version(blob)
 
             if container is None:
-                meta["risk_level"] = "UNKNOWN (Unrecognized Container)"
+                # Not a readable ZIP and no HDF5 signature — but a damaged
+                # archive lands here too, and a truncated `.keras` can still
+                # carry an intact Lambda signature in its bytes. Refusing to
+                # look would make corrupting the container an evasion.
+                salvage = scan_keras_config_bytes(fallback_bytes)
+                if not salvage and fallback_bytes.startswith(b"PK\x03\x04"):
+                    # A damaged archive: its directory is unusable but the
+                    # member data behind the local headers usually is not.
+                    salvage = scan_keras_config_bytes(
+                        self._recover_zip_members(fallback_bytes)
+                    )
                 meta["details"]["container"] = None
-                meta["details"]["config_found"] = False
-                meta["details"]["threats"] = []
+                meta["details"]["config_found"] = bool(salvage)
+                meta["details"]["config_parsed"] = False
+                meta["details"]["threats"] = salvage
+                meta["details"]["lambda_layers"] = [
+                    t.split(": ", 1)[1] for t in salvage if t.startswith("KERAS_LAMBDA:")
+                ]
+                if salvage:
+                    meta["risk_level"] = self._keras_risk_label(
+                        salvage, meta["details"]["lambda_layers"]
+                    )
+                else:
+                    meta["risk_level"] = "UNKNOWN (Unrecognized Container)"
                 return meta
 
             parsed = None
@@ -659,10 +745,19 @@ class DeepScanner:
                 "lambda_layers": lambda_layers,
                 "layer_count": layer_count,
                 "keras_version": keras_version,
+                "truncated": truncated,
             })
 
             if threats:
                 meta["risk_level"] = self._keras_risk_label(threats, lambda_layers)
+            elif truncated:
+                # The config did not fit the read window, so a Lambda layer
+                # after the cut would not have been seen. Padding a config with
+                # harmless layers is cheap, and the archive stays small and
+                # loadable — so "nothing found" here is not a clean bill.
+                meta["risk_level"] = (
+                    "MEDIUM (Keras config incomplete: read limit reached)"
+                )
             elif parsed is None:
                 meta["risk_level"] = "LOW"
         except Exception as e:
