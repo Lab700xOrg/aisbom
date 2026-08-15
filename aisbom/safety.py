@@ -377,3 +377,243 @@ def scan_onnx_model(model: Dict[str, Any]) -> List[str]:
 def onnx_domain_is_custom(domain: str | None) -> bool:
     """True if an operator domain lies outside the ONNX standard set."""
     return (domain or "") not in ONNX_STANDARD_DOMAINS
+
+
+# --- CHAT-TEMPLATE (JINJA) INSPECTION ---
+#
+# A GGUF model can ship a Jinja chat template in its metadata. Unlike a pickle,
+# that template is not run when the file is opened — it is run on every
+# inference request, which is what makes it worth reading closely: the template
+# executes as a matter of using the model for its intended purpose, not as the
+# result of some further mistake by the user.
+#
+# What the template can reach depends on who renders it, and the range is wide:
+#
+#   * llama.cpp renders templates with minja, a C++ subset with no Python
+#     objects to reach for.
+#   * `transformers.apply_chat_template` uses Jinja's sandboxed environment,
+#     which blocks unsafe attribute access — sandbox escapes are still
+#     published against it.
+#   * plenty of tooling renders chat templates with a plain `jinja2.Template`,
+#     which is unsandboxed server-side template injection.
+#
+# So the constructs below are graded by whether they have *any* legitimate use
+# in a chat template. An attribute chain reaching `__subclasses__` does not; it
+# is the standard escape primitive and nothing else. Template inclusion has a
+# plausible-but-anomalous reading, so it is graded lower.
+#
+# NOTHING HERE RENDERS, PARSES, OR COMPILES THE TEMPLATE. Jinja is never
+# imported — the template is treated purely as a string, because handing a
+# hostile template to a real template engine to find out whether it is hostile
+# would be the vulnerability.
+
+# Attribute-traversal and introspection primitives. These are the building
+# blocks of every published Jinja/SSTI sandbox escape and have no business in a
+# template that formats chat messages.
+_JINJA_ESCAPE_TOKENS = (
+    "__class__",
+    "__bases__",
+    "__base__",
+    "__mro__",
+    "__subclasses__",
+    "__globals__",
+    "__builtins__",
+    "__import__",
+    "__init__",
+    "__code__",
+    "__reduce__",
+    "__getattribute__",
+    "__dict__",
+    "__loader__",
+    "__spec__",
+)
+
+# Callables that execute code or reach the OS. `popen` covers os.popen and
+# subprocess.Popen; the pattern is matched case-sensitively on purpose, since
+# these are exact attribute names.
+_JINJA_DANGEROUS_CALLS = (
+    "eval",
+    "exec",
+    "compile",
+    "getattr",
+    "setattr",
+    "system",
+    "popen",
+    "Popen",
+    "check_output",
+    "subprocess",
+    "importlib",
+    "marshal",
+    "pickle",
+    "breakpoint",
+)
+
+# Jinja's `attr` filter fetches an attribute by *name*, which is the documented
+# way around a filter that blocks dotted attribute access.
+_JINJA_ATTR_FILTER = re.compile(r"\|\s*attr\s*\(")
+
+# Objects a template environment may expose that leak the application context.
+_JINJA_CONTEXT_LEAKS = (
+    "self._TemplateReference__context",
+    "lipsum",
+    "cycler",
+    "joiner",
+)
+
+# Tags that pull in another template — a file read chosen by the model author.
+_JINJA_INCLUSION = re.compile(r"\{%-?\s*(include|extends|import|from)\b")
+
+# Templates are metadata, not weights; anything past this is not a chat format.
+JINJA_TEMPLATE_MAX_CHARS = 256 * 1024
+
+
+def _word_pattern(token: str) -> re.Pattern:
+    """Match ``token`` as a whole identifier, not as a substring.
+
+    Without the boundary, ``eval`` would match inside ``evaluate`` and every
+    template mentioning it would be reported.
+    """
+    return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(token) + r"(?![A-Za-z0-9_])")
+
+
+def _call_pattern(token: str) -> re.Pattern:
+    """Match ``token`` only where it is *used*, not merely mentioned.
+
+    Several of the dangerous names are ordinary English words — `system` above
+    all — and chat templates compare against them as data constantly
+    (``{% if message['role'] == 'system' %}``). Requiring one of the three
+    shapes a real use takes keeps the mention from reading as a call:
+
+    * ``name(``   — invoked
+    * ``.name``   — reached as an attribute
+    * ``name.``   — used as a module
+
+    Combined with literal-stripping below, a role comparison no longer matches.
+    """
+    escaped = re.escape(token)
+    return re.compile(
+        r"(?:\.\s*" + escaped + r"(?![A-Za-z0-9_]))"          # .name
+        r"|(?<![A-Za-z0-9_.])" + escaped + r"\s*[(.]"          # name( or name.
+    )
+
+
+# Jinja comments carry no behaviour, so their contents are not evidence.
+_JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.DOTALL)
+
+# Single- or double-quoted string literals.
+_JINJA_STRING_LITERAL = re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"", re.DOTALL)
+
+
+def _strip_literals_and_comments(template: str) -> str:
+    """Remove comments and quoted strings, keeping the code around them.
+
+    Only used for the *call* check. The escape-token and `attr` checks
+    deliberately run against the raw template, because ``|attr('__class__')``
+    hides its payload inside a string literal — stripping literals there would
+    remove the very evidence being looked for.
+    """
+    without_comments = _JINJA_COMMENT.sub(" ", template)
+    return _JINJA_STRING_LITERAL.sub(" ", without_comments)
+
+
+_JINJA_ESCAPE_PATTERNS = tuple((t, _word_pattern(t)) for t in _JINJA_ESCAPE_TOKENS)
+_JINJA_CALL_PATTERNS = tuple((t, _call_pattern(t)) for t in _JINJA_DANGEROUS_CALLS)
+_JINJA_LEAK_PATTERNS = tuple((t, _word_pattern(t.split(".")[-1])) for t in _JINJA_CONTEXT_LEAKS)
+
+
+def scan_jinja_template(template: str) -> List[str]:
+    """Statically report dangerous constructs in a chat template.
+
+    The template is a string throughout — it is never rendered, parsed by a
+    template engine, or compiled.
+
+    Threat strings, in the convention used by the other scanners here:
+
+    * ``JINJA_SANDBOX_ESCAPE: <token>`` — attribute-traversal / introspection
+      primitive with no legitimate use in a chat template
+    * ``JINJA_ATTR_FILTER`` — the ``|attr()`` filter, used to fetch attributes
+      by name past a dotted-access filter
+    * ``JINJA_DANGEROUS_CALL: <name>`` — names a code-execution or OS callable
+    * ``JINJA_CONTEXT_LEAK: <token>`` — reaches for an environment-provided
+      object that exposes application context
+    * ``JINJA_TEMPLATE_INCLUSION: <tag>`` — pulls in another template
+    """
+    if not isinstance(template, str) or not template:
+        return []
+
+    threats: List[str] = []
+
+    # Bound the work, but never silently: padding a template past the limit
+    # would otherwise be a way to hide an escape behind a wall of filler, so
+    # the unread remainder is reported rather than assumed harmless.
+    subject = template
+    if len(template) > JINJA_TEMPLATE_MAX_CHARS:
+        subject = template[:JINJA_TEMPLATE_MAX_CHARS]
+        threats.append(
+            f"JINJA_TEMPLATE_TRUNCATED: {len(template)} chars, "
+            f"analyzed first {JINJA_TEMPLATE_MAX_CHARS}"
+        )
+
+    # Escape tokens and the attr filter are searched in the *raw* text: the
+    # `|attr('__class__')` bypass carries its payload inside a string literal.
+    for token, pattern in _JINJA_ESCAPE_PATTERNS:
+        if pattern.search(subject):
+            threats.append(f"JINJA_SANDBOX_ESCAPE: {token}")
+
+    if _JINJA_ATTR_FILTER.search(subject):
+        threats.append("JINJA_ATTR_FILTER")
+
+    # Call and context checks run against code only, with literals and comments
+    # removed, so that comparing a role to 'system' is not read as calling it.
+    code = _strip_literals_and_comments(subject)
+
+    for token, pattern in _JINJA_CALL_PATTERNS:
+        if pattern.search(code):
+            threats.append(f"JINJA_DANGEROUS_CALL: {token}")
+
+    for token, pattern in _JINJA_LEAK_PATTERNS:
+        if pattern.search(code):
+            threats.append(f"JINJA_CONTEXT_LEAK: {token}")
+
+    for match in _JINJA_INCLUSION.finditer(code):
+        tag = f"JINJA_TEMPLATE_INCLUSION: {match.group(1)}"
+        if tag not in threats:
+            threats.append(tag)
+
+    return threats
+
+
+def jinja_threats_are_critical(threats: List[str]) -> bool:
+    """True if any finding is an escape rather than merely anomalous.
+
+    Escape primitives, the ``attr`` filter, dangerous callables and context
+    leaks are treated as CRITICAL: a chat template is rendered on every
+    inference request, so "the template runs" is not an extra precondition, it
+    is what using the model means. Template inclusion alone stays below that
+    line — it needs a target template to exist before it does anything.
+    """
+    return any(
+        _threat_kind(t).startswith(
+            ("JINJA_SANDBOX_ESCAPE:", "JINJA_DANGEROUS_CALL:", "JINJA_CONTEXT_LEAK:")
+        )
+        or _threat_kind(t) == "JINJA_ATTR_FILTER"
+        for t in threats
+    )
+
+
+def _threat_kind(threat: str) -> str:
+    """Strip the optional ``[template key] `` tag a multi-template model adds.
+
+    Findings are tagged with the variant they came from when a model ships more
+    than one chat template. Severity is a property of the finding, not of which
+    template carried it, so the tag is removed before classifying.
+    """
+    if threat.startswith("["):
+        _, _, rest = threat.partition("] ")
+        return rest or threat
+    return threat
+
+
+def jinja_analysis_is_incomplete(threats: List[str]) -> bool:
+    """True if part of the template went unread, so 'no findings' is not 'clean'."""
+    return any(_threat_kind(t).startswith("JINJA_TEMPLATE_TRUNCATED:") for t in threats)

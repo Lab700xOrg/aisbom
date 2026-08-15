@@ -90,6 +90,27 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
         if metadata_keys:
             props.append(("aisbom:gguf:metadata_keys", _csv(metadata_keys)))
 
+        # Chat-template findings. The template itself is deliberately not
+        # emitted — it can be hundreds of kilobytes and belongs in the model,
+        # not in every SBOM that references it. Its digest is emitted instead,
+        # which is enough to tell two templates apart or spot one changing.
+        if details.get("chat_template_present"):
+            props.append(("aisbom:gguf:chat_template", "present"))
+            template_length = details.get("chat_template_length")
+            if template_length is not None:
+                props.append(("aisbom:gguf:chat_template_length", str(template_length)))
+            template_digest = details.get("chat_template_sha256")
+            if template_digest:
+                props.append(("aisbom:gguf:chat_template_sha256", str(template_digest)))
+
+        template_threats = details.get("chat_template_threats") or []
+        for threat in template_threats:
+            props.append(("aisbom:gguf:chat_template_threat", str(threat)))
+        if details.get("chat_template_present"):
+            props.append((
+                "aisbom:gguf:chat_template_threat_count", str(len(template_threats))
+            ))
+
     elif fmt == "keras":
         container = details.get("container")
         if container:
@@ -153,5 +174,4 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
 
         for threat in details.get("threats") or []:
             props.append(("aisbom:onnx:threat", str(threat)))
-
     return props
