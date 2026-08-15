@@ -376,7 +376,7 @@ Pickle is not the only way a model file gets code to run. Each of the other form
 - **External-data references.** A tensor's bytes can live outside the model file, addressed by a relative path. A path that climbs out of the model directory — or names an absolute path or a URL — is **CRITICAL**: loaders resolve and open that path, so loading a model becomes a read of a file the author chose. Paths that stay inside the directory are MEDIUM, because the model isn't self-contained and those bytes aren't covered by its hash.
 - **Custom operators.** An operator outside the standard ONNX domains needs a matching custom op library registered at load time — a native-code dependency the consumer inherits. MEDIUM.
 
-Graphs nested inside `If`, `Loop` and `Scan` nodes are walked too, since those execute. Only the parts of a file that matter are read, so a multi-gigabyte model costs about the same to scan as a small one.
+Graphs nested inside `If`, `Loop` and `Scan` nodes are walked too, since those execute. The graph walk itself is near-constant regardless of model size — bulk tensor data is stepped over rather than read, so the structure of a multi-gigabyte model is inspected about as quickly as a small one's. Total scan time still grows with file size, because every artifact is SHA-256 hashed for the SBOM, and that reads the whole file.
 
 For weekly scan findings on the top 50 most-downloaded Hugging Face text-generation models, see [aisbom.io/advisories](https://aisbom.io/advisories?ref=cli-readme).
 
