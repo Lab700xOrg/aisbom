@@ -335,17 +335,56 @@ def test_padded_model_still_exits_two(tmp_path, monkeypatch):
     assert result.exit_code == 2, result.output
 
 
-def test_concatenated_scan_terminates_on_pathological_input():
-    """Many tiny pickles must terminate; the walk is linear, not unbounded.
+def test_a_flood_of_tiny_pickles_is_bounded_and_reported():
+    """The work limit must not become a silent hiding place.
 
-    Termination comes from each stream ending strictly further into the buffer
-    than it began, so no stream count is needed to guarantee it.
+    The smallest valid pickle is two bytes, so an unbounded walk over a 10MB
+    file means millions of disassembly calls. The limit that prevents that is
+    reported rather than swallowed — an unfinished scan is not a clean one.
     """
-    import pickle
+    import time
+    from aisbom.safety import PICKLE_SCAN_INCOMPLETE
 
-    tiny = pickle.dumps(1, protocol=2)
-    blob = tiny * 20_000
-    assert scan_pickle_stream(blob) == []
+    blob = b"N." * (10 * 1024 * 1024 // 2)
+    started = time.perf_counter()
+    result = scan_pickle_stream(blob)
+    elapsed = time.perf_counter() - started
+
+    assert PICKLE_SCAN_INCOMPLETE in result
+    assert elapsed < 3.0, f"took {elapsed:.1f}s — the work bound is not holding"
+
+
+def test_incomplete_scan_reports_medium_not_clean(tmp_path):
+    """A file that exhausted the budget must not read as safe."""
+    (tmp_path / "flood.pt").write_bytes(b"N." * (10 * 1024 * 1024 // 2))
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert art["details"]["scan_incomplete"] is True
+    assert "MEDIUM" in art["risk_level"]
+    assert "Incomplete" in art["risk_level"]
+    # The marker is bookkeeping, not a finding — it must not be reported as one.
+    assert art["details"]["threats"] == []
+    assert "CRITICAL" not in art["risk_level"]
+
+
+def test_a_real_payload_still_wins_over_the_incomplete_marker(tmp_path):
+    """A found threat outranks 'we ran out of budget'."""
+    blob = harmless_reduce_pickle("os", "system") + b"N." * (10 * 1024 * 1024 // 2)
+    (tmp_path / "both.pt").write_bytes(blob)
+    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+
+    assert "CRITICAL" in art["risk_level"]
+    assert "os.system" in art["risk_level"]
+
+
+def test_ordinary_files_never_carry_the_incomplete_marker():
+    """The bound is five orders of magnitude above a real legacy checkpoint."""
+    import pickle
+    from aisbom.safety import PICKLE_SCAN_INCOMPLETE
+
+    legacy = legacy_torch_bytes(pickle.dumps({"w": [1, 2, 3]}, protocol=2))
+    assert PICKLE_SCAN_INCOMPLETE not in scan_pickle_stream(legacy)
+    assert scan_pickle_stream(pickle.dumps({"w": [1]}, protocol=2)) == []
 
 
 def test_trailing_garbage_after_a_complete_stream_does_not_crash():
