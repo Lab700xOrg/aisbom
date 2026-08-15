@@ -262,9 +262,14 @@ def dual_use_argument_is_dangerous(argument) -> bool:
     return False
 
 # A legacy `torch.save` file is several pickles laid end to end, so a scan that
-# stops at the first STOP never reaches the object. Bounded so a hostile file
-# cannot turn "keep going" into an unbounded loop.
-MAX_CONCATENATED_STREAMS = 64
+# stops at the first STOP never reaches the object.
+#
+# This deliberately has no cap on the *number* of streams. A fixed count is an
+# evasion: padding a file with that many trivial pickles would push the payload
+# past the last one examined, and the file would be reported as fully scanned.
+# Termination comes from the walk itself — each stream must end strictly further
+# into the buffer than it began — and the total work is bounded by the caller's
+# read budget, since every byte is disassembled at most once.
 
 
 def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: List[str]):
@@ -364,15 +369,19 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
     A file may hold several pickles end to end — this is exactly what
     ``torch.save`` writes in its legacy (non-ZIP) format, where a magic number,
     a protocol version and a sys-info dict all precede the object itself. Every
-    stream is scanned, because stopping at the first STOP would mean never
-    looking at the payload in such a file.
+    stream is scanned to the end of the buffer, because stopping early would
+    mean never looking at the payload in such a file — and a fixed stopping
+    point is itself an evasion, since a file can simply carry that many trivial
+    pickles ahead of its payload.
     """
     threats: List[str] = []
     offset = 0
 
-    for _ in range(MAX_CONCATENATED_STREAMS):
+    # Terminates because a stream is only followed when it ended strictly
+    # further into the buffer than it began, and the buffer is finite.
+    while offset < len(data):
         next_offset = _scan_single_stream(data, offset, strict_mode, threats)
-        if next_offset is None or next_offset <= offset or next_offset >= len(data):
+        if next_offset is None or next_offset <= offset:
             break
         offset = next_offset
 

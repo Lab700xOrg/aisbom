@@ -301,15 +301,51 @@ def test_payload_in_the_last_of_many_streams_is_found():
     assert scan_pickle_stream(blob) == ["subprocess.Popen"]
 
 
-def test_concatenated_scan_is_bounded():
-    """A file of many tiny pickles must not be walked without limit."""
-    import pickle
-    from aisbom.safety import MAX_CONCATENATED_STREAMS
+@pytest.mark.parametrize("filler", [1, 63, 64, 200, 5000])
+def test_padding_with_streams_does_not_hide_the_payload(filler):
+    """A fixed stream limit would itself be the evasion.
 
-    blob = pickle.dumps(1, protocol=2) * (MAX_CONCATENATED_STREAMS + 200)
+    Any cap on how many concatenated pickles get examined can be stepped over
+    by carrying that many trivial ones ahead of the payload — and the file
+    would then be reported as though it had been fully scanned.
+    """
+    import pickle
+
+    blob = b"".join(pickle.dumps({"i": i}, protocol=2) for i in range(filler))
     blob += harmless_reduce_pickle("os", "system")
-    # Past the bound the tail is not reached; the point is that it terminates.
-    scan_pickle_stream(blob)
+
+    assert scan_pickle_stream(blob) == ["os.system"]
+    assert scan_pickle_stream(blob, strict_mode=True) == ["UNSAFE_IMPORT: os.system"]
+
+
+def test_padded_model_still_exits_two(tmp_path, monkeypatch):
+    """End to end: padding must not turn a CRITICAL finding into a clean pass."""
+    import pickle
+    from typer.testing import CliRunner
+    from aisbom.cli import app
+
+    monkeypatch.setenv("AISBOM_NO_TELEMETRY", "1")
+    blob = b"".join(pickle.dumps({"i": i}, protocol=2) for i in range(500))
+    blob += harmless_reduce_pickle("os", "system")
+    (tmp_path / "padded.pt").write_bytes(blob)
+
+    result = CliRunner().invoke(app, ["scan", str(tmp_path)])
+    assert "padded.pt" in result.output, result.output
+    assert "CRITICAL" in result.output, result.output
+    assert result.exit_code == 2, result.output
+
+
+def test_concatenated_scan_terminates_on_pathological_input():
+    """Many tiny pickles must terminate; the walk is linear, not unbounded.
+
+    Termination comes from each stream ending strictly further into the buffer
+    than it began, so no stream count is needed to guarantee it.
+    """
+    import pickle
+
+    tiny = pickle.dumps(1, protocol=2)
+    blob = tiny * 20_000
+    assert scan_pickle_stream(blob) == []
 
 
 def test_trailing_garbage_after_a_complete_stream_does_not_crash():
