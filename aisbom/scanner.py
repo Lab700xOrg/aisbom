@@ -8,14 +8,87 @@ import hashlib
 from typing import List, Dict, Any
 from pathlib import Path
 from pip_requirements_parser import RequirementsFile
-from aisbom.safety import scan_keras_config, scan_keras_config_bytes, scan_pickle_stream
+from aisbom import protobuf_reader as pb
+from aisbom.safety import (
+    onnx_domain_is_custom,
+    scan_keras_config,
+    scan_keras_config_bytes,
+    scan_onnx_model,
+    scan_pickle_stream,
+)
 
 # Constants
 PYTORCH_EXTENSIONS = {'.pt', '.pth', '.bin'}
 SAFETENSORS_EXTENSION = '.safetensors'
 GGUF_EXTENSION = '.gguf'
 KERAS_EXTENSIONS = {'.keras', '.h5', '.hdf5'}
+ONNX_EXTENSION = '.onnx'
 REQUIREMENTS_FILENAME = 'requirements.txt'
+
+# --- ONNX protobuf field numbers ---
+# ONNX has no magic bytes — a .onnx file is a bare serialized ModelProto — so
+# these field numbers are the schema. Confirmed against models serialized by the
+# onnx library itself rather than read off the .proto by eye.
+_ONNX_MODEL_IR_VERSION = 1
+_ONNX_MODEL_PRODUCER_NAME = 2
+_ONNX_MODEL_PRODUCER_VERSION = 3
+_ONNX_MODEL_DOMAIN = 4
+_ONNX_MODEL_VERSION = 5
+_ONNX_MODEL_GRAPH = 7
+_ONNX_MODEL_OPSET_IMPORT = 8
+
+_ONNX_OPSET_DOMAIN = 1
+_ONNX_OPSET_VERSION = 2
+
+_ONNX_GRAPH_NODE = 1
+_ONNX_GRAPH_NAME = 2
+_ONNX_GRAPH_INITIALIZER = 5
+
+_ONNX_NODE_OP_TYPE = 4
+_ONNX_NODE_ATTRIBUTE = 5
+_ONNX_NODE_DOMAIN = 7
+
+# AttributeProto: `g` holds one nested graph, `graphs` holds several. These are
+# how If / Loop / Scan carry the branches they execute. `t` / `tensors` hold
+# tensors, which can themselves point at external data (a Constant node).
+# Numbers read from the ONNX descriptor, not from memory — `graphs` is 11, and
+# 10 is `tensors`, which is exactly the sort of confusion that turns a security
+# walk into a parse of the wrong bytes.
+_ONNX_ATTRIBUTE_TENSOR = 5
+_ONNX_ATTRIBUTE_GRAPH = 6
+_ONNX_ATTRIBUTE_TENSORS = 10
+_ONNX_ATTRIBUTE_GRAPHS = 11
+
+# Nested graphs may nest further; bound the recursion rather than trusting the
+# file's own structure.
+ONNX_MAX_GRAPH_DEPTH = 12
+
+# When walking a large file by seeking, only sub-messages under this size are
+# read. A tensor pointing at external data carries no inline payload and is
+# therefore tiny, and nodes are small by construction — so what gets stepped
+# over is inline weight data, which holds nothing this scan looks for.
+ONNX_MAX_SUBMESSAGE_BYTES = 4 * 1024 * 1024
+
+_ONNX_TENSOR_NAME = 8
+_ONNX_TENSOR_EXTERNAL_DATA = 13
+_ONNX_TENSOR_DATA_LOCATION = 14
+_ONNX_DATA_LOCATION_EXTERNAL = 1
+
+_ONNX_STRING_ENTRY_KEY = 1
+_ONNX_STRING_ENTRY_VALUE = 2
+
+# Bound on how much of a model is read. ONNX stores weights inline, so a real
+# model runs to gigabytes while the graph structure sits at the head; reading a
+# window keeps memory flat. A truncated read still yields every node it covers.
+ONNX_MAX_SCAN_BYTES = 16 * 1024 * 1024
+
+# Remote scans pay per byte over HTTP Range requests, so they read far less.
+ONNX_MAX_REMOTE_SCAN_BYTES = 2 * 1024 * 1024
+
+# Caps on how much graph inventory is retained, so a model with a million nodes
+# cannot turn one SBOM component into an unbounded document.
+ONNX_MAX_OP_TYPES = 200
+ONNX_MAX_EXTERNAL_ENTRIES = 100
 
 # HDF5 files start with this signature; a `.keras` file is a plain zip.
 HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
@@ -86,6 +159,9 @@ class DeepScanner:
                     elif ext in KERAS_EXTENSIONS:
                         with RemoteStream(url) as stream:
                             self.artifacts.append(self._inspect_keras(stream, Path(url).name, is_remote=True))
+                    elif ext == ONNX_EXTENSION:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(self._inspect_onnx(stream, Path(url).name, is_remote=True))
                 except Exception as e:
                     self._record_fetch_error(url, e)
                     continue
@@ -103,6 +179,8 @@ class DeepScanner:
                         self.artifacts.append(self._inspect_gguf(full_path))
                     elif ext in KERAS_EXTENSIONS:
                         self.artifacts.append(self._inspect_keras(full_path))
+                    elif ext == ONNX_EXTENSION:
+                        self.artifacts.append(self._inspect_onnx(full_path))
                     elif full_path.name == REQUIREMENTS_FILENAME:
                         self._parse_requirements(full_path)
 
@@ -770,6 +848,327 @@ class DeepScanner:
                     pass
         return meta
 
+    @staticmethod
+    def _parse_onnx_model(blob: bytes) -> Dict[str, Any]:
+        """Walk a serialized ONNX ModelProto into a plain dict.
+
+        Structure only — the security judgement lives in ``scan_onnx_model``.
+        The walk is total: a field that is absent, empty or truncated yields
+        ``None`` or an empty list rather than raising, because the input is an
+        untrusted file that may well be none of the things it claims to be.
+        """
+        model = pb.parse_message(blob)
+
+        opsets = []
+        for entry in pb.get_messages(model, _ONNX_MODEL_OPSET_IMPORT):
+            opsets.append({
+                "domain": pb.get_str(entry, _ONNX_OPSET_DOMAIN) or "",
+                "version": pb.get_int(entry, _ONNX_OPSET_VERSION),
+            })
+
+        graph_name = None
+        op_types: List[str] = []
+        custom_ops: List[Dict[str, Any]] = []
+        external_data: List[Dict[str, Any]] = []
+        node_count = 0
+
+        # `If`, `Loop` and `Scan` carry whole GraphProtos in their node
+        # attributes, and those subgraphs execute. A walk covering only the top
+        # level would miss a custom operator or an escaping external-data path
+        # hidden one branch down.
+        acc: Dict[str, Any] = {
+            "op_types": op_types,
+            "custom_ops": custom_ops,
+            "external_data": external_data,
+            "nodes": 0,
+            "subgraphs": 0,
+        }
+
+        graph_blob = pb.get_bytes(model, _ONNX_MODEL_GRAPH)
+        if graph_blob:
+            graph = pb.parse_message(graph_blob)
+            graph_name = pb.get_str(graph, _ONNX_GRAPH_NAME)
+            DeepScanner._walk_onnx_graph_message(graph, acc, 0)
+        node_count = acc["nodes"]
+        subgraph_count = acc["subgraphs"]
+
+        return {
+            "subgraph_count": subgraph_count,
+            "ir_version": pb.get_int(model, _ONNX_MODEL_IR_VERSION),
+            "producer_name": pb.get_str(model, _ONNX_MODEL_PRODUCER_NAME),
+            "producer_version": pb.get_str(model, _ONNX_MODEL_PRODUCER_VERSION),
+            "model_domain": pb.get_str(model, _ONNX_MODEL_DOMAIN),
+            "model_version": pb.get_int(model, _ONNX_MODEL_VERSION),
+            "graph_name": graph_name,
+            "opsets": opsets,
+            "op_types": op_types,
+            "custom_ops": custom_ops,
+            "external_data": external_data,
+            "node_count": node_count,
+        }
+
+    def _parse_onnx_model_streamed(self, f, local_path: Path):
+        """Re-walk a large ONNX file, seeking past bulk tensor payloads.
+
+        Only sub-messages below ``ONNX_MAX_SUBMESSAGE_BYTES`` are read. That is
+        safe for the questions being asked: a tensor that points at *external*
+        data carries no inline payload and is therefore tiny, and nodes are
+        small by construction. What gets skipped is inline weight data, which
+        holds nothing this scan is looking for.
+
+        Returns ``None`` if the file does not walk cleanly, so the caller keeps
+        the buffered result rather than losing findings it already had.
+        """
+        try:
+            size = local_path.stat().st_size
+
+            def read_at(offset: int, count: int) -> bytes:
+                f.seek(offset)
+                return f.read(count)
+
+            graph_range = None
+            header_fields: Dict[int, List[Any]] = {}
+            for fn, wt, off, length in pb.iter_stream_fields(read_at, 0, size):
+                if fn == _ONNX_MODEL_GRAPH and wt == pb.WIRE_LENGTH_DELIMITED:
+                    graph_range = (off, off + length)
+                elif length <= ONNX_MAX_SUBMESSAGE_BYTES:
+                    header_fields.setdefault(fn, []).append(
+                        read_at(off, length) if wt == pb.WIRE_LENGTH_DELIMITED
+                        else pb.read_varint(read_at(off, length), 0)[0]
+                    )
+            if graph_range is None:
+                return None
+
+            acc: Dict[str, Any] = {
+                "op_types": [],
+                "custom_ops": [],
+                "external_data": [],
+                "nodes": 0,
+                "subgraphs": 0,
+            }
+            graph_name = None
+
+            for fn, wt, off, length in pb.iter_stream_fields(read_at, *graph_range):
+                if wt != pb.WIRE_LENGTH_DELIMITED:
+                    continue
+                if fn == _ONNX_GRAPH_NAME and graph_name is None:
+                    graph_name = read_at(off, length).decode("utf-8", "replace")
+                elif fn == _ONNX_GRAPH_NODE and length <= ONNX_MAX_SUBMESSAGE_BYTES:
+                    acc["nodes"] += 1
+                    node = pb.parse_message(read_at(off, length))
+                    op_type = pb.get_str(node, _ONNX_NODE_OP_TYPE)
+                    domain = pb.get_str(node, _ONNX_NODE_DOMAIN) or ""
+                    if (op_type and op_type not in acc["op_types"]
+                            and len(acc["op_types"]) < ONNX_MAX_OP_TYPES):
+                        acc["op_types"].append(op_type)
+                    if onnx_domain_is_custom(domain):
+                        acc["custom_ops"].append({"op_type": op_type, "domain": domain})
+                    self._collect_onnx_node_payloads(node, acc, 0)
+                elif fn == _ONNX_GRAPH_INITIALIZER and length <= ONNX_MAX_SUBMESSAGE_BYTES:
+                    # A tensor with external data has no inline payload, so
+                    # anything large here is weights and can be stepped over.
+                    self._collect_onnx_external(
+                        pb.parse_message(read_at(off, length)), acc["external_data"]
+                    )
+
+            op_types = acc["op_types"]
+            custom_ops = acc["custom_ops"]
+            external_data = acc["external_data"]
+            counters = {"nodes": acc["nodes"], "subgraphs": acc["subgraphs"]}
+
+            model = pb.parse_message(read_at(0, min(size, 4096)))
+            return {
+                "ir_version": pb.get_int(model, _ONNX_MODEL_IR_VERSION),
+                "producer_name": pb.get_str(model, _ONNX_MODEL_PRODUCER_NAME),
+                "producer_version": pb.get_str(model, _ONNX_MODEL_PRODUCER_VERSION),
+                "model_domain": pb.get_str(model, _ONNX_MODEL_DOMAIN),
+                "model_version": pb.get_int(model, _ONNX_MODEL_VERSION),
+                "graph_name": graph_name,
+                "opsets": [
+                    {
+                        "domain": pb.get_str(e, _ONNX_OPSET_DOMAIN) or "",
+                        "version": pb.get_int(e, _ONNX_OPSET_VERSION),
+                    }
+                    for e in pb.get_messages(model, _ONNX_MODEL_OPSET_IMPORT)
+                ],
+                "op_types": op_types,
+                "custom_ops": custom_ops,
+                "external_data": external_data,
+                "node_count": counters["nodes"],
+                "subgraph_count": counters["subgraphs"],
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _collect_onnx_external(tensor, external_data: List[Dict[str, Any]]) -> None:
+        if pb.get_int(tensor, _ONNX_TENSOR_DATA_LOCATION) != _ONNX_DATA_LOCATION_EXTERNAL:
+            return
+        if len(external_data) >= ONNX_MAX_EXTERNAL_ENTRIES:
+            return
+        entry: Dict[str, Any] = {"tensor": pb.get_str(tensor, _ONNX_TENSOR_NAME)}
+        for kv in pb.get_messages(tensor, _ONNX_TENSOR_EXTERNAL_DATA):
+            key = pb.get_str(kv, _ONNX_STRING_ENTRY_KEY)
+            if key:
+                entry[key] = pb.get_str(kv, _ONNX_STRING_ENTRY_VALUE)
+        external_data.append(entry)
+
+    @classmethod
+    def _collect_onnx_node_payloads(cls, node, acc: Dict[str, Any], depth: int) -> None:
+        """Inspect a node's attributes: nested graphs, and tensors."""
+        for attribute in pb.get_messages(node, _ONNX_NODE_ATTRIBUTE):
+            for field in (_ONNX_ATTRIBUTE_GRAPH, _ONNX_ATTRIBUTE_GRAPHS):
+                for nested in attribute.get(field, []):
+                    if isinstance(nested, bytes):
+                        acc["subgraphs"] += 1
+                        cls._walk_onnx_graph_message(
+                            pb.parse_message(nested), acc, depth + 1
+                        )
+            for field in (_ONNX_ATTRIBUTE_TENSOR, _ONNX_ATTRIBUTE_TENSORS):
+                for blob_bytes in attribute.get(field, []):
+                    if isinstance(blob_bytes, bytes):
+                        cls._collect_onnx_external(
+                            pb.parse_message(blob_bytes), acc["external_data"]
+                        )
+
+    @classmethod
+    def _walk_onnx_graph_message(cls, graph, acc: Dict[str, Any], depth: int) -> None:
+        """Walk a buffered graph message, recursing into nested graphs."""
+        if depth > ONNX_MAX_GRAPH_DEPTH:
+            return
+        for node in pb.get_messages(graph, _ONNX_GRAPH_NODE):
+            acc["nodes"] += 1
+            op_type = pb.get_str(node, _ONNX_NODE_OP_TYPE)
+            domain = pb.get_str(node, _ONNX_NODE_DOMAIN) or ""
+            if (op_type and op_type not in acc["op_types"]
+                    and len(acc["op_types"]) < ONNX_MAX_OP_TYPES):
+                acc["op_types"].append(op_type)
+            if onnx_domain_is_custom(domain):
+                acc["custom_ops"].append({"op_type": op_type, "domain": domain})
+            cls._collect_onnx_node_payloads(node, acc, depth)
+        for tensor in pb.get_messages(graph, _ONNX_GRAPH_INITIALIZER):
+            cls._collect_onnx_external(tensor, acc["external_data"])
+
+    @staticmethod
+    def _onnx_risk_label(threats: List[str]) -> str:
+        """Map ONNX findings to a risk label.
+
+        Only an external-data path that leaves the model directory is CRITICAL:
+        that one turns loading the model into a read of a file the author chose.
+        A custom operator, or external data that stays put, is a MEDIUM — real
+        signal, but it needs something else (a registered op library, a swapped
+        weights file) before it becomes an attack.
+
+        The substring in the returned label is what the CLI's exit-code check
+        reads, so the wording is load-bearing: "CRITICAL" exits 2, "MEDIUM"
+        does not. ("HIGH" is deliberately unused — it is not one of the levels
+        the exit-code mapping recognises.)
+        """
+        escapes = [t for t in threats if t.startswith("ONNX_EXTERNAL_DATA_ESCAPE:")]
+        if escapes:
+            paths = ", ".join(t.split(": ", 1)[1] for t in escapes)
+            return f"CRITICAL (ONNX External Data Escapes Model Directory: {paths})"
+
+        custom = sum(1 for t in threats if t.startswith("ONNX_CUSTOM_OP:"))
+        external = sum(1 for t in threats if t.startswith("ONNX_EXTERNAL_DATA:"))
+        parts = []
+        if custom:
+            parts.append(f"{custom} custom operator(s)")
+        if external:
+            parts.append(f"{external} external tensor(s)")
+        if parts:
+            return f"MEDIUM (ONNX: {'; '.join(parts)})"
+        return "LOW"
+
+    def _inspect_onnx(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
+        """Statically inspects an ONNX model's protobuf structure.
+
+        No ONNX runtime is loaded and the graph is never executed — the file is
+        walked as protobuf to recover its metadata and to surface two signals:
+        operators outside the standard domains, and tensors stored outside the
+        model file. Only the head of the file is read, so a multi-gigabyte model
+        costs the same as a small one.
+        """
+        local_path = None
+        if isinstance(source, (str, Path)):
+            local_path = Path(source)
+            name = name or local_path.name
+            is_remote = False
+        name = name or getattr(source, "name", "unknown")
+
+        meta = {
+            "name": name,
+            "type": "machine-learning-model",
+            "framework": "ONNX",
+            "risk_level": "LOW",
+            "license": "Unknown",  # ONNX has no standard license field
+            "legal_status": "UNKNOWN",
+            "hash": "remote_unhashed" if is_remote else self._calculate_hash(local_path),
+            "details": {},
+        }
+
+        f = None
+        try:
+            f = open(local_path, "rb") if local_path else source
+            budget = ONNX_MAX_SCAN_BYTES if local_path else ONNX_MAX_REMOTE_SCAN_BYTES
+            f.seek(0)
+            blob = f.read(budget)
+
+            parsed = self._parse_onnx_model(blob)
+
+            # ONNX stores weights inline, so a real model is far larger than any
+            # window worth buffering — and a single big tensor early in the
+            # graph would otherwise hide every external-data entry behind it.
+            # For a local file, seeking is free, so the graph is re-walked by
+            # stepping over bulk payloads instead of reading them.
+            truncated = len(blob) >= budget
+            if truncated and local_path is not None:
+                streamed = self._parse_onnx_model_streamed(f, local_path)
+                if streamed is not None:
+                    parsed = streamed
+                    truncated = False
+
+            threats = scan_onnx_model(parsed)
+
+            # A .onnx file has no magic number, so "did this parse as ONNX?" is
+            # judged by whether the walk recovered anything a ModelProto has.
+            looks_like_onnx = any((
+                parsed["ir_version"] is not None,
+                parsed["producer_name"],
+                parsed["graph_name"],
+                parsed["opsets"],
+                parsed["node_count"],
+            ))
+
+            meta["details"] = {
+                "ir_version": parsed["ir_version"],
+                "producer_name": parsed["producer_name"],
+                "producer_version": parsed["producer_version"],
+                "graph_name": parsed["graph_name"],
+                "opsets": parsed["opsets"],
+                "op_types": parsed["op_types"],
+                "custom_ops": parsed["custom_ops"],
+                "external_data": parsed["external_data"],
+                "node_count": parsed["node_count"],
+                "subgraph_count": parsed.get("subgraph_count", 0),
+                "threats": threats,
+                "parsed": looks_like_onnx,
+                "truncated": len(blob) >= budget,
+            }
+
+            if not looks_like_onnx:
+                meta["risk_level"] = "UNKNOWN (Unparsable ONNX)"
+            else:
+                meta["risk_level"] = self._onnx_risk_label(threats)
+        except Exception as e:
+            meta["error"] = str(e)
+        finally:
+            if local_path and f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        return meta
     def _parse_requirements(self, path: Path):
         try:
             req_file = RequirementsFile.from_file(path)

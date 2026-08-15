@@ -22,6 +22,7 @@ _FRAMEWORK_TO_FORMAT = {
     "SafeTensors": "safetensors",
     "GGUF": "gguf",
     "Keras": "keras",
+    "ONNX": "onnx",
 }
 
 
@@ -106,5 +107,51 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
         keras_version = details.get("keras_version")
         if keras_version:
             props.append(("aisbom:keras:version", str(keras_version)))
+
+    elif fmt == "onnx":
+        ir_version = details.get("ir_version")
+        if ir_version is not None:
+            props.append(("aisbom:onnx:ir_version", str(ir_version)))
+        producer = details.get("producer_name")
+        if producer:
+            props.append(("aisbom:onnx:producer_name", str(producer)))
+        producer_version = details.get("producer_version")
+        if producer_version:
+            props.append(("aisbom:onnx:producer_version", str(producer_version)))
+        graph_name = details.get("graph_name")
+        if graph_name:
+            props.append(("aisbom:onnx:graph_name", str(graph_name)))
+
+        # Opsets are emitted as "domain:version" pairs; the default domain is
+        # the empty string, rendered as "ai.onnx" so the value is readable.
+        opsets = details.get("opsets") or []
+        if opsets:
+            props.append(("aisbom:onnx:opsets", _csv(
+                f"{o.get('domain') or 'ai.onnx'}:{o.get('version')}" for o in opsets
+            )))
+
+        node_count = details.get("node_count")
+        if node_count is not None:
+            props.append(("aisbom:onnx:node_count", str(node_count)))
+        op_types = details.get("op_types") or []
+        if op_types:
+            props.append(("aisbom:onnx:op_types", _csv(op_types)))
+
+        custom_ops = details.get("custom_ops") or []
+        if custom_ops:
+            props.append(("aisbom:onnx:custom_ops", _csv(
+                f"{o.get('domain') or ''}.{o.get('op_type') or '?'}" for o in custom_ops
+            )))
+        props.append(("aisbom:onnx:custom_op_count", str(len(custom_ops))))
+
+        external_data = details.get("external_data") or []
+        for entry in external_data:
+            location = (entry or {}).get("location")
+            if location:
+                props.append(("aisbom:onnx:external_data_location", str(location)))
+        props.append(("aisbom:onnx:external_data_count", str(len(external_data))))
+
+        for threat in details.get("threats") or []:
+            props.append(("aisbom:onnx:threat", str(threat)))
 
     return props

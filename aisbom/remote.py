@@ -149,6 +149,7 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
     supported_exts = (
         ".pt", ".pth", ".bin", ".safetensors", ".gguf",
         ".keras", ".h5", ".hdf5",
+        ".onnx",
     )
     urls = []
     for entry in data:
