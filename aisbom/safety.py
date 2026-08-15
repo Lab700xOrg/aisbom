@@ -8,13 +8,124 @@ from typing import Any, Dict, List, Set, Tuple
 
 # The "Blocklist" of dangerous modules and functions
 # If a model tries to import these, it is trying to break out of the sandbox.
+#
+# The entries below the original six close the *indirect* paths: reaching an
+# executable sink through a module nobody thinks to blocklist. A debugger's
+# `run`, an event loop's subprocess transport and a package installer's entry
+# point all execute attacker-chosen code just as surely as `os.system` does,
+# and each has been used in a published picklescan bypass.
+#
+# Every addition was checked against the globals a genuine checkpoint carries —
+# `torch._utils._rebuild_tensor_v2`, `torch.FloatStorage`,
+# `torch.storage._load_from_bytes`, `collections.OrderedDict`,
+# `numpy.core.multiarray._reconstruct`, `numpy.dtype`, `numpy.ndarray`,
+# `builtins.complex` — because a scanner that flags ordinary models is a
+# scanner people switch off, and that is a worse outcome than a missed case.
 DANGEROUS_GLOBALS = {
-    "os": {"system", "popen", "execl", "execvp"},
-    "subprocess": {"Popen", "call", "check_call", "check_output", "run"},
-    "builtins": {"eval", "exec", "compile", "open"},
-    "posix": {"system", "popen"},
-    "webbrowser": {"open"},
-    "socket": {"socket", "connect"},
+    "os": {"system", "popen", "execl", "execvp", "execv", "execve", "spawnl", "spawnv"},
+    "subprocess": {"Popen", "call", "check_call", "check_output", "run", "getoutput", "getstatusoutput"},
+    "builtins": {"eval", "exec", "compile", "open", "__import__", "breakpoint", "input"},
+    "posix": {"system", "popen", "execv", "spawnv"},
+    "nt": {"system", "popen", "execv", "spawnv"},
+    "webbrowser": {"open", "open_new", "open_new_tab", "get"},
+    "socket": {"socket", "connect", "create_connection"},
+
+    # Debugger gadgets. `Bdb.run` and friends compile and execute a string;
+    # the debugger module itself is the "benign-looking" part.
+    "bdb": {"Bdb", "run", "runeval", "runcall", "runctx"},
+    "pdb": {"Pdb", "run", "runeval", "runcall", "set_trace", "post_mortem"},
+
+    # Event-loop gadgets: the subprocess transports spawn a process, and the
+    # loop's own run methods execute a supplied coroutine.
+    "asyncio": {
+        "create_subprocess_shell", "create_subprocess_exec", "run",
+        "get_event_loop", "new_event_loop", "SelectorEventLoop",
+    },
+    "asyncio.unix_events": {
+        "_UnixSubprocessTransport", "_UnixDefaultEventLoopPolicy", "SelectorEventLoop",
+    },
+    "asyncio.base_events": {"BaseEventLoop"},
+    "asyncio.base_subprocess": {"BaseSubprocessTransport"},
+    "asyncio.subprocess": {"create_subprocess_shell", "create_subprocess_exec"},
+    "asyncio.events": {"get_event_loop", "new_event_loop"},
+
+    # Package installation as code execution.
+    "pip": {"main"},
+    "pip._internal": {"main"},
+    "pip._internal.cli.main": {"main"},
+    "setuptools": {"setup"},
+
+    # Terminal / process spawning.
+    "pty": {"spawn", "fork", "openpty"},
+    "platform": {"popen", "_syscmd_ver"},
+    "multiprocessing": {"Process", "Pool"},
+
+    # Import-mechanism abuse — the primitive a shadowing attack needs before it
+    # can make an allowlisted name resolve somewhere else.
+    "importlib": {"import_module", "reload", "__import__"},
+    "importlib.util": {"spec_from_file_location", "module_from_spec"},
+    "importlib.machinery": {"SourceFileLoader", "ExtensionFileLoader"},
+    "imp": {"load_source", "load_module", "load_dynamic", "load_compiled"},
+    "runpy": {"run_path", "run_module", "_run_code", "_run_module_code"},
+    "pkgutil": {"get_loader", "find_loader"},
+    "sys": {"modules", "settrace", "setprofile", "_getframe", "exit"},
+
+    # Interactive interpretation and timing helpers that take code as a string.
+    "code": {"interact", "InteractiveInterpreter", "InteractiveConsole", "compile_command"},
+    "codeop": {"compile_command", "Compile", "CommandCompiler"},
+    "timeit": {"timeit", "repeat", "Timer"},
+    "cProfile": {"run", "runctx", "Profile"},
+    "profile": {"run", "runctx", "Profile"},
+
+    # Native code loading.
+    "ctypes": {"CDLL", "cdll", "WinDLL", "windll", "PyDLL", "LibraryLoader", "CFUNCTYPE"},
+
+}
+
+# Callable-construction helpers that are genuinely dual-use. `methodcaller` and
+# `attrgetter` build a callable from a *name given as a string*, so
+# `methodcaller("system")` reaches a sink without ever naming it as a global —
+# but `attrgetter("name")` is an ordinary helper that real code serializes.
+#
+# Listing them unconditionally would flag every checkpoint that stores one, so
+# the argument decides: these are reported only when the name they fetch is
+# itself an execution sink or an introspection primitive. `functools.reduce` is
+# deliberately absent — the dangerous callable it is handed appears as its own
+# global and is caught on its own merits.
+DUAL_USE_CONSTRUCTORS = {
+    ("operator", "methodcaller"),
+    ("operator", "attrgetter"),
+    ("_operator", "methodcaller"),
+    ("_operator", "attrgetter"),
+}
+
+# Introspection primitives that make an attribute fetch an escape chain.
+_ESCAPE_ATTRIBUTE_NAMES = {
+    "__class__", "__bases__", "__base__", "__mro__", "__subclasses__",
+    "__globals__", "__builtins__", "__import__", "__init__", "__code__",
+    "__reduce__", "__getattribute__", "__dict__", "__func__", "__self__",
+    "__module__", "__loader__", "__spec__",
+}
+
+# Modules whose *whole family* is dangerous: a dotted submodule inherits the
+# parent's entry, so `asyncio.unix_events.X` is judged against `asyncio` too.
+# Without this a new submodule name sidesteps the table by not being listed.
+DANGEROUS_MODULE_FAMILIES = ("asyncio", "importlib", "pip", "ctypes", "multiprocessing")
+
+# Attribute names that execute something, whatever module they are reached
+# through. This is the generalization of the table above: it catches the next
+# "benign module, dangerous method" pair without waiting for it to be listed.
+#
+# Matched exactly, never as a substring — `torch.storage._load_from_bytes` must
+# not match `load`, and it does not.
+EXECUTION_ATTRIBUTE_NAMES = {
+    "system", "popen", "spawn", "spawnl", "spawnv", "fork", "forkpty",
+    "exec", "execv", "execl", "execfile", "eval", "compile",
+    "run", "runeval", "runcall", "runctx", "run_path", "run_module",
+    "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+    "Popen", "check_response",
+    "import_module", "__import__", "load_module", "load_source", "load_dynamic",
+    "interact", "compile_command",
 }
 
 # Strict allowlist mode: only these modules/functions are permitted
@@ -43,6 +154,19 @@ SAFE_MODULES = {
     "types",
     "_operator",
     "complex",
+    # Ordinary value types that turn up in model metadata and configs. Strict
+    # mode flagged these before, purely for being unrecognized; none of them
+    # carries an execution-shaped attribute, and the attribute check above
+    # still governs them.
+    "decimal",
+    "fractions",
+    "uuid",
+    "numbers",
+    "array",
+    "struct",
+    "math",
+    "itertools",
+    "string",
 }
 
 SAFE_BUILTINS = {
@@ -52,51 +176,95 @@ SAFE_BUILTINS = {
     "bool", "int", "float", "str", "bytes", "object",
 }
 
+def _module_roots(module: str):
+    """Yield a dotted module and each of its ancestors, longest first.
+
+    ``asyncio.unix_events`` yields ``asyncio.unix_events`` then ``asyncio``, so
+    a rule written against a package also governs its submodules.
+    """
+    parts = (module or "").split(".")
+    for cut in range(len(parts), 0, -1):
+        yield ".".join(parts[:cut])
+
+
+def is_dangerous_global(module: str, name: str) -> bool:
+    """True if ``module.name`` is a known execution sink, direct or indirect.
+
+    Checks the exact pair, then the module's ancestors for the families where a
+    submodule inherits the parent's entry, then the attribute name on its own —
+    so a sink reached through an unlisted submodule is still caught.
+    """
+    if not module or not name:
+        return False
+
+    for candidate in _module_roots(module):
+        listed = DANGEROUS_GLOBALS.get(candidate)
+        if listed and name in listed:
+            return True
+        # For a dangerous family, any attribute that executes something counts,
+        # even one nobody has enumerated yet.
+        if candidate in DANGEROUS_MODULE_FAMILIES and name in EXECUTION_ATTRIBUTE_NAMES:
+            return True
+
+    return False
+
+
 def _is_safe_import(module: str, name: str) -> bool:
-    """Helper to validate imports against strict mode policies."""
-    # 1. Exact Match Safe Modules
-    if module in SAFE_MODULES:
-        return True
-    
-    # 2. Torch Submodules (torch.*)
-    if module.startswith("torch."):
-        return True
-    
-    # 3. Codecs (Explicitly allow encode/decode only)
+    """Validate an import against strict (allowlist) mode.
+
+    Strict mode answers "is this recognized as safe", but a name being reached
+    through a recognized module is not enough on its own: the attribute has to
+    be innocuous too. An allowlisted package with an execution-shaped attribute
+    (`.run`, `.system`, `.popen`) is exactly the "benign prefix" shape this is
+    meant to close, so that check runs before the module allowlist.
+    """
+    if not module:
+        return False
+
+    # 0. A known sink is never safe, whatever its module looks like.
+    if is_dangerous_global(module, name):
+        return False
+
+    # 1. An execution-shaped attribute is not safe even on an allowlisted
+    #    module. Builtins are exempted here because SAFE_BUILTINS is an explicit
+    #    allowlist of names, checked below, and it is narrower than this rule.
+    if module not in ("builtins", "__builtin__") and name in EXECUTION_ATTRIBUTE_NAMES:
+        return False
+
+    # 2. Exact-match safe modules, and their submodules. Real checkpoints carry
+    #    globals like `torch.nn.modules.linear.Linear` and
+    #    `numpy.core.multiarray._reconstruct`, so submodules of an allowlisted
+    #    package have to be permitted — with step 1 above as the guard rail.
+    for candidate in _module_roots(module):
+        if candidate in SAFE_MODULES:
+            if candidate in ("builtins", "__builtin__"):
+                return name in SAFE_BUILTINS
+            return True
+
+    # 3. Codecs (explicitly allow encode/decode only).
     if module == "_codecs" and name in ("encode", "decode"):
         return True
-        
-    # 4. Pathlib internals handling (pathlib._local or generic submodules of safe packages?)
-    # Generally if 'pathlib' is safe, 'pathlib.anything' *should* be safe if it's code, but strict mode is strict.
-    # On many python versions, Path is in 'pathlib'. 'pathlib._local' is an implementation detail.
-    # Let's allow submodules of SAFE_MODULES if they start with that name?
-    # No, that opens up 'os.path' if 'os' was safe (it isn't).
-    # But for 'pathlib', 're', nested usage is common.
-    # Let's add specific check for known safe packages that use submodules
-    if module.startswith("pathlib.") or module.startswith("re.") or module.startswith("collections."):
-        return True
 
-    # 5. Builtins Checks
-    if module in ("builtins", "__builtin__"):
-        return name in SAFE_BUILTINS
+    return False
 
+def dual_use_argument_is_dangerous(argument) -> bool:
+    """True if a name handed to `attrgetter`/`methodcaller` reaches a sink.
+
+    ``methodcaller("upper")`` builds an ordinary callable; ``methodcaller(
+    "system")`` builds one that runs a command. Dotted forms count too, since
+    ``attrgetter("__class__.__mro__")`` walks the chain in a single call.
+    """
+    if not isinstance(argument, str) or not argument:
+        return False
+    for part in argument.split("."):
+        if part in EXECUTION_ATTRIBUTE_NAMES or part in _ESCAPE_ATTRIBUTE_NAMES:
+            return True
     return False
 
 # A legacy `torch.save` file is several pickles laid end to end, so a scan that
 # stops at the first STOP never reaches the object. Bounded so a hostile file
 # cannot turn "keep going" into an unbounded loop.
 MAX_CONCATENATED_STREAMS = 64
-
-
-def _record_global(threats: List[str], module, name, strict_mode: bool) -> None:
-    """Judge one resolved global and append a threat string if it is unsafe."""
-    if not module or not name:
-        return
-    if strict_mode:
-        if not _is_safe_import(module, name):
-            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
-    elif module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
-        threats.append(f"{module}.{name}")
 
 
 def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: List[str]):
@@ -111,12 +279,43 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
     stream = io.BytesIO(data)
     stream.seek(start)
 
+    # A dual-use constructor is judged by the name it is given, so the decision
+    # waits for the arguments between the global and its REDUCE.
+    pending = {"ctor": None, "args": []}
+
+    def resolve(module, name):
+        if not module or not name:
+            return
+        if (module, name) in DUAL_USE_CONSTRUCTORS:
+            # Defer: the argument decides. Recorded even in strict mode, where
+            # the module is allowlisted and would otherwise pass unexamined.
+            pending["ctor"] = (module, name)
+            pending["args"] = []
+            return
+        if strict_mode:
+            if not _is_safe_import(module, name):
+                threats.append(f"UNSAFE_IMPORT: {module}.{name}")
+        elif is_dangerous_global(module, name):
+            threats.append(f"{module}.{name}")
+
+    def settle_dual():
+        ctor, args = pending["ctor"], pending["args"]
+        if ctor and any(dual_use_argument_is_dangerous(a) for a in args):
+            module, name = ctor
+            bad = next(a for a in args if dual_use_argument_is_dangerous(a))
+            label = f"{module}.{name}({bad!r})"
+            threats.append(f"UNSAFE_IMPORT: {label}" if strict_mode else label)
+        pending["ctor"] = None
+        pending["args"] = []
+
     try:
         for opcode, arg, pos in pickletools.genops(stream):
             if opcode.name in ("SHORT_BINUNICODE", "UNICODE", "BINUNICODE"):
                 memo.append(arg)
                 if len(memo) > 2:
                     memo.pop(0)
+                if pending["ctor"] is not None:
+                    pending["args"].append(arg)
 
             if opcode.name == "GLOBAL":
                 # Arg is "module\nname"
@@ -127,20 +326,33 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
                     module, name = arg.split(" ", 1)
                 else:
                     module, name = None, None
-                _record_global(threats, module, name, strict_mode)
+                resolve(module, name)
 
             elif opcode.name == "STACK_GLOBAL":
                 if len(memo) == 2:
-                    _record_global(threats, memo[0], memo[1], strict_mode)
+                    # The module/name pair is not an argument to a pending
+                    # constructor; drop it from whatever was collected.
+                    if pending["ctor"] is not None:
+                        for used in memo:
+                            if pending["args"] and pending["args"][-1] == used:
+                                pending["args"].pop()
+                    resolve(memo[0], memo[1])
                 # Clear memo after use to avoid false positives
                 memo.clear()
 
+            elif opcode.name in ("REDUCE", "NEWOBJ", "OBJ", "INST"):
+                settle_dual()
+
             elif opcode.name == "STOP":
+                settle_dual()
                 # `pos` is an absolute offset into the buffer.
                 return pos + 1
     except Exception:
         # Malformed downstream; keep whatever was found before the break.
+        settle_dual()
         return None
+
+    settle_dual()
     return None
 
 
