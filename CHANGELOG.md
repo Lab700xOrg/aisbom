@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0 — 2026-08-15
+
 ### New formats scanned
 
 - **Keras models (`.keras`, `.h5`, `.hdf5`) are now scanned.** A `Lambda` layer stores an arbitrary Python callable in the model config as a base64-encoded marshalled code object, and `load_model` runs it — so the config is an execution vector in the same way a pickle stream is. `Lambda` layers and embedded code objects are flagged CRITICAL. The payload is identified from its header bytes and **never unmarshalled**, and a truncated or corrupted container is still scanned rather than skipped. Both containers Keras writes are handled: the `.keras` zip and legacy HDF5. No HDF5 library is added to the install.
