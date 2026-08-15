@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### New formats scanned
+
+- **Keras models (`.keras`, `.h5`, `.hdf5`) are now scanned.** A `Lambda` layer stores an arbitrary Python callable in the model config as a base64-encoded marshalled code object, and `load_model` runs it — so the config is an execution vector in the same way a pickle stream is. `Lambda` layers and embedded code objects are flagged CRITICAL. The payload is identified from its header bytes and **never unmarshalled**, and a truncated or corrupted container is still scanned rather than skipped. Both containers Keras writes are handled: the `.keras` zip and legacy HDF5. No HDF5 library is added to the install.
+- **ONNX models (`.onnx`) are now scanned.** The protobuf is walked directly — no ONNX runtime is imported and the graph is never executed. Alongside producer, opset, IR version and operator inventory, two signals are surfaced: operators from a non-standard domain (which need a custom native op library at load time), and external-data paths that point outside the model directory, which turn `load_model` into an arbitrary-file read. Subgraphs carried by `If`, `Loop` and `Scan` are walked too.
+- **GGUF chat templates are now checked.** The embedded Jinja `chat_template` is extracted into the SBOM component and analysed statically for sandbox-escape constructs. The template is **never rendered** — rendering it is the vulnerability.
+
+### Pickle detection
+
+- **Concatenated pickle streams are all scanned.** A legacy `torch.save` file hides its object behind several header pickles, so stopping at the first `STOP` meant never reaching the payload. There is a work limit on the walk, and a file that reaches it now reports `MEDIUM (Pickle Scan Incomplete)` rather than passing as clean — an unfinished scan is never reported as a clean one.
+- **Non-standard containers are flagged.** Packing a model with 7z (or rar, xz…) instead of the ZIP PyTorch expects previously meant the archive was never opened. It is now reported as `CRITICAL (Non-Standard Container: …)`. The container is named, not unpacked — unpacking would put a native 7z dependency into every install and every standalone binary.
+- **Broken and truncated pickle streams are scanned rather than skipped.** The pickle VM executes sequentially, so a payload at the front of the stream runs before a corrupt tail is ever reached. Damaging a file is no longer a way to hide one.
+- **Files are disassembled before their type is decided.** A printable protocol-0 pickle could previously pass as a text config file and be reported safe.
+- **A ZIP member that cannot be read is no longer a clean bill** — it reports `MEDIUM (Unreadable Pickle Member)`, because a loader that does not verify integrity the way AIsbom does would still run it.
+- **Indirect-execution gadgets are now detected in both scan modes** — `bdb.Bdb.run`, the asyncio gadget chain, and the import-mechanism primitives (`sys.modules`, `importlib`, `imp`, `runpy`, `pkgutil`, `builtins.__import__`). Strict mode now judges a global by its *resolved* module and attribute, so a submodule no longer inherits an allowlisted parent's trust.
+- Hugging Face scans (`hf://…`) now list the Keras and ONNX extensions, so a repo containing a backdoored `.keras`, `.h5` or `.onnx` model is no longer resolved to zero artifacts.
+
+### New command
+
+- **`aisbom bypass-scorecard`** scans a corpus of publicly-documented scanner-evasion techniques — each reproduced as an inert, synthesized artifact — and reports what AIsbom catches in each scan mode. Nothing in the corpus is ever executed. `--check` is a release gate that fails if any case scores below its committed floor, and it now runs in CI on every push. Current state: **8 of 11 evasion cases caught**, up from 5 of 11.
+
 ## 1.2.1 — 2026-08-08
 
 - SPDX export (`--format spdx`) now reports each model's real filename instead of labelling every artifact `unknown-model`, and its real format (`pickle` / `safetensors` / `gguf`) instead of `unknown`.
