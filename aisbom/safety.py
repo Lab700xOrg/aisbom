@@ -277,3 +277,103 @@ def scan_keras_config_bytes(raw: bytes) -> List[str]:
     if any(sig in raw for sig in _LAMBDA_BYTE_SIGNATURES):
         return ["KERAS_LAMBDA: <unparsed config>"]
     return []
+
+
+# --- ONNX GRAPH INSPECTION ---
+#
+# ONNX carries no pickle, so the risk is not a payload inside the file — it is
+# what loading the file makes the runtime reach for:
+#
+#   * **External data.** A tensor can live outside the model, addressed by a
+#     relative path. A path that climbs out of the model directory (or names an
+#     absolute path or a URL) turns `load_model` into an arbitrary-file read
+#     against whatever the loading process can see. The ONNX specification
+#     requires these paths to stay within the model directory, so one that does
+#     not is a spec violation as well as a security signal.
+#   * **Custom operators.** An operator in a non-standard domain cannot run
+#     without a matching custom op library being registered, which is a
+#     native-code load the model author chose and the model consumer inherits.
+
+# Domains defined by the ONNX standard. Anything else is a custom operator set.
+# The empty domain is the default (ai.onnx).
+ONNX_STANDARD_DOMAINS = {
+    "",
+    "ai.onnx",
+    "ai.onnx.ml",
+    "ai.onnx.training",
+    "ai.onnx.preview.training",
+}
+
+# A URL-ish scheme prefix: `http://`, `file://`, `s3://` …
+_URL_SCHEME = re.compile(r"\A[A-Za-z][A-Za-z0-9+.\-]*://")
+
+# A Windows drive-letter path: `C:\…` or `C:/…`
+_WINDOWS_DRIVE = re.compile(r"\A[A-Za-z]:[\\/]")
+
+
+def external_location_escapes(location: str) -> bool:
+    """True if an external-data path leaves the model's own directory.
+
+    Absolute paths, Windows drive paths, UNC paths and URLs escape by
+    definition. Relative paths are resolved by tracking depth, so ``a/../b``
+    (which stays put) is not reported while ``../secrets`` and ``a/../../etc``
+    are. Resolution is textual on purpose — the point is to judge what the file
+    *asks for*, without touching the filesystem it is asking about.
+    """
+    if not isinstance(location, str) or not location:
+        return False
+    if _URL_SCHEME.match(location) or _WINDOWS_DRIVE.match(location):
+        return True
+    if location.startswith("/") or location.startswith("\\"):
+        return True
+
+    depth = 0
+    for part in re.split(r"[\\/]+", location):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            depth -= 1
+            if depth < 0:
+                return True
+        else:
+            depth += 1
+    return False
+
+
+def scan_onnx_model(model: Dict[str, Any]) -> List[str]:
+    """Report security signals from an extracted ONNX model structure.
+
+    Takes the dict produced by the scanner's protobuf walk (see
+    ``DeepScanner._inspect_onnx``) rather than raw bytes, so the wire-format
+    decoding and the security judgement stay separable and separately testable.
+
+    Threat strings follow the convention of the other scanners in this module:
+
+    * ``ONNX_EXTERNAL_DATA_ESCAPE: <path>`` — reaches outside the model directory
+    * ``ONNX_EXTERNAL_DATA: <path>`` — external tensor within the directory; not
+      an escape, but the model is not self-contained and the bytes it will load
+      are not covered by the model's own hash
+    * ``ONNX_CUSTOM_OP: <domain>.<op_type>`` — operator outside the standard set
+    """
+    threats: List[str] = []
+
+    for entry in model.get("external_data") or []:
+        location = (entry or {}).get("location")
+        if not location:
+            continue
+        if external_location_escapes(location):
+            threats.append(f"ONNX_EXTERNAL_DATA_ESCAPE: {location}")
+        else:
+            threats.append(f"ONNX_EXTERNAL_DATA: {location}")
+
+    for op in model.get("custom_ops") or []:
+        domain = (op or {}).get("domain") or ""
+        op_type = (op or {}).get("op_type") or "?"
+        threats.append(f"ONNX_CUSTOM_OP: {domain}.{op_type}")
+
+    return threats
+
+
+def onnx_domain_is_custom(domain: str | None) -> bool:
+    """True if an operator domain lies outside the ONNX standard set."""
+    return (domain or "") not in ONNX_STANDARD_DOMAINS

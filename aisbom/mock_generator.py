@@ -259,6 +259,109 @@ def create_mock_keras_zip(output_path, with_lambda: bool = False) -> Path:
     return output_path
 
 
+# --- ONNX ARTIFACTS ---
+# An .onnx file is a bare serialized protobuf ModelProto, so writing one needs
+# only the wire format — no onnx library, and nothing that would land in the
+# shipped package's dependencies. These build the three cases the scanner has
+# to tell apart: an ordinary model, one carrying a custom operator, and one
+# whose weights live outside the file.
+
+def _pb_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _pb_tag(field_number: int, wire_type: int) -> bytes:
+    return _pb_varint((field_number << 3) | wire_type)
+
+
+def _pb_bytes_field(field_number: int, payload: bytes) -> bytes:
+    return _pb_tag(field_number, 2) + _pb_varint(len(payload)) + payload
+
+
+def _pb_str_field(field_number: int, text: str) -> bytes:
+    return _pb_bytes_field(field_number, text.encode("utf-8"))
+
+
+def _pb_varint_field(field_number: int, value: int) -> bytes:
+    return _pb_tag(field_number, 0) + _pb_varint(value)
+
+
+def _onnx_node(op_type: str, domain: str = "", node_name: str = "node") -> bytes:
+    """NodeProto: input(1), output(2), name(3), op_type(4), domain(7)."""
+    body = (
+        _pb_str_field(1, "x")
+        + _pb_str_field(2, "y")
+        + _pb_str_field(3, node_name)
+        + _pb_str_field(4, op_type)
+    )
+    if domain:
+        body += _pb_str_field(7, domain)
+    return body
+
+
+def _onnx_external_tensor(tensor_name: str, location: str) -> bytes:
+    """TensorProto with data_location=EXTERNAL and external_data entries."""
+    entries = b""
+    for key, value in (("location", location), ("offset", "0"), ("length", "64")):
+        entries += _pb_bytes_field(
+            13, _pb_str_field(1, key) + _pb_str_field(2, value)
+        )
+    return (
+        _pb_varint_field(2, 1)              # data_type = FLOAT
+        + _pb_str_field(8, tensor_name)     # name
+        + entries                            # external_data
+        + _pb_varint_field(14, 1)           # data_location = EXTERNAL
+    )
+
+
+def create_mock_onnx(
+    output_path,
+    custom_op: bool = False,
+    external_location: str | None = None,
+) -> Path:
+    """Write a minimal but structurally valid `.onnx` model.
+
+    `custom_op` puts an operator in a non-standard domain; `external_location`
+    adds a tensor whose bytes live at that path outside the model file (pass a
+    traversal path to build the escape case).
+    """
+    output_path = Path(output_path)
+
+    nodes = _pb_bytes_field(1, _onnx_node("Relu", node_name="relu_node"))
+    opsets = _pb_bytes_field(8, _pb_str_field(1, "") + _pb_varint_field(2, 17))
+    if custom_op:
+        nodes += _pb_bytes_field(
+            1, _onnx_node("MyCustomOp", domain="com.example.ops", node_name="custom_node")
+        )
+        opsets += _pb_bytes_field(
+            8, _pb_str_field(1, "com.example.ops") + _pb_varint_field(2, 1)
+        )
+
+    graph_body = nodes + _pb_str_field(2, "mock_graph")
+    if external_location is not None:
+        graph_body += _pb_bytes_field(
+            5, _onnx_external_tensor("W", external_location)
+        )
+
+    model = (
+        _pb_varint_field(1, 9)                      # ir_version
+        + _pb_str_field(2, "aisbom-mock")           # producer_name
+        + _pb_str_field(3, "1.0.0")                 # producer_version
+        + _pb_bytes_field(7, graph_body)            # graph
+        + opsets                                     # opset_import
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(model)
+    return output_path
+
+
 # --- DIFF DEMO LOGIC ---
 import uuid
 import random
