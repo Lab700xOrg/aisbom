@@ -262,12 +262,27 @@ def dual_use_argument_is_dangerous(argument) -> bool:
     return False
 
 # A legacy `torch.save` file is several pickles laid end to end, so a scan that
-# stops at the first STOP never reaches the object. Bounded so a hostile file
-# cannot turn "keep going" into an unbounded loop.
-MAX_CONCATENATED_STREAMS = 64
+# stops at the first STOP never reaches the object.
+#
+# Walking them needs a work limit, because the smallest valid pickle is two
+# bytes (`N.`) and a 10MB file of them would otherwise mean five million
+# disassembly calls — seconds of CPU per file, multiplied across a directory.
+#
+# But a silent limit is itself an evasion: pad a file with that many trivial
+# pickles and the payload sits past the last stream examined, while the file is
+# reported as though fully scanned. So the limit is generous — five orders of
+# magnitude above the five streams a real legacy checkpoint carries — and
+# reaching it is *reported*, never silently swallowed. "We stopped looking" and
+# "there is nothing there" are different answers.
+PICKLE_MAX_STREAMS = 50_000
+
+# Emitted when the walk stops with bytes still unexamined. Callers must treat a
+# result carrying this as "not fully scanned" rather than as a clean bill.
+PICKLE_SCAN_INCOMPLETE = "PICKLE_SCAN_INCOMPLETE"
 
 
-def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: List[str]):
+def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: List[str],
+                        stream=None):
     """Disassemble one pickle from ``start``; return the offset past its STOP.
 
     Returns ``None`` when the stream ends without a STOP (truncated or not a
@@ -276,7 +291,10 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
     discard what the front of the stream already revealed.
     """
     memo = []  # recent string literals, for STACK_GLOBAL
-    stream = io.BytesIO(data)
+    # One buffer is reused across the whole walk; allocating a fresh view per
+    # stream is what made a file of tiny pickles expensive.
+    if stream is None:
+        stream = io.BytesIO(data)
     stream.seek(start)
 
     # A dual-use constructor is judged by the name it is given, so the decision
@@ -366,16 +384,29 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
     a protocol version and a sys-info dict all precede the object itself. Every
     stream is scanned, because stopping at the first STOP would mean never
     looking at the payload in such a file.
+
+    The walk stops at ``PICKLE_MAX_STREAMS`` to bound work on a file made of
+    minimal two-byte pickles. If that happens with bytes still unexamined, the
+    returned list carries ``PICKLE_SCAN_INCOMPLETE`` so the caller cannot mistake
+    an unfinished scan for a clean one — a silent limit would just be somewhere
+    to hide a payload.
     """
     threats: List[str] = []
     offset = 0
+    buffer = io.BytesIO(data)
 
-    for _ in range(MAX_CONCATENATED_STREAMS):
-        next_offset = _scan_single_stream(data, offset, strict_mode, threats)
-        if next_offset is None or next_offset <= offset or next_offset >= len(data):
-            break
+    for _ in range(PICKLE_MAX_STREAMS):
+        # Terminates because a stream is only followed when it ended strictly
+        # further into the buffer than it began, and the buffer is finite.
+        next_offset = _scan_single_stream(data, offset, strict_mode, threats, buffer)
+        if next_offset is None or next_offset <= offset:
+            return threats
         offset = next_offset
+        if offset >= len(data):
+            return threats
 
+    # Ran out of budget with bytes left over.
+    threats.append(PICKLE_SCAN_INCOMPLETE)
     return threats
 
 

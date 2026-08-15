@@ -10,6 +10,7 @@ from pathlib import Path
 from pip_requirements_parser import RequirementsFile
 from aisbom import protobuf_reader as pb
 from aisbom.safety import (
+    PICKLE_SCAN_INCOMPLETE,
     _threat_kind as _jinja_threat_kind,
     jinja_threats_are_critical,
     looks_like_pickle_stream,
@@ -387,6 +388,16 @@ class DeepScanner:
                 return data, f"container integrity check failed, read raw member: {exc}"
             return None, str(exc)
 
+    @staticmethod
+    def _split_scan_incomplete(threats):
+        """Separate the "did not finish" marker from real findings.
+
+        It is not a threat and must not be reported as one — but it must also
+        not vanish, or an unfinished scan would read as a clean one.
+        """
+        incomplete = PICKLE_SCAN_INCOMPLETE in (threats or [])
+        return [t for t in (threats or []) if t != PICKLE_SCAN_INCOMPLETE], incomplete
+
     def _inspect_pytorch(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
         """Peeks inside PyTorch."""
         local_path = None
@@ -431,8 +442,12 @@ class DeepScanner:
                             threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
                             self._apply_lint(meta, content)
 
+                    threats, incomplete = self._split_scan_incomplete(threats)
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+                    elif incomplete:
+                        meta["details"]["scan_incomplete"] = True
+                        meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
                     elif content is None and pickle_files:
                         # The member is there but could not be read at all. A
                         # loader that does not verify integrity the way we do
@@ -467,11 +482,16 @@ class DeepScanner:
                     # by shape first is what let a printable protocol-0 pickle
                     # pass as a text config file and be reported safe.
                     threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
+                    threats, incomplete = self._split_scan_incomplete(threats)
                     meta["details"]["threats"] = threats
+                    if incomplete:
+                        meta["details"]["scan_incomplete"] = True
                     self._apply_lint(meta, content)
 
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+                    elif incomplete:
+                        meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
                     elif looks_like_pickle_stream(content):
                         meta["risk_level"] = "MEDIUM (Pickle Present)"
                     elif self._looks_like_text(content):
