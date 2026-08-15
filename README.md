@@ -8,7 +8,7 @@
 
 **Detect malware and license risks hidden inside ML model files — statically, before you load them.**
 
-AIsbom disassembles Pickle bytecode, inspects Keras model configs for code-executing `Lambda` layers, and parses SafeTensors / GGUF binary headers to surface RCE-capable payloads and restrictive licenses that generic SBOM tools miss. Pure static analysis — no model code is ever executed.
+AIsbom disassembles Pickle bytecode, inspects Keras configs for code-executing `Lambda` layers, reads GGUF chat templates for Jinja sandbox escapes, walks ONNX graphs for custom operators and escaping external-data paths, and parses SafeTensors / GGUF binary headers — surfacing RCE-capable payloads and restrictive licenses that generic SBOM tools miss. Pure static analysis: **no model is ever loaded, and no payload is ever executed, rendered, or unmarshalled.**
 
 > 💡 Also available as a [**GitHub Action**](#use-as-a-github-action) that posts an idempotent PR comment on every commit. See it on the [Marketplace →](https://github.com/marketplace/actions/aisbom-security-scanner)
 
@@ -44,18 +44,37 @@ aisbom scan hf://google-bert/bert-base-uncased
 A typical scan against a project with mixed artifacts:
 
 ```text
-                           🧠 AI Model Artifacts Found                           
-┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Filename            ┃ Framework   ┃ Security Risk        ┃ Legal Risk                  ┃
-┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ bert_finetune.pt    │ PyTorch     │ CRITICAL (RCE Found) │ UNKNOWN                     │
-│ safe_model.st       │ SafeTensors │ LOW                  │ UNKNOWN                     │
-│ restricted_model.st │ SafeTensors │ LOW                  │ LEGAL RISK (cc-by-nc-4.0)   │
-│ llama-3-quant.gguf  │ GGUF        │ LOW                  │ LEGAL RISK (cc-by-nc-sa)    │
-└─────────────────────┴─────────────┴──────────────────────┴─────────────────────────────┘
+                                    🧠 AI Model Artifacts Found
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Filename                     ┃ Framework   ┃ Security Risk                                  ┃ Legal Risk                   ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ bert_finetune.pt             │ PyTorch     │ CRITICAL (RCE Detected: posix.system)          │ UNKNOWN                      │
+│ classifier.h5                │ Keras       │ CRITICAL (Keras Lambda Code Execution — Lambda │ UNKNOWN                      │
+│                              │             │ layer(s): exfil_lambda; 1 embedded code        │                              │
+│                              │             │ object(s))                                     │                              │
+│ backdoored-chat.gguf         │ GGUF        │ CRITICAL (Chat Template Code Execution:        │ PASS                         │
+│                              │             │ __class__, __mro__, __subclasses__)            │                              │
+│ exfil.onnx                   │ ONNX        │ CRITICAL (ONNX External Data Escapes Model     │ UNKNOWN                      │
+│                              │             │ Directory: ../../../etc/passwd)                │                              │
+│ detector.onnx                │ ONNX        │ LOW                                            │ UNKNOWN                      │
+│ llama-3-quant.gguf           │ GGUF        │ LOW                                            │ LEGAL RISK (cc-by-nc-sa-4.0) │
+│ safe_model.safetensors       │ SafeTensors │ LOW                                            │ PASS                         │
+│ restricted_model.safetensors │ SafeTensors │ LOW                                            │ LEGAL RISK (cc-by-nc-4.0)    │
+└──────────────────────────────┴─────────────┴────────────────────────────────────────────────┴──────────────────────────────┘
 ```
 
 A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license data is generated in your working directory. SPDX 2.3 export is one flag away (`--format spdx`).
+
+### Formats and what's checked in each
+
+| Format | Extensions | What AIsbom looks for |
+|---|---|---|
+| **PyTorch / Pickle** | `.pt` `.pth` `.bin` | Dangerous globals in the pickle opcodes, including indirect-execution gadgets. Every concatenated stream is scanned, and non-standard containers (7z, rar, xz…) are flagged. |
+| **Keras** | `.keras` `.h5` `.hdf5` | `Lambda` layers and embedded marshalled code objects in the model config — an actively exploited RCE vector. |
+| **GGUF** | `.gguf` | License and architecture metadata, plus the embedded Jinja **chat template**, checked for sandbox-escape constructs. |
+| **ONNX** | `.onnx` | Producer/opset/IR metadata, custom operators, and external-data paths that point outside the model directory. |
+| **SafeTensors** | `.safetensors` | Header metadata, tensor inventory, and license. Safe by construction — no code path. |
+| **Dependencies** | `requirements.txt` | Pinned packages, emitted as SBOM components. |
 
 Don't like reading JSON? [Open the viewer →](https://aisbom.io/viewer?ref=cli-readme), drag your `sbom.json` in, and get an instant dashboard of risks, license issues, and compliance stats. *The viewer is client-side only — your data never leaves your browser.*
 
@@ -342,10 +361,22 @@ Two rules generalize the list, so the *next* gadget doesn't need to be enumerate
 
 Attribute names are matched **exactly, never as substrings**, so ordinary globals like `torch.storage._load_from_bytes` are untouched. Every entry above was checked against the globals a genuine checkpoint carries (`torch._utils._rebuild_tensor_v2`, `collections.OrderedDict`, `numpy.core.multiarray._reconstruct`, …) — a scanner that flags real models is one people switch off, which is a worse outcome than a missed case.
 
-SafeTensors and GGUF use binary formats with structured headers — AIsbom parses these headers directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
+### Beyond pickle
 
-Keras models (`.keras`, `.h5`, `.hdf5`) carry a different execution vector: a `Lambda` layer stores an arbitrary Python callable in the model config as a base64-encoded marshalled code object, and `load_model` runs it. AIsbom reads the config out of both containers — the `.keras` zip and the legacy HDF5 attribute — flags `Lambda` layers and embedded code objects as CRITICAL, and never unmarshals or executes the payload. A truncated or corrupted container is still scanned rather than skipped, so damaging a file is not a way to hide a payload.
-GGUF models can also ship a **Jinja chat template** in their metadata (`tokenizer.chat_template`). Unlike a pickle payload, that template isn't run when the file is opened — it runs on *every inference request*, which is what makes a hostile one worth catching: it executes as a consequence of using the model normally. AIsbom reads the template as a string and flags Jinja sandbox-escape constructs — attribute-traversal chains (`__class__`, `__subclasses__`, `__globals__`), the `|attr()` filter used to bypass attribute restrictions, and references to code-execution or OS callables — as CRITICAL. Template inclusion tags are reported as MEDIUM, since they need a target template to matter. **The template is never rendered, parsed by a template engine, or compiled** — handing a hostile template to Jinja in order to find out whether it's hostile would be the vulnerability. Only its SHA-256 goes into the SBOM, not the template body.
+Pickle is not the only way a model file gets code to run. Each of the other formats has its own vector, and each is read as inert data:
+
+**SafeTensors and GGUF** use binary formats with structured headers — AIsbom parses these directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
+
+**Keras** (`.keras`, `.h5`, `.hdf5`) carries a different execution vector: a `Lambda` layer stores an arbitrary Python callable in the model config as a base64-encoded marshalled code object, and `load_model` runs it. AIsbom reads the config out of both containers — the `.keras` zip and the legacy HDF5 attribute — and flags `Lambda` layers and embedded code objects as CRITICAL. The payload is identified from its header bytes and **never unmarshalled**. A truncated or corrupted container is still scanned rather than skipped, so damaging a file is not a way to hide a payload.
+
+**GGUF chat templates.** A GGUF model can ship a Jinja template in its metadata (`tokenizer.chat_template`). Unlike a pickle payload it isn't run when the file is opened — it runs on *every inference request*, which is what makes a hostile one worth catching: it executes as a consequence of using the model normally. AIsbom reads the template as a string and flags sandbox-escape constructs — attribute-traversal chains (`__class__`, `__subclasses__`, `__globals__`), the `|attr()` filter used to bypass attribute restrictions, and references to code-execution or OS callables — as CRITICAL. Template inclusion tags are MEDIUM, since they need a target template to matter. Models shipping several named variants (`chat_template.default`, `.tool_use`) have each one scanned. **The template is never rendered, parsed by a template engine, or compiled** — handing a hostile template to Jinja to find out whether it's hostile would be the vulnerability. Only its SHA-256 goes into the SBOM, never the template body.
+
+**ONNX** (`.onnx`) is a protobuf message, walked directly — no ONNX runtime is imported and the graph is never executed. Alongside the metadata (producer, opset, IR version, graph name, operator inventory) it surfaces two signals:
+
+- **External-data references.** A tensor's bytes can live outside the model file, addressed by a relative path. A path that climbs out of the model directory — or names an absolute path or a URL — is **CRITICAL**: loaders resolve and open that path, so loading a model becomes a read of a file the author chose. Paths that stay inside the directory are MEDIUM, because the model isn't self-contained and those bytes aren't covered by its hash.
+- **Custom operators.** An operator outside the standard ONNX domains needs a matching custom op library registered at load time — a native-code dependency the consumer inherits. MEDIUM.
+
+Graphs nested inside `If`, `Loop` and `Scan` nodes are walked too, since those execute. Only the parts of a file that matter are read, so a multi-gigabyte model costs about the same to scan as a small one.
 
 For weekly scan findings on the top 50 most-downloaded Hugging Face text-generation models, see [aisbom.io/advisories](https://aisbom.io/advisories?ref=cli-readme).
 
