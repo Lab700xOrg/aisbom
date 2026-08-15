@@ -69,7 +69,7 @@ A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license dat
 
 | Format | Extensions | What AIsbom looks for |
 |---|---|---|
-| **PyTorch / Pickle** | `.pt` `.pth` `.bin` | Dangerous globals in the pickle opcodes, including indirect-execution gadgets. Every concatenated stream is scanned, and non-standard containers (7z, rar, xz…) are flagged. |
+| **PyTorch / Pickle** | `.pt` `.pth` `.bin` | Dangerous globals in the pickle opcodes, including indirect-execution gadgets. Concatenated streams are all scanned — a legacy `torch.save` file hides its object behind three header pickles — and non-standard containers (7z, rar, xz…) are flagged. If a file is so full of streams that the walk hits its work limit, the scan says so rather than reporting clean. |
 | **Keras** | `.keras` `.h5` `.hdf5` | `Lambda` layers and embedded marshalled code objects in the model config — an actively exploited RCE vector. |
 | **GGUF** | `.gguf` | License and architecture metadata, plus the embedded Jinja **chat template**, checked for sandbox-escape constructs. |
 | **ONNX** | `.onnx` | Producer/opset/IR metadata, custom operators, and external-data paths that point outside the model directory. |
