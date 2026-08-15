@@ -143,7 +143,13 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
     resp.raise_for_status()
     data = resp.json()
 
-    supported_exts = (".pt", ".pth", ".bin", ".safetensors", ".gguf")
+    # Must stay in step with the extensions DeepScanner dispatches on: a format
+    # missing here is silently skipped for `hf://` scans, so a hostile model in
+    # that format passes a remote scan without producing an artifact or an error.
+    supported_exts = (
+        ".pt", ".pth", ".bin", ".safetensors", ".gguf",
+        ".keras", ".h5", ".hdf5",
+    )
     urls = []
     for entry in data:
         path = entry.get("path", "")

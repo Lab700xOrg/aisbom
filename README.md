@@ -8,7 +8,7 @@
 
 **Detect malware and license risks hidden inside ML model files — statically, before you load them.**
 
-AIsbom disassembles Pickle bytecode and parses SafeTensors / GGUF binary headers to surface RCE-capable payloads and restrictive licenses that generic SBOM tools miss. Pure static analysis — no model code is ever executed.
+AIsbom disassembles Pickle bytecode, inspects Keras model configs for code-executing `Lambda` layers, and parses SafeTensors / GGUF binary headers to surface RCE-capable payloads and restrictive licenses that generic SBOM tools miss. Pure static analysis — no model code is ever executed.
 
 > 💡 Also available as a [**GitHub Action**](#use-as-a-github-action) that posts an idempotent PR comment on every commit. See it on the [Marketplace →](https://github.com/marketplace/actions/aisbom-security-scanner)
 
@@ -323,6 +323,8 @@ AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It lo
 - `socket` (network reverse shells)
 
 SafeTensors and GGUF use binary formats with structured headers — AIsbom parses these headers directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
+
+Keras models (`.keras`, `.h5`, `.hdf5`) carry a different execution vector: a `Lambda` layer stores an arbitrary Python callable in the model config as a base64-encoded marshalled code object, and `load_model` runs it. AIsbom reads the config out of both containers — the `.keras` zip and the legacy HDF5 attribute — flags `Lambda` layers and embedded code objects as CRITICAL, and never unmarshals or executes the payload. A truncated or corrupted container is still scanned rather than skipped, so damaging a file is not a way to hide a payload.
 
 For weekly scan findings on the top 50 most-downloaded Hugging Face text-generation models, see [aisbom.io/advisories](https://aisbom.io/advisories?ref=cli-readme).
 
