@@ -20,14 +20,14 @@ reports the wrong reason.
 | --- | --- | --- | --- | --- |
 | `nullifai-7z-container`<br>Model packed with 7z instead of ZIP | container-format | ⚠️ partial | ⚠️ partial | [ReversingLabs — nullifAI (malicious models on Hugging Face)](https://www.reversinglabs.com/blog/rl-identifies-malware-ml-model-hosted-on-hugging-face) |
 | `nullifai-broken-stream`<br>Deliberately broken pickle stream, payload first | broken-stream | ✅ detected | ✅ detected | [ReversingLabs — nullifAI (malicious models on Hugging Face)](https://www.reversinglabs.com/blog/rl-identifies-malware-ml-model-hosted-on-hugging-face) |
-| `cve-2025-1716-pip-main`<br>Code execution via pip.main() | unlisted-global | ⚠️ partial | ✅ detected | [Sonatype — CVE-2025-1716](https://www.sonatype.com/security-advisories/cve-2025-1716) |
+| `cve-2025-1716-pip-main`<br>Code execution via pip.main() | unlisted-global | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1716](https://www.sonatype.com/security-advisories/cve-2025-1716) |
 | `cve-2025-1889-nonstandard-extension`<br>Payload in a file with a non-standard extension | file-extension | ❌ missed | ❌ missed | [Sonatype — CVE-2025-1889](https://www.sonatype.com/security-advisories/cve-2025-1889) |
 | `cve-2025-1944-zip-filename-tamper`<br>ZIP local-header filename differs from the central directory | zip-tampering | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1944](https://www.sonatype.com/security-advisories/cve-2025-1944) |
 | `cve-2025-1945-zip-flag-bits`<br>ZIP general-purpose flag bits modified | zip-tampering | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1945](https://www.sonatype.com/security-advisories/cve-2025-1945) |
 | `cve-2025-10155-extension-confusion`<br>Bare pickle wearing a PyTorch extension | file-extension | ✅ detected | ✅ detected | [JFrog — CVE-2025-10155](https://jfrog.com/blog/unveiling-3-zero-day-vulnerabilities-in-picklescan/) |
 | `cve-2025-10156-zip-crc`<br>Corrupted CRC-32 in the ZIP archive | zip-tampering | ✅ detected | ✅ detected | [JFrog — CVE-2025-10156](https://jfrog.com/blog/unveiling-3-zero-day-vulnerabilities-in-picklescan/) |
-| `cve-2025-10157-asyncio-subclass`<br>Dangerous import reached through an asyncio submodule | gadget-import | ⚠️ partial | ✅ detected | [JFrog — CVE-2025-10157](https://jfrog.com/blog/unveiling-3-zero-day-vulnerabilities-in-picklescan/) |
-| `checkmarx-bdb-gadget`<br>Indirect execution via bdb.Bdb.run | gadget-import | ⚠️ partial | ✅ detected | [Checkmarx — Free Hugs: What to be Wary of in Hugging Face (Part 4)](https://checkmarx.com/blog/free-hugs-what-to-be-wary-of-in-hugging-face-part-4/) |
+| `cve-2025-10157-asyncio-subclass`<br>Dangerous import reached through an asyncio submodule | gadget-import | ✅ detected | ✅ detected | [JFrog — CVE-2025-10157](https://jfrog.com/blog/unveiling-3-zero-day-vulnerabilities-in-picklescan/) |
+| `checkmarx-bdb-gadget`<br>Indirect execution via bdb.Bdb.run | gadget-import | ✅ detected | ✅ detected | [Checkmarx — Free Hugs: What to be Wary of in Hugging Face (Part 4)](https://checkmarx.com/blog/free-hugs-what-to-be-wary-of-in-hugging-face-part-4/) |
 | `shadowpickle-allowlist-overwrite`<br>Allowlisted builtin reached via STACK_GLOBAL | allowlist-abuse | ⚠️ partial | ⚠️ partial | [ShadowPickle (arXiv 2607.17503)](https://arxiv.org/html/2607.17503) |
 
 ## Controls

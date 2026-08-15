@@ -324,10 +324,23 @@ AI models aren't just text files — they're executable programs and IP assets.
 
 AIsbom uses a static analysis engine to disassemble Python Pickle opcodes. It looks for specific `GLOBAL` and `STACK_GLOBAL` instructions referencing dangerous modules:
 
-- `os` / `posix` (system calls)
+- `os` / `posix` / `nt` (system calls)
 - `subprocess` (shell execution)
-- `builtins.eval` / `exec` (dynamic code execution)
+- `builtins.eval` / `exec` / `__import__` (dynamic code execution)
 - `socket` (network reverse shells)
+
+It also covers **indirect-execution gadgets** — the "benign-looking module, dangerous method" pairs that reach the same sinks without naming them:
+
+- `bdb` / `pdb` — a debugger's `run`, `runeval` and `runcall` compile and execute a supplied string
+- `asyncio` — subprocess transports and event-loop run methods
+- `pip.main`, `runpy`, `importlib`, `imp` — installing or importing as a way to execute
+- `pty`, `platform.popen`, `multiprocessing`, `ctypes` — process spawning and native library loading
+- `code` / `codeop` / `timeit` / `cProfile` — helpers that take code as a string
+- `operator.methodcaller` — reaches a sink without ever naming it as a global
+
+Two rules generalize the list, so the *next* gadget doesn't need to be enumerated first: a dangerous package governs its submodules (an unlisted `asyncio.*` module is still judged as `asyncio`), and an execution-shaped attribute name (`.run`, `.system`, `.popen`, `.import_module`) is flagged whatever module it arrives through — including on otherwise-trusted packages.
+
+Attribute names are matched **exactly, never as substrings**, so ordinary globals like `torch.storage._load_from_bytes` are untouched. Every entry above was checked against the globals a genuine checkpoint carries (`torch._utils._rebuild_tensor_v2`, `collections.OrderedDict`, `numpy.core.multiarray._reconstruct`, …) — a scanner that flags real models is one people switch off, which is a worse outcome than a missed case.
 
 SafeTensors and GGUF use binary formats with structured headers — AIsbom parses these headers directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
 

@@ -5,7 +5,7 @@
       "strict": "clean"
     },
     "checkmarx-bdb-gadget": {
-      "blocklist": "partial",
+      "blocklist": "detected",
       "strict": "detected"
     },
     "control-os-system-zip": {
@@ -21,11 +21,11 @@
       "strict": "detected"
     },
     "cve-2025-10157-asyncio-subclass": {
-      "blocklist": "partial",
+      "blocklist": "detected",
       "strict": "detected"
     },
     "cve-2025-1716-pip-main": {
-      "blocklist": "partial",
+      "blocklist": "detected",
       "strict": "detected"
     },
     "cve-2025-1889-nonstandard-extension": {
