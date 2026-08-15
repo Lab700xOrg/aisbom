@@ -13,12 +13,12 @@
       "strict": "detected"
     },
     "cve-2025-10155-extension-confusion": {
-      "blocklist": "missed",
-      "strict": "missed"
+      "blocklist": "detected",
+      "strict": "detected"
     },
     "cve-2025-10156-zip-crc": {
-      "blocklist": "missed",
-      "strict": "missed"
+      "blocklist": "detected",
+      "strict": "detected"
     },
     "cve-2025-10157-asyncio-subclass": {
       "blocklist": "partial",
@@ -33,8 +33,8 @@
       "strict": "missed"
     },
     "cve-2025-1944-zip-filename-tamper": {
-      "blocklist": "missed",
-      "strict": "missed"
+      "blocklist": "detected",
+      "strict": "detected"
     },
     "cve-2025-1945-zip-flag-bits": {
       "blocklist": "detected",

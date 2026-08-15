@@ -12,6 +12,7 @@ from aisbom import protobuf_reader as pb
 from aisbom.safety import (
     _threat_kind as _jinja_threat_kind,
     jinja_threats_are_critical,
+    looks_like_pickle_stream,
     onnx_domain_is_custom,
     scan_jinja_template,
     scan_keras_config,
@@ -153,6 +154,25 @@ GGUF_REMOTE_MAX_WINDOW = 16 * 1024 * 1024
 # Array contents are never retained — only the element type and count — but a
 # declared count still has to be sanity-bounded before it is trusted.
 GGUF_MAX_ARRAY_ELEMENTS = 50_000_000
+# How much of a bare (non-ZIP) candidate is disassembled. The same bound the
+# ZIP path already uses for its pickle member.
+PICKLE_MAX_SCAN_BYTES = 10 * 1024 * 1024
+
+# Container formats that are not PyTorch's ZIP. A model wearing a .pt extension
+# packed with one of these is the nullifAI shape: the alternative container kept
+# scanners from opening the file at all while the model still loaded. Repacking
+# a model in 7z is not something a normal toolchain does, so the container
+# itself is the signal — the payload inside stays compressed and unread.
+NONSTANDARD_CONTAINER_MAGICS = (
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07", "rar"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"BZh", "bzip2"),
+    (b"\x1f\x8b", "gzip"),
+    (b"\x04\x22\x4d\x18", "lz4"),
+    (b"\x89LZO", "lzo"),
+)
 
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
@@ -277,6 +297,96 @@ class DeepScanner:
                 return f"LEGAL RISK ({license_name})"
         return "PASS"
 
+    @staticmethod
+    def _identify_container(head: bytes) -> str | None:
+        """Name the archive format ``head`` begins with, if it is not ZIP."""
+        for magic, label in NONSTANDARD_CONTAINER_MAGICS:
+            if head.startswith(magic):
+                return label
+        return None
+
+    @staticmethod
+    def _looks_like_text(content: bytes) -> bool:
+        """True if the first kilobyte decodes as UTF-8 and is mostly printable."""
+        try:
+            text = content[:1024].decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            return False
+        if not text:
+            return False
+        printable = sum(ch.isprintable() for ch in text)
+        return printable / len(text) > 0.9
+
+    def _apply_lint(self, meta: Dict[str, Any], content: bytes) -> None:
+        """Run the migration linter over a pickle stream, if linting is on."""
+        if not self.lint:
+            return
+        try:
+            from aisbom.linter import MigrationLinter
+            lint_errors = MigrationLinter().lint_pickle(content)
+            if lint_errors:
+                meta["details"]["lint_report"] = [
+                    {"msg": e.message, "hint": e.hint, "severity": e.severity}
+                    for e in lint_errors
+                ]
+        except Exception as e:
+            meta["details"]["lint_error"] = str(e)
+
+    @staticmethod
+    def _raw_member_bytes(stream, info) -> bytes | None:
+        """Read a zip member from its local header, skipping every check.
+
+        Bypasses the CRC validation and the directory/header name agreement
+        that ``ZipFile.open`` enforces. Both are evasions precisely because the
+        loaders that matter do not enforce them — PyTorch reads these archives
+        with its own reader — so refusing to look at the bytes hides a payload
+        that would still run. STORED members are returned as-is; DEFLATED ones
+        are inflated as a raw stream, which needs no CRC and no trailer.
+        """
+        try:
+            stream.seek(info.header_offset)
+            header = stream.read(30)
+            if len(header) < 30 or header[:4] != b"PK\x03\x04":
+                return None
+            name_len = struct.unpack("<H", header[26:28])[0]
+            extra_len = struct.unpack("<H", header[28:30])[0]
+            stream.seek(info.header_offset + 30 + name_len + extra_len)
+
+            if info.compress_type == zipfile.ZIP_STORED:
+                size = info.compress_size or info.file_size
+                return stream.read(min(size or PICKLE_MAX_SCAN_BYTES, PICKLE_MAX_SCAN_BYTES))
+
+            if info.compress_type == zipfile.ZIP_DEFLATED:
+                # A tampered header can leave compress_size at zero, so read a
+                # bounded window and let the decompressor stop at the stream end.
+                raw = stream.read(min(info.compress_size or PICKLE_MAX_SCAN_BYTES,
+                                      PICKLE_MAX_SCAN_BYTES))
+                # -15 selects a raw deflate stream: no zlib wrapper, no checksum.
+                return zlib.decompressobj(-15).decompress(raw, PICKLE_MAX_SCAN_BYTES)
+        except Exception:
+            return None
+        return None
+
+    def _read_zip_member(self, z, member: str, stream):
+        """Return ``(bytes, note)`` for a zip member, working around corruption.
+
+        A member that will not open cleanly is not the end of the inquiry: the
+        bytes are read straight from the local header instead, so tampering
+        with a CRC or with a filename does not buy silence.
+        """
+        try:
+            with z.open(member) as f:
+                return f.read(PICKLE_MAX_SCAN_BYTES), None
+        except Exception as exc:
+            try:
+                info = z.getinfo(member)
+            except Exception:
+                return None, str(exc)
+            data = self._raw_member_bytes(stream, info)
+            if data:
+                return data, f"container integrity check failed, read raw member: {exc}"
+            return None, str(exc)
+
     def _inspect_pytorch(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
         """Peeks inside PyTorch."""
         local_path = None
@@ -309,82 +419,68 @@ class DeepScanner:
                 with zipfile.ZipFile(stream, 'r') as z:
                     files = z.namelist()
                     pickle_files = [f for f in files if f.endswith('.pkl')]
-                    
+
                     threats = []
+                    content = None
                     if pickle_files:
                         main_pkl = pickle_files[0]
-                        with z.open(main_pkl) as f:
-                            content = f.read(10 * 1024 * 1024) 
+                        content, read_note = self._read_zip_member(z, main_pkl, stream)
+                        if read_note:
+                            meta["details"]["member_read"] = read_note
+                        if content is not None:
                             threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
-                            
-                            # LINT CHECK (Migration Linter)
-                            if self.lint:
-                                from aisbom.linter import MigrationLinter
-                                linter = MigrationLinter()
-                                lint_errors = linter.lint_pickle(content)
-                                if lint_errors:
-                                    meta["details"]["lint_report"] = [
-                                        {"msg": e.message, "hint": e.hint, "severity": e.severity} 
-                                        for e in lint_errors
-                                    ]
+                            self._apply_lint(meta, content)
 
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+                    elif content is None and pickle_files:
+                        # The member is there but could not be read at all. A
+                        # loader that does not verify integrity the way we do
+                        # would still run it, so this is not a clean bill.
+                        meta["risk_level"] = "MEDIUM (Unreadable Pickle Member)"
                     elif pickle_files:
                         meta["risk_level"] = "MEDIUM (Pickle Present)"
                     else:
                         meta["risk_level"] = "LOW"
-                        
+
                     meta["details"].update({"internal_files": len(files), "threats": threats})
             else:
-                 # Handle text-based .pth config files to avoid false positives
-                 try:
-                     stream.seek(0)
-                     sample = stream.read(1024)
-                     if isinstance(sample, bytes):
-                         text = sample.decode("utf-8")
-                     else:
-                         text = str(sample)
-                     # Consider it text if mostly printable characters
-                     printable = sum(ch.isprintable() for ch in text)
-                     if len(text) > 0 and printable / len(text) > 0.9:
-                         meta["risk_level"] = "LOW"
-                         meta["type"] = "configuration"
-                         meta["framework"] = "Python Path Config"
-                     else:
-                         # Likely raw pickle (Legacy PyTorch 1.5-)
-                         if self.lint:
-                             stream.seek(0)
-                             content = stream.read()
-                             print(f"DEBUG: Linting {len(content)} bytes from {name}")
-                             try:
-                                 from aisbom.linter import MigrationLinter
-                                 lint_errors = MigrationLinter().lint_pickle(content)
-                                 print(f"DEBUG: Found {len(lint_errors)} errors")
-                                 if lint_errors:
-                                     meta["details"]["lint_report"] = [
-                                        {"msg": e.message, "hint": e.hint, "severity": e.severity} 
-                                        for e in lint_errors
-                                     ]
-                             except Exception as e:
-                                 print(f"DEBUG: Linter failed: {e}")
-                                 meta["details"]["lint_error"] = str(e)
-                         meta["risk_level"] = "CRITICAL (Legacy Binary)"
-                 except Exception:
-                     if self.lint:
-                         stream.seek(0)
-                         content = stream.read()
-                         try:
-                             from aisbom.linter import MigrationLinter
-                             lint_errors = MigrationLinter().lint_pickle(content)
-                             if lint_errors:
-                                 meta["details"]["lint_report"] = [
-                                    {"msg": e.message, "hint": e.hint, "severity": e.severity} 
-                                    for e in lint_errors
-                                 ]
-                         except Exception as e:
-                             meta["details"]["lint_error"] = str(e)
-                     meta["risk_level"] = "CRITICAL (Legacy Binary)"
+                stream.seek(0)
+                content = stream.read(PICKLE_MAX_SCAN_BYTES)
+                if not isinstance(content, bytes):
+                    content = bytes(content)
+
+                container = self._identify_container(content)
+                if container:
+                    # Deliberately not unpacked: doing so would put a 7z
+                    # implementation and its native dependencies into every
+                    # install and every standalone binary. The container choice
+                    # is itself the finding, and it is named rather than
+                    # reported as a generic unreadable blob.
+                    meta["details"]["container_format"] = container
+                    meta["details"]["threats"] = []
+                    meta["risk_level"] = (
+                        f"CRITICAL (Non-Standard Container: {container})"
+                    )
+                else:
+                    # Disassemble *before* deciding what the file is. Judging
+                    # by shape first is what let a printable protocol-0 pickle
+                    # pass as a text config file and be reported safe.
+                    threats = scan_pickle_stream(content, strict_mode=self.strict_mode)
+                    meta["details"]["threats"] = threats
+                    self._apply_lint(meta, content)
+
+                    if threats:
+                        meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+                    elif looks_like_pickle_stream(content):
+                        meta["risk_level"] = "MEDIUM (Pickle Present)"
+                    elif self._looks_like_text(content):
+                        meta["risk_level"] = "LOW"
+                        meta["type"] = "configuration"
+                        meta["framework"] = "Python Path Config"
+                    else:
+                        # Binary, not a parsable pickle, not a known container.
+                        meta["risk_level"] = "CRITICAL (Legacy Binary)"
         except Exception as e:
             meta["error"] = str(e)
         finally:

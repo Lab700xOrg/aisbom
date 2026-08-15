@@ -82,19 +82,37 @@ def _is_safe_import(module: str, name: str) -> bool:
 
     return False
 
-def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
+# A legacy `torch.save` file is several pickles laid end to end, so a scan that
+# stops at the first STOP never reaches the object. Bounded so a hostile file
+# cannot turn "keep going" into an unbounded loop.
+MAX_CONCATENATED_STREAMS = 64
+
+
+def _record_global(threats: List[str], module, name, strict_mode: bool) -> None:
+    """Judge one resolved global and append a threat string if it is unsafe."""
+    if not module or not name:
+        return
+    if strict_mode:
+        if not _is_safe_import(module, name):
+            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
+    elif module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
+        threats.append(f"{module}.{name}")
+
+
+def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: List[str]):
+    """Disassemble one pickle from ``start``; return the offset past its STOP.
+
+    Returns ``None`` when the stream ends without a STOP (truncated or not a
+    pickle at all), which is the signal to stop looking for another one. Any
+    threats found before that point are still recorded — a corrupt tail must not
+    discard what the front of the stream already revealed.
     """
-    Disassembles a pickle stream and checks for dangerous imports.
-    Returns a list of detected threats (e.g., ["os.system"]).
-    """
-    threats = []
-    memo = []  # Used to track recent string literals for STACK_GLOBAL
+    memo = []  # recent string literals, for STACK_GLOBAL
+    stream = io.BytesIO(data)
+    stream.seek(start)
 
     try:
-        stream = io.BytesIO(data)
-        
         for opcode, arg, pos in pickletools.genops(stream):
-            # Track the last few string literals we've seen on the stack
             if opcode.name in ("SHORT_BINUNICODE", "UNICODE", "BINUNICODE"):
                 memo.append(arg)
                 if len(memo) > 2:
@@ -103,37 +121,48 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
             if opcode.name == "GLOBAL":
                 # Arg is "module\nname"
                 if isinstance(arg, str) and "\n" in arg:
-                    module, name = arg.split("\n")
+                    module, name = arg.split("\n", 1)
                 elif isinstance(arg, str) and " " in arg:
-                    # Some pickle protocols encode as "module name" (space-separated)
+                    # Some protocols encode as "module name" (space-separated)
                     module, name = arg.split(" ", 1)
                 else:
                     module, name = None, None
-
-                if module and name:
-                    if strict_mode:
-                        if not _is_safe_import(module, name):
-                            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
-                    else:
-                        if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
-                            threats.append(f"{module}.{name}")
+                _record_global(threats, module, name, strict_mode)
 
             elif opcode.name == "STACK_GLOBAL":
-                # Takes two arguments from the stack: module and name
                 if len(memo) == 2:
-                    module, name = memo
-                    if strict_mode:
-                        if not _is_safe_import(module, name):
-                            threats.append(f"UNSAFE_IMPORT: {module}.{name}")
-                    else:
-                        if module in DANGEROUS_GLOBALS and name in DANGEROUS_GLOBALS[module]:
-                            threats.append(f"{module}.{name}")
+                    _record_global(threats, memo[0], memo[1], strict_mode)
                 # Clear memo after use to avoid false positives
                 memo.clear()
 
-    except Exception as e:
-        # Avoid crashing on malformed pickles
-        pass
+            elif opcode.name == "STOP":
+                # `pos` is an absolute offset into the buffer.
+                return pos + 1
+    except Exception:
+        # Malformed downstream; keep whatever was found before the break.
+        return None
+    return None
+
+
+def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
+    """
+    Disassembles a pickle stream and checks for dangerous imports.
+    Returns a list of detected threats (e.g., ["os.system"]).
+
+    A file may hold several pickles end to end — this is exactly what
+    ``torch.save`` writes in its legacy (non-ZIP) format, where a magic number,
+    a protocol version and a sys-info dict all precede the object itself. Every
+    stream is scanned, because stopping at the first STOP would mean never
+    looking at the payload in such a file.
+    """
+    threats: List[str] = []
+    offset = 0
+
+    for _ in range(MAX_CONCATENATED_STREAMS):
+        next_offset = _scan_single_stream(data, offset, strict_mode, threats)
+        if next_offset is None or next_offset <= offset or next_offset >= len(data):
+            break
+        offset = next_offset
 
     return threats
 
@@ -617,3 +646,23 @@ def _threat_kind(threat: str) -> str:
 def jinja_analysis_is_incomplete(threats: List[str]) -> bool:
     """True if part of the template went unread, so 'no findings' is not 'clean'."""
     return any(_threat_kind(t).startswith("JINJA_TEMPLATE_TRUNCATED:") for t in threats)
+def looks_like_pickle_stream(data: bytes) -> bool:
+    """True if ``data`` disassembles cleanly through to a pickle STOP opcode.
+
+    Used to tell a legacy bare pickle apart from an ordinary text file, so the
+    two can be reported honestly rather than lumped together. Deliberately
+    strict — it requires reaching STOP — because a text file can begin with a
+    byte that happens to be a valid opcode, and calling a config file a pickle
+    is its own kind of wrong answer.
+
+    Disassembly only. The stream is never unpickled.
+    """
+    if not data:
+        return False
+    try:
+        for opcode, _arg, _pos in pickletools.genops(io.BytesIO(data)):
+            if opcode.name == "STOP":
+                return True
+    except Exception:
+        return False
+    return False

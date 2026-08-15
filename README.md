@@ -287,6 +287,13 @@ This rebuilds a corpus of publicly-documented pickle-evasion techniques — the 
 
 The results are published verbatim in [docs/bypass-scorecard.md](docs/bypass-scorecard.md), including the cases we currently **miss**. Static analysis is not magic, and a scanner that only advertises its wins isn't worth trusting; the misses are tracked as work in progress and the corpus is the regression gate that keeps them from silently coming back.
 
+Two principles come out of that corpus and shape how the pickle path behaves:
+
+- **A file that can't be parsed cleanly is still scanned.** Truncating a stream, corrupting a ZIP's CRC-32, or making a member's local-header filename disagree with the central directory are all evasions *because* the loaders that matter don't check, while scanners bail out. AIsbom disassembles from the front of the stream regardless, and reads a member straight from its local header when the archive refuses to open it properly.
+- **What a file contains decides its verdict, not what it looks like.** A protocol-0 pickle is printable ASCII, so classifying by shape let a bare pickle calling `os.system` pass as a text config file. Candidates are disassembled first and classified afterwards.
+
+One documented limit: a model repacked in a **non-standard container** (7z, rar, xz, zstd…) is reported CRITICAL and the container format is named, but the payload inside is *not* unpacked and therefore not itemized. Unpacking 7z would put a compression stack and its native dependencies into every install and every standalone binary; the container choice is treated as the finding instead. The scorecard shows this case as ⚠️ partial rather than claiming a detection it hasn't made.
+
 The corpus is synthesized, never copied from live malware — every artifact carries a harmless `echo` where real malware would carry a payload, and the harness proves it never executes what it scans. See [tests/corpus/README.md](tests/corpus/README.md).
 
 ---
