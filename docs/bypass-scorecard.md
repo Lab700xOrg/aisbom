@@ -63,6 +63,8 @@ A normal state_dict with no dangerous sinks. Guards the other direction: a scann
 
 PyTorch's default container is ZIP; packing the same payload with 7z meant picklescan never opened it, while the model still loaded.
 
+**Current limitation:** AIsbom reports `CRITICAL (Non-Standard Container: 7z)` — the right severity, but earned from the container rather than the payload. The archive is named, never unpacked, so the `os.system` call inside is never disassembled and the reported reason is not the real one. Unpacking 7z would mean a native dependency in every install to cover one evasion class, which is not a trade worth making; a user acting on this verdict is nonetheless correctly warned off the file.
+
 ### `nullifai-broken-stream` — Deliberately broken pickle stream, payload first
 
 **Evasion class:** broken-stream  
@@ -86,6 +88,8 @@ Reaches execution through a global nobody thought to blocklist: pip.main() insta
 **A correct scanner should:** detected
 
 The pickle is named config.p. Extension-driven discovery never opens it, so nothing is scanned. Fixed in picklescan 0.0.22.
+
+**Current limitation:** The only outright miss in the corpus: the scan reports `No AI models found` and emits zero artifacts, so a user gets a clean run on a file carrying a payload. Nothing subtle blocks this — discovery is extension-driven and `.p` is not on the list. picklescan closed it in 0.0.22 and AIsbom has not, which is precisely why the case stays on the scorecard at `expected=detected`.
 
 ### `cve-2025-1944-zip-filename-tamper` — ZIP local-header filename differs from the central directory
 
@@ -142,3 +146,5 @@ Uses a submodule rather than the exact blocklisted module name, so an exact-matc
 **A correct scanner should:** detected
 
 Overwrites collections.OrderedDict — a name on essentially every scanner's allowlist — and resolves it via STACK_GLOBAL rather than an inline GLOBAL argument, so string-matching on the opcode argument sees nothing.
+
+**Current limitation:** AIsbom does resolve STACK_GLOBAL and reads the pair off the stack, so it sees `collections.OrderedDict` — and that name is legitimately allowlisted, because real state_dicts are OrderedDicts. Both modes therefore return only `MEDIUM (Pickle Present)`, the baseline every pickle gets, rather than a signal specific to this file. This is the ceiling on static allowlist analysis: the call is indistinguishable from a legitimate call to an allowlisted global, and flagging the shape would flag ordinary checkpoints. Closing it needs evidence beyond the resolved name — argument shape, or provenance — not a new entry on a blocklist.

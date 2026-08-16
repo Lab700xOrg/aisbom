@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The bypass scorecard now publishes why each uncaught case is uncaught.** Cases that are not fully caught carry a `limitation` note, rendered into `docs/bypass-scorecard.md` alongside the verdict: what AIsbom actually reports, why that is the wrong reason, and what closing the gap would take. No case's `expected` verdict changes — every evasion technique in the corpus remains one a correct scanner should catch, so the gate keeps counting all three against us. The note explains a gap; it never excuses one.
+
 ## 1.3.0 — 2026-08-15
 
 ### New formats scanned
