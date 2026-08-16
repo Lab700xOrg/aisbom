@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Scanning a single model file works.** `aisbom scan model.pt` — the form this README documents for `--strict` and `--lint` — discovered nothing and exited `0`, because local discovery only ever enumerated the *contents of a directory*. A malicious file named directly on the command line reported "No AI models found" and passed clean, while the same file scanned via its parent directory was correctly CRITICAL. Single files are now first-class targets for every supported format, and a file gets the same verdict whichever way it is reached.
+- **An unusable scan target now fails instead of passing.** A path that does not exist (or a broken symlink, or a named file no scanner can read) previously produced an empty SBOM and exit `0` — indistinguishable from a genuinely clean repo, so a typo'd path in CI turned the gate green permanently. These now report what went wrong and exit `1`. `--no-fail-on-risk` does not suppress it: that flag governs risk findings, not a broken target. An empty directory is still a clean scan and still exits `0`.
+
 - **The bypass scorecard now publishes why each uncaught case is uncaught.** Cases that are not fully caught carry a `limitation` note, rendered into `docs/bypass-scorecard.md` alongside the verdict: what AIsbom actually reports, why that is the wrong reason, and what closing the gap would take. No case's `expected` verdict changes — every evasion technique in the corpus remains one a correct scanner should catch, so the gate keeps counting all three against us. The note explains a gap; it never excuses one.
 
 ## 1.3.0 — 2026-08-15

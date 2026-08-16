@@ -235,22 +235,38 @@ class DeepScanner:
                     continue
         else:
             root = Path(self.root_path)
-            for full_path in root.rglob("*"):
-                if full_path.is_file():
-                    ext = full_path.suffix.lower()
-
-                    if ext in PYTORCH_EXTENSIONS:
-                        self.artifacts.append(self._inspect_pytorch(full_path))
-                    elif ext == SAFETENSORS_EXTENSION:
-                        self.artifacts.append(self._inspect_safetensors(full_path))
-                    elif ext == GGUF_EXTENSION:
-                        self.artifacts.append(self._inspect_gguf(full_path))
-                    elif ext in KERAS_EXTENSIONS:
-                        self.artifacts.append(self._inspect_keras(full_path))
-                    elif ext == ONNX_EXTENSION:
-                        self.artifacts.append(self._inspect_onnx(full_path))
-                    elif full_path.name == REQUIREMENTS_FILENAME:
-                        self._parse_requirements(full_path)
+            # Path.rglob only ever yields the *contents* of a directory, so
+            # before #125 a file target (or a path that did not exist) walked
+            # nothing, recorded no error, and reported a clean scan — a
+            # malicious .pt named directly on the command line exited 0.
+            # Each local target shape is now handled explicitly.
+            if root.is_dir():
+                for full_path in root.rglob("*"):
+                    if full_path.is_file():
+                        # A tree legitimately contains non-model files; an
+                        # unclaimed file here is normal and stays silent.
+                        self._dispatch_local_file(full_path)
+            elif root.is_file():
+                # A single file is a first-class target: README documents
+                # `aisbom scan model.pkl --strict` and `aisbom scan model.pt
+                # --lint`. Unlike the walk above, the user named this exact
+                # file, so an inspector declining it is a failed instruction
+                # rather than an empty result.
+                if not self._dispatch_local_file(root):
+                    self._record_target_error(
+                        str(root),
+                        f"Unsupported file type '{root.suffix or root.name}' — no scanner claimed this file",
+                    )
+            else:
+                # Missing, a broken symlink, or not a regular file (fifo,
+                # socket, device). is_dir()/is_file() both follow symlinks,
+                # so a dangling link lands here and reads as missing.
+                self._record_target_error(
+                    str(root),
+                    "No such file or directory"
+                    if not root.exists()
+                    else "Not a regular file or directory",
+                )
 
         return {"artifacts": self.artifacts, "dependencies": self.dependencies, "errors": self.errors}
 
@@ -260,6 +276,46 @@ class DeepScanner:
         if target.startswith("http://") or target.startswith("https://"):
             return [target]
         return []
+
+    def _dispatch_local_file(self, full_path: Path) -> bool:
+        """Inspect one local file by extension.
+
+        Shared by the directory walk and the single-file target path so the
+        two cannot drift apart (#125). Returns True if an inspector claimed
+        the file; callers decide whether declining it is noteworthy.
+        """
+        ext = full_path.suffix.lower()
+
+        if ext in PYTORCH_EXTENSIONS:
+            self.artifacts.append(self._inspect_pytorch(full_path))
+        elif ext == SAFETENSORS_EXTENSION:
+            self.artifacts.append(self._inspect_safetensors(full_path))
+        elif ext == GGUF_EXTENSION:
+            self.artifacts.append(self._inspect_gguf(full_path))
+        elif ext in KERAS_EXTENSIONS:
+            self.artifacts.append(self._inspect_keras(full_path))
+        elif ext == ONNX_EXTENSION:
+            self.artifacts.append(self._inspect_onnx(full_path))
+        elif full_path.name == REQUIREMENTS_FILENAME:
+            self._parse_requirements(full_path)
+        else:
+            return False
+        return True
+
+    def _record_target_error(self, target: str, message: str) -> None:
+        """Record an unusable scan target as a structured, non-fatal error.
+
+        Lands in results['errors'] so the CLI's `errors → exit 1` path fires.
+        Tagged `target_error` to keep it out of both the fetch-failure
+        rendering (which expects a live exception) and the "Could not parse"
+        list — the target was never readable enough to parse. An empty
+        directory is *not* this: that is a legitimate clean scan.
+        """
+        self.errors.append({
+            "file": target,
+            "error": message,
+            "target_error": True,
+        })
 
     def _record_fetch_error(self, target: str, exc: Exception) -> None:
         """Record a remote fetch failure as a structured, non-fatal error.
