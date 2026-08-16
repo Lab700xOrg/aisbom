@@ -109,6 +109,18 @@ xattr -d com.apple.quarantine aisbom-macos-*
 
 ## Common workflows
 
+### Scan targets and exit codes
+
+`scan` accepts a directory, a single model file, a `hf://` repo, or an HTTPS URL. A directory is walked recursively; a single file is scanned on its own.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Scan completed, no CRITICAL risk |
+| `1` | The scan could not be completed — target missing or unreadable, a file failed to parse, or a remote fetch failed |
+| `2` | A **CRITICAL** risk was found (suppress with `--no-fail-on-risk`) |
+
+`--no-fail-on-risk` governs risk findings only. An unusable target still exits `1`, so a typo'd path in CI fails loudly instead of passing as a clean scan.
+
 ### Scan a Hugging Face model
 
 ```bash

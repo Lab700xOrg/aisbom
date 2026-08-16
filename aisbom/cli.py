@@ -607,7 +607,11 @@ def scan(
             )
         console.print(table)
     else:
-        console.print("[yellow]No AI models found.[/yellow]")
+        # "No AI models found" is a claim about the target's contents, so it
+        # must not be printed when the target was never scanned at all (#125).
+        # The target error itself is rendered below.
+        if not any(e.get('target_error') for e in results['errors']):
+            console.print("[yellow]No AI models found.[/yellow]")
 
     # LINT OUTPUT (Migration Report)
     lint_failures = [a for a in results['artifacts'] if a.get('details', {}).get('lint_report')]
@@ -633,9 +637,20 @@ def scan(
     if results['dependencies']:
         console.print(f"\n📦 Found [bold]{len(results['dependencies'])}[/bold] Python libraries.")
 
-    # Parse errors only — fetch failures already printed their status-aware
-    # message to stderr above and don't fit the "Could not parse" framing.
-    parse_errors = [e for e in results['errors'] if not e.get('fetch_failure')]
+    # Unusable targets (#125): the path was missing or nothing could scan it,
+    # so nothing was examined. Printed to stderr like fetch failures — it is a
+    # failed instruction, not a finding about the model.
+    for err in [e for e in results['errors'] if e.get('target_error')]:
+        err_console.print(
+            f"[bold red]✖[/bold red] Cannot scan [yellow]{err['file']}[/yellow]: {err['error']}"
+        )
+
+    # Parse errors only — fetch failures and target errors already printed
+    # their own message to stderr and don't fit the "Could not parse" framing.
+    parse_errors = [
+        e for e in results['errors']
+        if not e.get('fetch_failure') and not e.get('target_error')
+    ]
     if parse_errors:
         console.print("\n[bold red]⚠️ Errors Encountered:[/bold red]")
         for err in parse_errors:
