@@ -579,14 +579,23 @@ def strip_generated_stamp(text: str) -> str:
     ).strip()
 
 
+def is_caught(row: dict) -> bool:
+    """
+    Whether a case counts as caught: named as a threat in at least one mode.
+
+    The headline count and the limitation-note gate must agree on this, or the
+    document can claim a case is uncaught while counting it among the wins.
+    """
+    return row["blocklist"] == "detected" or row["strict"] == "detected"
+
+
 def render_markdown(results: dict) -> str:
     """Render the human-readable scorecard published by the /blog article."""
     cases = results["cases"]
     evasions = [c for c in CASES if not is_control(c)]
     controls = [c for c in CASES if is_control(c)]
 
-    detected = sum(1 for c in evasions if cases[c.id]["blocklist"] == "detected"
-                   or cases[c.id]["strict"] == "detected")
+    detected = sum(1 for c in evasions if is_caught(cases[c.id]))
 
     lines = [
         "# Does AIsbom catch it? — pickle-evasion scorecard",
@@ -638,7 +647,15 @@ def render_markdown(results: dict) -> str:
             case.description,
             "",
         ]
-        if case.limitation:
+        # A limitation describes why a case is *not* caught, so it stops being
+        # true the moment detection improves. Gate it on the live verdict rather
+        # than publishing unconditionally: `--write` would otherwise regenerate
+        # the document with a stale claim, and the staleness test cannot catch
+        # that because it compares the committed file against this same
+        # renderer. test_limitation_note_is_dropped_once_a_case_is_caught pins
+        # the gate; test_no_limitation_note_on_a_caught_case fails the build so
+        # the dead text gets removed rather than silently lingering here.
+        if case.limitation and not is_caught(cases[case.id]):
             lines += [f"**Current limitation:** {case.limitation}", ""]
 
     return "\n".join(lines).rstrip() + "\n"

@@ -19,6 +19,7 @@ No pickle is ever executed — every case is disassembled statically.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -296,6 +297,54 @@ def test_bypass_scorecard_surfaces_missing_dev_dependency(tmp_path, monkeypatch)
     result = runner.invoke(app, ["bypass-scorecard", "--output-dir", str(tmp_path)])
     assert result.exit_code == 1
     assert "py7zr is not installed" in result.output
+
+
+def test_no_limitation_note_on_a_caught_case(generated):
+    """
+    A limitation explains why a case is not caught. Once it is caught, the text
+    is false and must be removed from the case rather than left to rot.
+
+    Gating the renderer keeps a stale note out of the published document, but
+    silently — the dead prose would sit in corpus.py indefinitely. This fails
+    the build instead, so improving detection forces the cleanup.
+    """
+    _, results = generated
+    stale = [
+        case.id
+        for case in corpus.CASES
+        if case.limitation and corpus.is_caught(results["cases"][case.id])
+    ]
+    assert not stale, (
+        f"these cases are now caught but still carry a limitation note: {stale}. "
+        "Delete the `limitation=` text — the gap it describes is closed."
+    )
+
+
+def test_limitation_note_is_dropped_once_a_case_is_caught(generated):
+    """
+    The renderer must gate on the live verdict, not just on the field existing.
+
+    Without this, `--write` after a detection improvement republishes claims
+    like "reports No AI models found" about a case that is now detected, and
+    test_committed_scorecard_doc_is_not_stale stays green because it compares
+    the committed file against this same renderer.
+    """
+    _, results = generated
+    uncaught = next(
+        case
+        for case in corpus.CASES
+        if case.limitation and not corpus.is_caught(results["cases"][case.id])
+    )
+    assert case_note_in(corpus.render_markdown(results), uncaught)
+
+    promoted = copy.deepcopy(results)
+    promoted["cases"][uncaught.id] = {"blocklist": "detected", "strict": "detected"}
+    assert not case_note_in(corpus.render_markdown(promoted), uncaught)
+
+
+def case_note_in(markdown: str, case) -> bool:
+    """Whether the rendered scorecard carries this case's limitation note."""
+    return f"**Current limitation:** {case.limitation}" in markdown
 
 
 def test_committed_scorecard_doc_is_not_stale(generated):
