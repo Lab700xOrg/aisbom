@@ -8,6 +8,7 @@ import hashlib
 from typing import List, Dict, Any
 from pathlib import Path
 from pip_requirements_parser import RequirementsFile
+from aisbom import pickle_containers as pc
 from aisbom import protobuf_reader as pb
 from aisbom.safety import (
     PICKLE_SCAN_INCOMPLETE,
@@ -28,6 +29,25 @@ SAFETENSORS_EXTENSION = '.safetensors'
 GGUF_EXTENSION = '.gguf'
 KERAS_EXTENSIONS = {'.keras', '.h5', '.hdf5'}
 ONNX_EXTENSION = '.onnx'
+
+# The serialization formats of everyday scientific Python. Every one of them is
+# a pickle stream under a wrapper, so each carries the same arbitrary-code
+# -execution risk as a `.pt` — and generic SBOM tooling opens none of them.
+#
+# `.pkl`/`.pickle` are here because the bare pickle was never discovered at all:
+# the README documents `aisbom scan model.pkl --strict`, and until now that
+# scanned nothing and exited 0.
+PICKLE_VARIANT_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill', '.npy', '.npz'}
+
+# Local reads get the same budget as the other formats; a remote read pays one
+# HTTP Range request per call and gets the tighter one.
+PICKLE_VARIANT_MAX_SCAN_BYTES = 16 * 1024 * 1024
+PICKLE_VARIANT_MAX_REMOTE_SCAN_BYTES = 2 * 1024 * 1024
+
+# How many members of an `.npz` are opened. An archive is attacker-controlled,
+# so the member count is bounded like every other declared length.
+NPZ_MAX_MEMBERS = 512
+
 REQUIREMENTS_FILENAME = 'requirements.txt'
 
 # --- ONNX protobuf field numbers ---
@@ -230,6 +250,11 @@ class DeepScanner:
                     elif ext == ONNX_EXTENSION:
                         with RemoteStream(url) as stream:
                             self.artifacts.append(self._inspect_onnx(stream, Path(url).name, is_remote=True))
+                    elif ext in PICKLE_VARIANT_EXTENSIONS:
+                        with RemoteStream(url) as stream:
+                            self.artifacts.append(
+                                self._inspect_pickle_variant(stream, Path(url).name, is_remote=True)
+                            )
                 except Exception as e:
                     self._record_fetch_error(url, e)
                     continue
@@ -296,6 +321,8 @@ class DeepScanner:
             self.artifacts.append(self._inspect_keras(full_path))
         elif ext == ONNX_EXTENSION:
             self.artifacts.append(self._inspect_onnx(full_path))
+        elif ext in PICKLE_VARIANT_EXTENSIONS:
+            self.artifacts.append(self._inspect_pickle_variant(full_path))
         elif full_path.name == REQUIREMENTS_FILENAME:
             self._parse_requirements(full_path)
         else:
@@ -557,6 +584,204 @@ class DeepScanner:
                     else:
                         # Binary, not a parsable pickle, not a known container.
                         meta["risk_level"] = "CRITICAL (Legacy Binary)"
+        except Exception as e:
+            meta["error"] = str(e)
+        finally:
+            if local_path and stream:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+        return meta
+
+    def _npy_member_threats(self, blob: bytes, details: Dict[str, Any]):
+        """Scan one `.npy` buffer; return ``(threats, carries_pickle)``.
+
+        The data section is disassembled whatever the declared dtype says. The
+        header is an attacker-supplied field, so using it to decide *whether* to
+        look would make `descr: '<f8'` a one-line way to hide a pickle.
+
+        Whether the file *carries* one is a separate question, answered from the
+        bytes: an array of ordinary numbers is a real, fully-read file with no
+        pickle in it, and reporting it as "pickle present" would be noise on
+        every checkpoint directory that holds one.
+        """
+        section, header = pc.npy_data_section(blob)
+        if header is not None:
+            details["npy_version"] = header["version"]
+            details["dtype"] = str(header["descr"]) if header["descr"] is not None else None
+            details["object_dtype"] = header["object_dtype"]
+            if header["shape"] is not None:
+                details["shape"] = str(header["shape"])
+        if section is None:
+            # Not a `.npy` after all — scan the whole buffer as a pickle rather
+            # than declining, since the extension is not what decides here.
+            section = blob
+        threats = scan_pickle_stream(section, strict_mode=self.strict_mode)
+        carries_pickle = bool(
+            threats
+            or (header or {}).get("object_dtype")
+            or looks_like_pickle_stream(section)
+        )
+        return threats, carries_pickle
+
+    def _inspect_pickle_variant(self, source, name: str | None = None,
+                                is_remote: bool = False) -> Dict[str, Any]:
+        """Scan the pickle-bearing serialization formats that are not `.pt`.
+
+        joblib (plain, compressed, and the legacy `ZF` container), dill, bare
+        `.pkl`, and numpy's `.npy`/`.npz` object arrays all reduce to the same
+        question — what does the pickle stream inside import — so they share one
+        inspector and the disassembler the rest of the scanner uses.
+
+        What the file *is* comes from its bytes, not its extension. A `.npy`
+        holding a bare pickle is reported as a pickle, and a `.joblib` that is
+        really a zip is opened as one, because the attacker picks the extension.
+        """
+        local_path = None
+        if isinstance(source, (str, Path)):
+            local_path = Path(source)
+            name = name or local_path.name
+            is_remote = False
+        name = name or getattr(source, "name", "unknown")
+
+        meta = {
+            "name": name,
+            "type": "machine-learning-model",
+            "framework": "Pickle",
+            "risk_level": "UNKNOWN",
+            "license": "Unknown",  # none of these containers carry license metadata
+            "legal_status": "UNKNOWN",
+            "hash": "remote_unhashed" if is_remote else self._calculate_hash(local_path),
+            "details": {},
+        }
+        details = meta["details"]
+
+        stream = None
+        try:
+            stream = open(local_path, "rb") if local_path else source
+            budget = (PICKLE_VARIANT_MAX_SCAN_BYTES if local_path
+                      else PICKLE_VARIANT_MAX_REMOTE_SCAN_BYTES)
+
+            threats: List[str] = []
+            carries_pickle = False
+            unreadable = None   # a container we could name but not open
+            # Set whenever bytes went unexamined for a reason other than the
+            # disassembler's own stream budget. Every one of these is a place a
+            # payload could sit, so none of them may end in a clean verdict.
+            unexamined = False
+
+            if zipfile.is_zipfile(stream):
+                # `.npz` is a zip of `.npy` members. Compressed or stored, and
+                # damaged either way, it goes through the same reader the
+                # PyTorch path uses, so tampering with a CRC or a member name
+                # does not buy silence here either.
+                meta["framework"] = "NumPy"
+                details["container"] = "npz"
+                stream.seek(0)
+                with zipfile.ZipFile(stream, "r") as z:
+                    all_members = z.namelist()
+                    members = all_members[:NPZ_MAX_MEMBERS]
+                    details["internal_files"] = len(all_members)
+                    if len(all_members) > NPZ_MAX_MEMBERS:
+                        # 512 benign numeric arrays followed by an object array
+                        # would otherwise leave every later member unopened and
+                        # the archive reported LOW.
+                        details["members_capped"] = NPZ_MAX_MEMBERS
+                        unexamined = True
+                    read_notes = []
+                    for member in members:
+                        blob, note = self._read_zip_member(z, member, stream)
+                        if note:
+                            read_notes.append(f"{member}: {note}")
+                        if blob is None:
+                            unreadable = unreadable or "npz member"
+                            continue
+                        member_threats, member_pickle = self._npy_member_threats(blob, details)
+                        threats.extend(member_threats)
+                        carries_pickle = carries_pickle or member_pickle
+                    if read_notes:
+                        details["member_read"] = read_notes
+            else:
+                stream.seek(0)
+                blob = stream.read(budget)
+                if not isinstance(blob, bytes):
+                    blob = bytes(blob)
+                if len(blob) >= budget:
+                    # The read stopped at the budget with bytes still on disk.
+                    # A valid pickle can carry a large BINBYTES value ahead of
+                    # its payload, so the prefix can disassemble clean while the
+                    # part that matters was never read.
+                    details["truncated"] = True
+                    unexamined = True
+                else:
+                    details["truncated"] = False
+
+                if blob.startswith(pc.NPY_MAGIC):
+                    meta["framework"] = "NumPy"
+                    details["container"] = "npy"
+                    threats, carries_pickle = self._npy_member_threats(blob, details)
+                else:
+                    # The decompression budget is the read budget: a remote
+                    # scan pays per byte and must not expand 16MB after
+                    # fetching 2. Passed explicitly rather than left to the
+                    # default, which binds once at import and so ignores both
+                    # the remote case and any override.
+                    wrapper = pc.describe_container(blob, limit=budget)
+                    if wrapper["compression"]:
+                        meta["framework"] = "Joblib"
+                        details["container"] = wrapper["compression"]
+                        details["compression"] = wrapper["compression"]
+                        if wrapper["payload"] is None:
+                            # Named, not opened. lz4 and zstd are the joblib
+                            # codecs with no standard-library decompressor, and
+                            # pulling one in would put it into every install and
+                            # every standalone binary. Reporting the limit is
+                            # the honest answer; claiming a clean scan is not.
+                            unreadable = wrapper["compression"]
+                        else:
+                            carries_pickle = True
+                            threats = scan_pickle_stream(
+                                wrapper["payload"], strict_mode=self.strict_mode
+                            )
+                            details["decompressed_bytes"] = len(wrapper["payload"])
+                            if wrapper["truncated"]:
+                                # The decompressor stopped before the stream's
+                                # end marker: either it hit the output cap or
+                                # the compressed data was itself cut short.
+                                details["decompression_truncated"] = True
+                                unexamined = True
+                    else:
+                        details["container"] = "bare"
+                        threats = scan_pickle_stream(blob, strict_mode=self.strict_mode)
+                        carries_pickle = looks_like_pickle_stream(blob) or bool(threats)
+                        self._apply_lint(meta, blob)
+
+            threats, incomplete = self._split_scan_incomplete(threats)
+            # De-duplicate across `.npz` members while keeping the order, so one
+            # payload repeated in every array is reported once.
+            threats = list(dict.fromkeys(threats))
+            details["threats"] = threats
+            if any(t.startswith("dill.") or t.startswith("UNSAFE_IMPORT: dill.")
+                   for t in threats):
+                # dill puts a marshalled code object in the stream and rebuilds
+                # it on load. Worth naming: "RCE detected" reads very
+                # differently once you know the file is a serialized function.
+                details["dill_code_objects"] = True
+
+            if threats:
+                meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+            elif incomplete or unexamined:
+                details["scan_incomplete"] = True
+                meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
+            elif unreadable:
+                meta["risk_level"] = f"MEDIUM (Unscanned Container: {unreadable})"
+            elif carries_pickle:
+                meta["risk_level"] = "MEDIUM (Pickle Present)"
+            else:
+                # A `.npy` of ordinary numbers reaches here: a real file, fully
+                # read, carrying no pickle at all.
+                meta["risk_level"] = "LOW"
         except Exception as e:
             meta["error"] = str(e)
         finally:

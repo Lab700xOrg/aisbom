@@ -56,7 +56,10 @@ A typical scan against a project with mixed artifacts:
 │                              │             │ __class__, __mro__, __subclasses__)            │                              │
 │ exfil.onnx                   │ ONNX        │ CRITICAL (ONNX External Data Escapes Model     │ UNKNOWN                      │
 │                              │             │ Directory: ../../../etc/passwd)                │                              │
+│ sklearn_pipeline.joblib      │ Joblib      │ CRITICAL (RCE Detected: posix.system)          │ UNKNOWN                      │
+│ features.npy                 │ NumPy       │ CRITICAL (RCE Detected: builtins.eval)         │ UNKNOWN                      │
 │ detector.onnx                │ ONNX        │ LOW                                            │ UNKNOWN                      │
+│ embeddings.npy               │ NumPy       │ LOW                                            │ UNKNOWN                      │
 │ llama-3-quant.gguf           │ GGUF        │ LOW                                            │ LEGAL RISK (cc-by-nc-sa-4.0) │
 │ safe_model.safetensors       │ SafeTensors │ LOW                                            │ PASS                         │
 │ restricted_model.safetensors │ SafeTensors │ LOW                                            │ LEGAL RISK (cc-by-nc-4.0)    │
@@ -69,7 +72,10 @@ A compliant `sbom.json` (CycloneDX v1.6) including SHA256 hashes and license dat
 
 | Format | Extensions | What AIsbom looks for |
 |---|---|---|
-| **PyTorch / Pickle** | `.pt` `.pth` `.bin` | Dangerous globals in the pickle opcodes, including indirect-execution gadgets. Concatenated streams are all scanned — a legacy `torch.save` file hides its object behind three header pickles — and non-standard containers (7z, rar, xz…) are flagged. If a file is so full of streams that the walk hits its work limit, the scan says so rather than reporting clean. |
+| **PyTorch / Pickle** | `.pt` `.pth` `.bin` `.pkl` `.pickle` | Dangerous globals in the pickle opcodes, including indirect-execution gadgets. Concatenated streams are all scanned — a legacy `torch.save` file hides its object behind three header pickles — and non-standard containers (7z, rar, xz…) are flagged. If a file is so full of streams that the walk hits its work limit, the scan says so rather than reporting clean. |
+| **joblib** | `.joblib` | The pickle inside the container, whichever codec joblib chose (zlib, gzip, bz2, lzma/xz, and the legacy `ZF` format), plus uncompressed files. A payload placed *after* an array — where a real model puts its weights — is found. |
+| **dill** | `.dill` | Everything the pickle path finds, plus dill's own code-reconstruction globals: a dill'd function or lambda is a marshalled code object rebuilt on load, and is reported as CRITICAL. |
+| **NumPy** | `.npy` `.npz` | The pickle stream behind an `allow_pickle` object array. Each `.npz` member is opened, including ones whose checksum or header has been tampered with. |
 | **Keras** | `.keras` `.h5` `.hdf5` | `Lambda` layers and embedded marshalled code objects in the model config — an actively exploited RCE vector. |
 | **GGUF** | `.gguf` | License and architecture metadata, plus the embedded Jinja **chat template**, checked for sandbox-escape constructs. |
 | **ONNX** | `.onnx` | Producer/opset/IR metadata, custom operators, and external-data paths that point outside the model directory. |
@@ -376,6 +382,17 @@ Attribute names are matched **exactly, never as substrings**, so ordinary global
 ### Beyond pickle
 
 Pickle is not the only way a model file gets code to run. Each of the other formats has its own vector, and each is read as inert data:
+
+**joblib, dill and NumPy object arrays** (`.joblib`, `.dill`, `.npy`, `.npz`) are pickle underneath — the everyday serialization of scikit-learn and scientific Python, carrying exactly the arbitrary-code-execution risk of a `.pt`, and opened by almost nothing that calls itself an SBOM tool. AIsbom reads them without importing joblib, dill or numpy: the compression is standard-library, the `.npy` header is parsed by hand, and nothing is ever unpickled.
+
+Two things about these formats are worth stating plainly:
+
+- **A raw array block does not end the scan.** joblib writes its pickle up to an array, dumps the raw buffer inline, then resumes pickling — which stops an opcode disassembly dead a few hundred bytes into the file. Since every real model has weights, "after the first array" is the natural place for a payload. The remaining bytes get a second pass that recovers globals directly, so a dangerous import behind an array block is still reported. That pass reads bytes rather than structure, so it recognises *known* sinks only: in strict mode it does not contribute unrecognized-import findings, and it cannot judge a dual-use constructor like `operator.methodcaller("system")`, because the argument that decides is a stack relationship it has no stack for.
+- **A declared dtype never decides whether to look.** The `.npy` header is attacker-supplied, so a pickle sitting behind a header claiming `'<f8'` would otherwise be a one-line evasion. The data section is disassembled whatever the header says. What the header *does* affect is the reported risk: an array of ordinary numbers with no pickle in it is LOW, not "pickle present".
+
+- **No limit ends in a clean verdict.** Four bounds apply here — the file-read budget, the `.npz` member count, the decompressor's output cap, and the disassembler's stream budget — and each one leaves bytes unexamined. Hitting any of them reports `MEDIUM (Pickle Scan Incomplete)` rather than passing the prefix off as the whole file. A limit that reports "clean" is not a safety measure; it is a hiding place with a length attached. A real finding still outranks the marker.
+
+joblib's `lz4` and `zstd` codecs have no standard-library decompressor. Following the same reasoning as 7z containers, those are **named but not opened** — `MEDIUM (Unscanned Container: lz4)` — rather than pulling a native dependency into every install and every standalone binary. That is an honest "we did not read these bytes", which is a different answer from a clean scan.
 
 **SafeTensors and GGUF** use binary formats with structured headers — AIsbom parses these directly to extract metadata (artifact names, license info, architecture details) without loading tensor weights.
 

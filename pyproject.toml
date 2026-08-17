@@ -26,6 +26,14 @@ pyinstaller = {version = "^6.18.0", python = "<3.15"}
 py7zr = "^1.1.3"
 h5py = "^3.12"
 onnx = "^1.17"
+# Fixture builders only. The scanner never imports these: joblib containers are
+# decompressed with the stdlib and .npy headers are parsed by hand, precisely so
+# the shipped wheel and the standalone binaries stay free of them. They exist
+# here to generate realistic artifacts and to cross-validate the hand-written
+# parsers in both directions.
+joblib = "^1.4"
+dill = "^0.3.8"
+numpy = "^2.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

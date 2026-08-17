@@ -125,6 +125,23 @@ class RemoteStream:
         self.close()
 
 
+def _supported_extensions() -> List[str]:
+    """Every extension `DeepScanner` claims, read from the scanner itself.
+
+    Kept as a derivation rather than a second list, because the two drifting
+    apart is not a cosmetic problem: an extension the local walk scans and the
+    remote resolver does not is a format that reports every `hf://` model clean.
+    """
+    from aisbom import scanner  # local: `scanner` imports this module
+
+    return sorted(
+        set(scanner.PYTORCH_EXTENSIONS)
+        | set(scanner.KERAS_EXTENSIONS)
+        | set(scanner.PICKLE_VARIANT_EXTENSIONS)
+        | {scanner.SAFETENSORS_EXTENSION, scanner.GGUF_EXTENSION, scanner.ONNX_EXTENSION}
+    )
+
+
 def resolve_huggingface_repo(repo_id: str) -> List[str]:
     """
     Resolve a Hugging Face repo into a list of file URLs for supported model artifacts.
@@ -143,14 +160,13 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
     resp.raise_for_status()
     data = resp.json()
 
-    # Must stay in step with the extensions DeepScanner dispatches on: a format
-    # missing here is silently skipped for `hf://` scans, so a hostile model in
-    # that format passes a remote scan without producing an artifact or an error.
-    supported_exts = (
-        ".pt", ".pth", ".bin", ".safetensors", ".gguf",
-        ".keras", ".h5", ".hdf5",
-        ".onnx",
-    )
+    # Derived from the scanner's own dispatch sets rather than restated here.
+    # A format missing from this list is silently skipped for `hf://` scans — a
+    # hostile model in that format passes a remote scan producing neither an
+    # artifact nor an error — and a hand-maintained copy is exactly how that
+    # happens. The import is function-local because `scanner` imports this
+    # module, so a module-level one would be circular.
+    supported_exts = tuple(_supported_extensions())
     urls = []
     for entry in data:
         path = entry.get("path", "")

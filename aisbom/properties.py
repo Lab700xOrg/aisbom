@@ -23,7 +23,18 @@ _FRAMEWORK_TO_FORMAT = {
     "GGUF": "gguf",
     "Keras": "keras",
     "ONNX": "onnx",
+    # The non-torch pickle carriers. `Pickle` shares PyTorch's token because the
+    # format genuinely is the same one; joblib and numpy get their own, because
+    # the container is a real difference a consumer may want to filter on.
+    "Pickle": "pickle",
+    "Joblib": "joblib",
+    "NumPy": "numpy",
 }
+
+# Formats whose findings are pickle opcodes. They share the `aisbom:pickle:*`
+# vocabulary rather than each inventing a parallel one, so a consumer that knows
+# how to read a threat off a `.pt` reads one off a `.joblib` unchanged.
+_PICKLE_BEARING_FORMATS = {"pickle", "joblib", "numpy"}
 
 
 def _format_for(art: Dict[str, Any]) -> str | None:
@@ -62,11 +73,48 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
     details = art.get("details") or {}
     props.append(("aisbom:format", fmt))
 
-    if fmt == "pickle":
+    if fmt in _PICKLE_BEARING_FORMATS:
         threats = details.get("threats") or []
         for threat in threats:
             props.append(("aisbom:pickle:opcode", str(threat)))
         props.append(("aisbom:pickle:opcode_count", str(len(threats))))
+
+        # The container the stream was found in — `bare`, `npy`, `npz`, or the
+        # compression joblib used. Absent for `.pt`, which has its own shape.
+        container = details.get("container")
+        if container:
+            props.append(("aisbom:pickle:container", str(container)))
+        if details.get("scan_incomplete"):
+            props.append(("aisbom:pickle:scan_incomplete", "true"))
+        if details.get("dill_code_objects"):
+            props.append(("aisbom:pickle:dill_code_objects", "true"))
+
+        if fmt == "joblib":
+            compression = details.get("compression")
+            if compression:
+                props.append(("aisbom:joblib:compression", str(compression)))
+            decompressed = details.get("decompressed_bytes")
+            if decompressed is not None:
+                props.append(("aisbom:joblib:decompressed_bytes", str(decompressed)))
+
+        elif fmt == "numpy":
+            dtype = details.get("dtype")
+            if dtype:
+                props.append(("aisbom:numpy:dtype", str(dtype)))
+            if details.get("object_dtype") is not None:
+                props.append((
+                    "aisbom:numpy:object_dtype",
+                    "true" if details.get("object_dtype") else "false",
+                ))
+            shape = details.get("shape")
+            if shape:
+                props.append(("aisbom:numpy:shape", str(shape)))
+            npy_version = details.get("npy_version")
+            if npy_version:
+                props.append(("aisbom:numpy:npy_version", str(npy_version)))
+            internal_files = details.get("internal_files")
+            if internal_files is not None:
+                props.append(("aisbom:numpy:member_count", str(internal_files)))
 
     elif fmt == "safetensors":
         tensor_count = details.get("tensors")
