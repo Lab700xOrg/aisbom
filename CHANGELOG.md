@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+> **New components in your SBOM.** Five extensions that were previously skipped are now scanned, so a repo containing them will produce more components than before and may newly exit `2`. Nothing that was already scanned changes verdict — the old-vs-new differential across the bypass corpus and 134 fixture verdicts is empty in both modes, and the scorecard holds at 8/11.
+
+### New formats scanned
+
+- **joblib, dill, NumPy object arrays and bare pickles are now scanned** — `.pkl`, `.pickle`, `.joblib`, `.dill`, `.npy`, `.npz`. These are the everyday serialization formats of scikit-learn and scientific Python, and every one of them is a pickle stream underneath, carrying exactly the arbitrary-code-execution risk of a `.pt`. Until now a directory of malicious files in all five formats reported "No AI models found" and exited `0`. `.pkl` is the sharpest case: the README has always documented `aisbom scan model.pkl --strict`, and that command scanned nothing.
+- **joblib's compression is opened, whichever codec it chose** — zlib, gzip, bz2, lzma/xz, and the legacy `ZF` container — all with the standard library. `lz4` and `zstd` have no stdlib decompressor and are **named but not opened** (`MEDIUM (Unscanned Container: lz4)`), on the same reasoning as 7z containers: a native dependency would land in every install and every standalone binary. No runtime dependency is added for any of this — joblib, dill and numpy are not imported by the scanner.
+- **dill's code-reconstruction globals are flagged.** A dill'd function or lambda is a marshalled code object rebuilt on load — the same construct that makes a Keras `Lambda` layer an execution vector. `_create_function`, `_create_code`, `_import_module` and `_get_attr` are CRITICAL. dill's type and array helpers are deliberately *not* flagged, so a `.dill` holding only data still scans clean.
+
+### Pickle detection
+
+- **A raw array block no longer ends the scan.** joblib writes its pickle up to an array, dumps the raw buffer inline, then resumes pickling — which stopped an opcode disassembly roughly 226 bytes into a 552-byte file while the payload sat at byte 516, and reported nothing. Because every real model carries weights, "after the first array" is where a payload naturally goes. Bytes the structural walk cannot reach now get a second pass that recovers globals directly. It reads bytes rather than structure, so it recognises known sinks only: it adds no unrecognized-import findings in strict mode, and it cannot judge a dual-use constructor.
+- **A `.npy` header no longer decides whether to look.** `descr` is attacker-supplied, so a pickle behind a header claiming `'<f8'` would have been a one-line evasion. The data section is disassembled whatever the header says. An array of ordinary numbers with no pickle in it reports `LOW`, not "pickle present".
+- **`STACK_GLOBAL` operands arriving from the pickle memo are now resolved correctly.** Either operand can reach the stack via `BINGET` rather than a literal, which a real joblib file does routinely. Reading only the literals resolved `numpy.dtype` as `dtype.dtype` — a false positive in strict mode on every ordinary joblib model, and, on other shapes, a dangerous global resolving to a module name matching nothing.
+- **`.npz` members are read even when the archive fights back.** A tampered CRC or header name goes through the same raw local-header read the PyTorch path already used, because numpy's reader does not verify what `ZipFile.open` verifies.
+
 ## 1.3.1 — 2026-08-16
 
 > **Exit-code change.** Two cases that previously exited `0` now exit non-zero. Neither was scanning anything before, so no working pipeline is affected — but a pipeline that was silently green on a bad path will now fail, which is the point. See the first two entries.

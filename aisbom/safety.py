@@ -80,6 +80,19 @@ DANGEROUS_GLOBALS = {
     # Native code loading.
     "ctypes": {"CDLL", "cdll", "WinDLL", "windll", "PyDLL", "LibraryLoader", "CFUNCTYPE"},
 
+    # dill extends pickle to serialize things pickle cannot: functions, lambdas,
+    # classes defined at the prompt. It does that by putting a *marshalled code
+    # object* in the stream and rebuilding it on load — the same construct that
+    # makes a Keras `Lambda` layer an execution vector, and executable without
+    # any further precondition. The names below are the ones that reconstruct or
+    # import code.
+    #
+    # `_create_type`, `_load_type` and `_create_array` are deliberately absent:
+    # they name a type or rebuild an array and execute nothing on their own. A
+    # dill file holding only data emits none of these entries at all, which is
+    # what keeps an ordinary `.dill` scanning clean.
+    "dill._dill": {"_create_function", "_create_code", "_import_module", "_get_attr"},
+    "dill": {"loads", "load"},
 }
 
 # Callable-construction helpers that are genuinely dual-use. `methodcaller` and
@@ -167,6 +180,18 @@ SAFE_MODULES = {
     "math",
     "itertools",
     "string",
+    # Serialization wrappers whose own globals are structural, not executable.
+    # A joblib file records its arrays through `joblib.numpy_pickle`, and a dill
+    # file records types through `dill._dill`; strict mode flagged both purely
+    # for being unrecognized, which made every benign artifact in those formats
+    # unscannable in the mode that is supposed to be the careful one.
+    #
+    # Scoped precisely: `joblib.numpy_pickle`, not `joblib`, so `joblib.parallel`
+    # and anything else in the package stays unknown and stays flagged. `dill`
+    # is allowlisted as a package, but the DANGEROUS_GLOBALS entries above are
+    # checked first and still win — an allowlisted module cannot launder a sink.
+    "joblib.numpy_pickle",
+    "dill",
 }
 
 SAFE_BUILTINS = {
@@ -290,7 +315,26 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
     threats found before that point are still recorded — a corrupt tail must not
     discard what the front of the stream already revealed.
     """
-    memo = []  # recent string literals, for STACK_GLOBAL
+    memo = []  # recent string values, for STACK_GLOBAL
+    # `STACK_GLOBAL` takes its module and name from the stack, and either can get
+    # there from the pickle's *memo table* rather than from a literal immediately
+    # before it. A real joblib file does exactly that:
+    #
+    #     SHORT_BINUNICODE 'dtype'   <- a dict key
+    #     BINGET 8                   <- pushes 'numpy', memoized much earlier
+    #     SHORT_BINUNICODE 'dtype'
+    #     STACK_GLOBAL               <- numpy.dtype
+    #
+    # Watching only the literals resolves that as `dtype.dtype`, which is both a
+    # false positive (the real global is allowlisted) and, on other shapes, a
+    # false negative — a genuinely dangerous global reached through the memo
+    # resolves to a module name that matches nothing in the tables.
+    #
+    # Tracking the table needs no stack simulation: a memo entry is always the
+    # value that was just pushed, so remembering the last push is enough.
+    memo_table: Dict[int, Any] = {}
+    memo_index = 0        # MEMOIZE assigns indices in order from zero
+    last_push: Any = None  # the value a MEMOIZE/PUT would record
     # One buffer is reused across the whole walk; allocating a fresh view per
     # stream is what made a file of tiny pickles expensive.
     if stream is None:
@@ -328,12 +372,37 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
 
     try:
         for opcode, arg, pos in pickletools.genops(stream):
-            if opcode.name in ("SHORT_BINUNICODE", "UNICODE", "BINUNICODE"):
+            if opcode.name in ("SHORT_BINUNICODE", "UNICODE", "BINUNICODE",
+                               "BINUNICODE8"):
                 memo.append(arg)
                 if len(memo) > 2:
                     memo.pop(0)
+                last_push = arg
                 if pending["ctor"] is not None:
                     pending["args"].append(arg)
+
+            elif opcode.name == "MEMOIZE":
+                memo_table[memo_index] = last_push
+                memo_index += 1
+
+            elif opcode.name in ("BINPUT", "PUT", "LONG_BINPUT"):
+                # Protocol 3 and below name the slot explicitly.
+                memo_table[arg] = last_push
+
+            elif opcode.name in ("BINGET", "GET", "LONG_BINGET"):
+                cached = memo_table.get(arg)
+                last_push = cached
+                if isinstance(cached, str):
+                    memo.append(cached)
+                    if len(memo) > 2:
+                        memo.pop(0)
+                    if pending["ctor"] is not None:
+                        pending["args"].append(cached)
+
+            else:
+                # Anything else that reaches the stack is not a string, so a
+                # MEMOIZE that follows must not record a stale one.
+                last_push = None
 
             if opcode.name == "GLOBAL":
                 # Arg is "module\nname"
@@ -374,6 +443,172 @@ def _scan_single_stream(data: bytes, start: int, strict_mode: bool, threats: Lis
     return None
 
 
+# --- SALVAGE PASS: globals in bytes the structural walk could not reach ---
+#
+# A structural disassembly stops dead at the first byte it cannot account for,
+# and joblib guarantees that happens: it writes the pickle up to an array
+# wrapper, then dumps the raw array buffer inline, then resumes pickling. On a
+# real model file `pickletools.genops` therefore dies a couple of hundred bytes
+# in, and everything after the first array — which is where a payload would
+# naturally sit — was never examined. It was not reported as unexamined either:
+# the walk simply returned what it had, and the file read as clean.
+#
+# So the remaining bytes get a second, non-structural pass that looks for the
+# two ways a global can be spelled. It is strictly additive: it can only find
+# globals the structural walk never saw, and it runs only when that walk stopped
+# early.
+#
+# What it deliberately cannot do is judge a dual-use constructor, because the
+# argument that decides is a stack relationship and this pass has no stack.
+# `operator.methodcaller("system")` hidden behind a raw array block is therefore
+# out of reach; there is a test that says so.
+
+# `c` + "module\nname\n" — the protocol 0/1 spelling.
+_GLOBAL_OPCODE = re.compile(
+    rb"c([A-Za-z_][A-Za-z0-9_.]{0,255})\n([A-Za-z_][A-Za-z0-9_.]{0,255})\n"
+)
+
+_STACK_GLOBAL_OPCODE = 0x93
+_SHORT_BINUNICODE_OPCODE = 0x8C
+_BINUNICODE_OPCODE = 0x58
+
+# How far back a `STACK_GLOBAL`'s two operands may be spelled out. A module and
+# a name are short; this is generous and keeps the backward walk bounded.
+_SALVAGE_LOOKBACK = 320
+
+# Ceilings so that a large adversarial buffer cannot turn the pass into the
+# denial of service that removing the stream cap would have been.
+_SALVAGE_MAX_CANDIDATES = 200_000
+_SALVAGE_MAX_FINDINGS = 50
+
+
+def _string_ending_at(data: bytes, end: int) -> Tuple[str, int] | None:
+    """Read backwards for a unicode push whose bytes finish exactly at ``end``.
+
+    Returns ``(value, start_offset)``. Anchoring on the end is what makes this
+    unambiguous: a length-prefixed string can be identified without knowing
+    where it began, because only one starting offset makes its declared length
+    land on the byte we already have.
+    """
+    for size in range(0, min(256, end - 1)):
+        start = end - 2 - size
+        if start < 0:
+            break
+        if data[start] == _SHORT_BINUNICODE_OPCODE and data[start + 1] == size:
+            try:
+                return data[start + 2:end].decode("utf-8"), start
+            except UnicodeDecodeError:
+                return None
+
+    for size in range(0, min(_SALVAGE_LOOKBACK, end - 4)):
+        start = end - 5 - size
+        if start < 0:
+            break
+        if data[start] == _BINUNICODE_OPCODE:
+            declared = int.from_bytes(data[start + 1:start + 5], "little")
+            if declared == size:
+                try:
+                    return data[start + 5:end].decode("utf-8"), start
+                except UnicodeDecodeError:
+                    return None
+    return None
+
+
+# A `MEMOIZE` (and, at lower protocols, a `BINPUT`) sits between a string and
+# whatever consumes it, so the operands of a `STACK_GLOBAL` are rarely flush
+# against it. Real bytes look like:
+#
+#     \x8c\x05posix  \x94  \x8c\x06system  \x94  \x93
+#
+# Anchoring strictly on the end byte therefore finds nothing at all. A couple of
+# bytes of slack are allowed instead, and the length check still decides — a
+# candidate only resolves when its declared length lands exactly where it must.
+_SALVAGE_SLACK = 3
+
+
+def _string_before(data: bytes, end: int) -> Tuple[str, int] | None:
+    """``_string_ending_at`` with a few bytes of tolerance for memo opcodes."""
+    for back in range(_SALVAGE_SLACK + 1):
+        if end - back < 2:
+            break
+        found = _string_ending_at(data, end - back)
+        if found:
+            return found
+    return None
+
+
+def salvage_globals(data: bytes, start: int = 0) -> List[Tuple[str, str]]:
+    """Recover ``(module, name)`` pairs from a buffer without disassembling it.
+
+    Used on the region a structural walk could not cross. Both spellings are
+    handled: the `GLOBAL` opcode's newline-delimited pair, and `STACK_GLOBAL`
+    preceded by two unicode pushes. Order is preserved and duplicates are kept
+    out, so a repeating pattern in array data cannot flood the result.
+    """
+    found: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    if start >= len(data):
+        return found
+    region = data[start:]
+
+    for match in _GLOBAL_OPCODE.finditer(region):
+        pair = (match.group(1).decode("ascii"), match.group(2).decode("ascii"))
+        if pair not in seen:
+            seen.add(pair)
+            found.append(pair)
+        if len(found) >= _SALVAGE_MAX_FINDINGS:
+            return found
+
+    cursor = 0
+    examined = 0
+    while examined < _SALVAGE_MAX_CANDIDATES:
+        at = region.find(bytes([_STACK_GLOBAL_OPCODE]), cursor)
+        if at == -1:
+            break
+        cursor = at + 1
+        examined += 1
+
+        name = _string_before(region, at)
+        if not name:
+            continue
+        module = _string_before(region, name[1])
+        if not module:
+            continue
+        pair = (module[0], name[0])
+        if pair not in seen:
+            seen.add(pair)
+            found.append(pair)
+        if len(found) >= _SALVAGE_MAX_FINDINGS:
+            break
+
+    return found
+
+
+def _judge_salvaged(pairs, strict_mode: bool, threats: List[str]) -> None:
+    """Judge salvaged pairs against the blocklist only, in either mode.
+
+    Strict mode's allowlist is deliberately not applied here. Its premise —
+    "anything unrecognized is suspicious" — needs names resolved *exactly*, and
+    this pass resolves them approximately: with no memo table it cannot see that
+    the module operand of a `STACK_GLOBAL` arrived from a `BINGET`, so a real
+    `numpy.dtype` reads as `dtype.dtype`. Handing an allowlist a garbled name
+    manufactures a false positive on every ordinary joblib file.
+
+    The blocklist has no such problem: it fires only on an exact match against a
+    known sink, and a garbled name matches nothing. The cost is that an
+    unrecognized-but-not-blocklisted import hidden behind a raw array block is
+    not reported in strict mode; there is a test that says so.
+    """
+    already = set(threats)
+    for module, name in pairs:
+        if not is_dangerous_global(module, name):
+            continue
+        label = f"UNSAFE_IMPORT: {module}.{name}" if strict_mode else f"{module}.{name}"
+        if label not in already:
+            already.add(label)
+            threats.append(label)
+
+
 def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
     """
     Disassembles a pickle stream and checks for dangerous imports.
@@ -400,6 +635,11 @@ def scan_pickle_stream(data: bytes, strict_mode: bool = False) -> List[str]:
         # further into the buffer than it began, and the buffer is finite.
         next_offset = _scan_single_stream(data, offset, strict_mode, threats, buffer)
         if next_offset is None or next_offset <= offset:
+            # The walk stopped without reaching a STOP: either these bytes are
+            # not a pickle at all, or one has raw data spliced into it. Both
+            # leave the rest of the buffer unread, so it gets the salvage pass
+            # rather than being reported as though it had been scanned.
+            _judge_salvaged(salvage_globals(data, offset), strict_mode, threats)
             return threats
         offset = next_offset
         if offset >= len(data):
