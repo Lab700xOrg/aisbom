@@ -26,14 +26,14 @@ import re
 import zlib
 from typing import Any, Dict, Tuple
 
-# Ceiling on any single decompressed payload. Matches the scanner's own pickle
-# budget: a compression bomb must cost the same as a large ordinary file, not
-# more. The decompressors below are all incremental and take this as a
-# `max_length`, so the bomb is never expanded in the first place.
+# Fallback ceiling on any single decompressed payload: a compression bomb must
+# cost the same as a large ordinary file, not more. The decompressors below are
+# all incremental and take this as a `max_length`, so the bomb is never expanded
+# in the first place.
+#
+# Callers pass their own budget — the scanner passes the same figure it used to
+# read the file, so a remote scan that fetched 2MB does not then expand 16.
 DECOMPRESS_MAX_BYTES = 16 * 1024 * 1024
-
-# Remote reads pay one HTTP Range request per call, so they get a tighter budget.
-DECOMPRESS_MAX_REMOTE_BYTES = 2 * 1024 * 1024
 
 # `.npy` declares its header length in the file. Cap what we will honour: the
 # real headers are a few dozen bytes, and a declared length is exactly the field
@@ -108,47 +108,55 @@ def detect_compression(head: bytes) -> Tuple[str | None, bool]:
     return None, False
 
 
-def decompress(data: bytes, label: str, limit: int = DECOMPRESS_MAX_BYTES) -> bytes | None:
-    """Inflate ``data`` with the named codec, never producing more than ``limit``.
+def decompress(data: bytes, label: str, limit: int = DECOMPRESS_MAX_BYTES) -> Tuple[bytes | None, bool]:
+    """Inflate ``data`` with the named codec; return ``(payload, complete)``.
 
-    Returns whatever was recovered before the error when a stream is truncated
-    or corrupt — a damaged tail must not discard the front, which is the same
-    reasoning that makes a broken zip member worth reading anyway. Returns
-    ``None`` only when nothing at all could be read.
+    ``complete`` is False when the decompressor stopped before the end of the
+    stream — because it hit ``limit``, or because the compressed data itself was
+    cut short. That distinction has to reach the caller. A payload placed after
+    a large compressible value would otherwise sit in the part we never expanded
+    while the prefix scanned clean, and a cap nobody reports is somewhere to hide
+    a payload rather than a safety measure.
+
+    Returns whatever was recovered before an error when a stream is corrupt — a
+    damaged tail must not discard the front, the same reasoning that makes a
+    broken zip member worth reading anyway. ``(None, False)`` means nothing at
+    all could be read.
     """
     if not data:
-        return None
+        return None, False
     try:
         if label == _ZLIB:
-            return zlib.decompressobj().decompress(data, limit) or None
-        if label == _GZIP:
+            engine = zlib.decompressobj()
+        elif label == _GZIP:
             # 16 + MAX_WBITS selects the gzip wrapper.
-            return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(data, limit) or None
-        if label == _BZ2:
-            return bz2.BZ2Decompressor().decompress(data, limit) or None
-        if label in (_LZMA, _XZ):
+            engine = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif label == _BZ2:
+            engine = bz2.BZ2Decompressor()
+        elif label in (_LZMA, _XZ):
             # FORMAT_AUTO reads both the `.xz` container and the older
             # standalone `.lzma` framing joblib still emits.
-            return lzma.LZMADecompressor(format=lzma.FORMAT_AUTO).decompress(
-                data, limit
-            ) or None
+            engine = lzma.LZMADecompressor(format=lzma.FORMAT_AUTO)
+        else:
+            return None, False
+
+        out = engine.decompress(data, limit)
+        # Every one of these decompressors exposes `eof`, which is True only
+        # once the stream's own end marker has been consumed.
+        return (out or None), bool(getattr(engine, "eof", False))
     except Exception:
-        # A partially-inflated payload is still worth disassembling; the
-        # incremental decompressors above surface it through the exception path
-        # only when nothing was produced, so there is nothing to salvage here.
-        return None
-    return None
+        return None, False
 
 
-def unwrap_zfile(data: bytes, limit: int = DECOMPRESS_MAX_BYTES) -> bytes | None:
-    """Inflate joblib's legacy ``ZF`` container.
+def unwrap_zfile(data: bytes, limit: int = DECOMPRESS_MAX_BYTES) -> Tuple[bytes | None, bool]:
+    """Inflate joblib's legacy ``ZF`` container; return ``(payload, complete)``.
 
     Layout is the tag, a space-padded decimal length, then a zlib stream. The
     declared length is read past rather than trusted — the decompressor stops at
     the real end of the stream, so a lie in that field buys nothing.
     """
     if not data.startswith(JOBLIB_ZFILE_MAGIC):
-        return None
+        return None, False
     # The length field is fixed-width ASCII in every version that wrote it.
     body = data[len(JOBLIB_ZFILE_MAGIC):]
     match = re.match(rb"\s*([0-9]+)\s*", body[:32])
@@ -160,15 +168,20 @@ def describe_container(data: bytes, limit: int = DECOMPRESS_MAX_BYTES) -> Dict[s
     """Unwrap one layer of compression, if any, and say what was found.
 
     Returns a dict with ``compression`` (label or None), ``readable`` (whether
-    we could open it), and ``payload`` (the inner bytes, or None). An unreadable
+    we could open it), ``payload`` (the inner bytes, or None), and ``truncated``
+    (whether the decompressor stopped short of the stream's end). An unreadable
     container yields a payload of None with the format still named, so the
-    caller can report "we did not read these bytes" instead of "clean".
+    caller can report "we did not read these bytes" instead of "clean" — and a
+    truncated one says so rather than passing off a prefix as the whole file.
     """
-    result: Dict[str, Any] = {"compression": None, "readable": True, "payload": data}
+    result: Dict[str, Any] = {
+        "compression": None, "readable": True, "payload": data, "truncated": False,
+    }
 
     if data.startswith(JOBLIB_ZFILE_MAGIC):
-        payload = unwrap_zfile(data, limit)
-        result.update(compression="zfile", readable=payload is not None, payload=payload)
+        payload, complete = unwrap_zfile(data, limit)
+        result.update(compression="zfile", readable=payload is not None,
+                      payload=payload, truncated=payload is not None and not complete)
         return result
 
     label, readable = detect_compression(data[:16])
@@ -180,8 +193,9 @@ def describe_container(data: bytes, limit: int = DECOMPRESS_MAX_BYTES) -> Dict[s
         result.update(readable=False, payload=None)
         return result
 
-    payload = decompress(data, label, limit)
-    result.update(readable=payload is not None, payload=payload)
+    payload, complete = decompress(data, label, limit)
+    result.update(readable=payload is not None, payload=payload,
+                  truncated=payload is not None and not complete)
     return result
 
 
@@ -245,17 +259,31 @@ def parse_npy_header(data: bytes) -> Dict[str, Any] | None:
 def _is_object_dtype(descr: Any) -> bool:
     """True if a dtype descriptor carries Python objects anywhere inside it.
 
-    ``'|O'`` is the plain object array. A structured dtype nests its fields in
-    lists of tuples, and a single object field in one of them is enough to make
-    the data section a pickle, so the whole descriptor is searched rather than
-    only its top level.
+    ``'|O'`` is the plain object array. A structured dtype is a list of
+    ``(name, format)`` or ``(name, format, shape)`` entries, and only the
+    *format* element is a dtype — searching the whole entry reads field names as
+    type codes, so an ordinary ``[('FOO', '<i4')]`` came back True on the
+    strength of the letter O in its name.
+
+    Note this only chooses the reported risk label, never whether to scan: the
+    data section is disassembled whatever the header claims, because the header
+    is attacker-supplied. Getting this wrong is noise, not a bypass.
     """
     if descr is None:
         return False
     if isinstance(descr, str):
+        # Strip the byte-order/size prefix, leaving the type character.
         return "O" in descr.lstrip("|<>=")
-    if isinstance(descr, (list, tuple)):
-        return any(_is_object_dtype(part) for part in descr)
+    if isinstance(descr, list):
+        # Structured: inspect each field's format, never its name or shape.
+        return any(
+            _is_object_dtype(field[1])
+            for field in descr
+            if isinstance(field, (list, tuple)) and len(field) >= 2
+        )
+    if isinstance(descr, tuple) and len(descr) == 2:
+        # A subarray format, `(format, shape)` — the dtype is the first element.
+        return _is_object_dtype(descr[0])
     return False
 
 

@@ -190,7 +190,7 @@ def test_legacy_zfile_container_is_unwrapped(tmp_path):
     body = zlib.compress(inner)
     blob = pc.JOBLIB_ZFILE_MAGIC + b"%019d" % len(inner) + body
 
-    assert pc.unwrap_zfile(blob) == inner
+    assert pc.unwrap_zfile(blob) == (inner, True)
     artifact = scan_one(tmp_path, "legacy.joblib", blob)
     assert is_critical(artifact)
     assert artifact["details"]["container"] == "zfile"
@@ -253,6 +253,32 @@ def test_structured_dtype_with_one_object_field_counts_as_object(tmp_path):
     descr = [("id", "<i8"), ("meta", "|O")]
     assert pc._is_object_dtype(descr) is True
     assert pc._is_object_dtype([("id", "<i8"), ("w", "<f4")]) is False
+
+
+def test_field_names_are_not_read_as_type_codes():
+    """A structured entry is `(name, format[, shape])` — only `format` is a dtype.
+
+    Searching the whole entry read field names as type codes, so the perfectly
+    ordinary `[('FOO', '<i4')]` came back as an object array on the strength of
+    the letter O in its name.
+    """
+    assert pc._is_object_dtype([("FOO", "<i4")]) is False
+    assert pc._is_object_dtype([("COORD", "<f8"), ("BOX", "<i2")]) is False
+    # ...while a genuine object *format* in the same shape is still found.
+    assert pc._is_object_dtype([("FOO", "|O")]) is True
+    # Subarray formats, `(format, shape)`, still resolve through element 0.
+    assert pc._is_object_dtype([("grid", ("|O", (2, 2)))]) is True
+    assert pc._is_object_dtype([("grid", ("<f4", (2, 2)))]) is False
+
+
+def test_an_ordinary_structured_npy_is_low(tmp_path):
+    """The end-to-end consequence of the bug above: a numeric structured array
+    was reported MEDIUM (Pickle Present) purely because of a field name."""
+    path = tmp_path / "src.npy"
+    np.save(path, np.zeros(4, dtype=[("FOO", "<i4"), ("BAR", "<f8")]))
+    artifact = scan_one(tmp_path, "table.npy", path.read_bytes())
+    assert artifact["risk_level"] == "LOW"
+    assert artifact["details"]["object_dtype"] is False
 
 
 def test_npz_members_are_each_scanned(tmp_path):
@@ -442,6 +468,154 @@ def test_salvage_result_is_bounded_on_a_repeating_buffer():
     assert len(salvage_globals(b"\x99" + flood)) <= 50
 
 
+# --- no cap may end in a clean verdict ---------------------------------
+#
+# Four different limits bound the work here: the file-read budget, the npz
+# member count, the decompressor's output cap, and the disassembler's stream
+# budget. Each one leaves bytes unexamined, and each one is therefore a place a
+# payload could sit. A limit that reports "clean" is not a safety measure; it is
+# a hiding place with a length attached.
+
+def test_a_capped_file_read_is_reported_incomplete(tmp_path, monkeypatch):
+    """A pickle can carry a large BINBYTES value ahead of its payload, so the
+    prefix disassembles clean while the part that matters was never read."""
+    monkeypatch.setattr("aisbom.scanner.PICKLE_VARIANT_MAX_SCAN_BYTES", 4096)
+
+    filler = pickle.dumps({"blob": b"\x00" * 65536}, protocol=4)
+    blob = filler + harmless_stack_global_pickle("os", "system")
+
+    artifact = scan_one(tmp_path, "big.pkl", blob)
+    assert artifact["details"]["truncated"] is True
+    assert artifact["risk_level"] == "MEDIUM (Pickle Scan Incomplete)"
+    assert artifact["details"]["scan_incomplete"] is True
+
+
+def test_an_uncapped_read_is_not_reported_incomplete(tmp_path):
+    """The other half: an ordinary file must not carry the marker."""
+    artifact = scan_one(tmp_path, "small.pkl",
+                        pickle.dumps({"a": 1}, protocol=4))
+    assert artifact["details"]["truncated"] is False
+    assert "scan_incomplete" not in artifact["details"]
+
+
+def test_capped_npz_member_list_is_reported_incomplete(tmp_path, monkeypatch):
+    """Benign arrays first, payload after the cap — the archive would otherwise
+    report LOW with every later member unopened."""
+    monkeypatch.setattr("aisbom.scanner.NPZ_MAX_MEMBERS", 4)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        for i in range(6):
+            z.writestr(f"arr_{i}.npy", b"\x00" * 32)
+
+    artifact = scan_one(tmp_path, "many.npz", buf.getvalue())
+    assert artifact["details"]["internal_files"] == 6
+    assert artifact["details"]["members_capped"] == 4
+    assert artifact["risk_level"] == "MEDIUM (Pickle Scan Incomplete)"
+
+
+def test_capped_decompression_is_reported_incomplete(tmp_path, monkeypatch):
+    """A dangerous global after a large compressible value sits in the part the
+    decompressor never expanded."""
+    monkeypatch.setattr("aisbom.scanner.PICKLE_VARIANT_MAX_SCAN_BYTES", 2048)
+
+    inner = pickle.dumps({"pad": b"\x00" * 262144}, protocol=4) + \
+        harmless_stack_global_pickle("os", "system")
+    artifact = scan_one(tmp_path, "big.joblib", zlib.compress(inner))
+
+    assert artifact["details"]["decompression_truncated"] is True
+    assert artifact["risk_level"] == "MEDIUM (Pickle Scan Incomplete)"
+
+
+def test_the_decompression_budget_is_the_read_budget(tmp_path, monkeypatch):
+    """A remote scan that fetched 2MB must not then expand 16.
+
+    The limit used to come from a default argument, which binds once at import
+    — so the remote budget was defined, never applied, and unreachable by any
+    caller wanting a different one.
+    """
+    seen = {}
+    real = pc.describe_container
+
+    def spy(data, limit=pc.DECOMPRESS_MAX_BYTES):
+        seen["limit"] = limit
+        return real(data, limit)
+
+    monkeypatch.setattr("aisbom.scanner.pc.describe_container", spy)
+    monkeypatch.setattr("aisbom.scanner.PICKLE_VARIANT_MAX_SCAN_BYTES", 4096)
+
+    scan_one(tmp_path, "m.joblib", zlib.compress(pickle.dumps({"a": 1})))
+    assert seen["limit"] == 4096
+
+
+def test_a_fully_decompressed_joblib_is_not_reported_incomplete(tmp_path):
+    path = tmp_path / "src.joblib"
+    joblib.dump({"w": np.arange(8)}, path, compress=3)
+    artifact = scan_one(tmp_path, "model.joblib", path.read_bytes())
+    assert "decompression_truncated" not in artifact["details"]
+    assert "Incomplete" not in artifact["risk_level"]
+
+
+def test_a_real_payload_still_outranks_the_incomplete_marker(tmp_path, monkeypatch):
+    """Incompleteness is bookkeeping, not a finding. A threat found inside the
+    part we *did* read must still be the reported verdict."""
+    monkeypatch.setattr("aisbom.scanner.PICKLE_VARIANT_MAX_SCAN_BYTES", 4096)
+    blob = harmless_stack_global_pickle("os", "system") + b"\x00" * 65536
+
+    artifact = scan_one(tmp_path, "big.pkl", blob)
+    assert artifact["details"]["truncated"] is True
+    assert is_critical(artifact)
+
+
+# --- the Hugging Face resolver -----------------------------------------
+
+def test_the_hf_resolver_lists_every_extension_the_scanner_dispatches_on():
+    """The resolver filters the file list before dispatch ever runs, so a
+    format missing here is skipped for `hf://` scans no matter how carefully
+    the dispatch arm was wired. It is derived from the scanner for that reason.
+    """
+    from aisbom import remote, scanner
+
+    dispatched = (
+        set(scanner.PYTORCH_EXTENSIONS)
+        | set(scanner.KERAS_EXTENSIONS)
+        | set(scanner.PICKLE_VARIANT_EXTENSIONS)
+        | {scanner.SAFETENSORS_EXTENSION, scanner.GGUF_EXTENSION, scanner.ONNX_EXTENSION}
+    )
+    assert set(remote._supported_extensions()) == dispatched
+
+
+def test_hf_repo_resolution_returns_the_new_formats(monkeypatch):
+    """Exercised through the real resolver, not a monkeypatched stand-in — the
+    stand-in is what let this gap through in the first place."""
+    import aisbom.remote as remote
+
+    listing = [
+        {"path": "model.joblib"}, {"path": "encoder.pkl"}, {"path": "fn.dill"},
+        {"path": "weights.npy"}, {"path": "bundle.npz"}, {"path": "model.pt"},
+        {"path": "README.md"}, {"path": "config.json"},
+    ]
+
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return listing
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", lambda url, headers=None: Resp())
+
+    urls = remote.resolve_huggingface_repo("hf://org/model")
+    resolved = {u.rsplit("/", 1)[-1] for u in urls}
+    assert resolved == {
+        "model.joblib", "encoder.pkl", "fn.dill",
+        "weights.npy", "bundle.npz", "model.pt",
+    }
+
+
 # --- false-positive sweep ----------------------------------------------
 
 @pytest.mark.parametrize("protocol", [2, 4, 5])
@@ -534,17 +708,46 @@ def test_zlib_detection_needs_the_header_checksum_not_just_the_first_byte():
     assert pc._looks_like_zlib(b"\x78") is False
 
 
-def test_decompression_is_bounded():
-    """A compression bomb costs the same as a large ordinary file, no more."""
+def test_decompression_is_bounded_and_says_it_stopped_early():
+    """A compression bomb costs the same as a large ordinary file, no more —
+    and the caller is told the expansion was cut short, because a cap nobody
+    reports is somewhere to hide a payload rather than a safety measure."""
     bomb = zlib.compress(b"\x00" * (4 * 1024 * 1024))
-    out = pc.decompress(bomb, "zlib", limit=1024)
+    out, complete = pc.decompress(bomb, "zlib", limit=1024)
     assert out is not None and len(out) <= 1024
+    assert complete is False
+
+    small, complete = pc.decompress(zlib.compress(b"hello"), "zlib")
+    assert small == b"hello"
+    assert complete is True
+
+
+@pytest.mark.parametrize("label", ["zlib", "gzip", "bz2", "lzma"])
+def test_every_codec_reports_completeness(label):
+    import bz2 as _bz2
+    import gzip as _gzip
+    import lzma as _lzma
+
+    body = b"payload" * 4096
+    packed = {
+        "zlib": lambda: zlib.compress(body),
+        "gzip": lambda: _gzip.compress(body),
+        "bz2": lambda: _bz2.compress(body),
+        "lzma": lambda: _lzma.compress(body),
+    }[label]()
+
+    full, complete = pc.decompress(packed, label)
+    assert full == body and complete is True
+
+    capped, complete = pc.decompress(packed, label, limit=64)
+    assert capped is not None and len(capped) <= 64
+    assert complete is False
 
 
 def test_decompressing_garbage_returns_none_rather_than_raising():
-    assert pc.decompress(b"\x1f\x8b" + b"\xff" * 32, "gzip") is None
-    assert pc.decompress(b"", "zlib") is None
-    assert pc.decompress(b"anything", "not-a-codec") is None
+    assert pc.decompress(b"\x1f\x8b" + b"\xff" * 32, "gzip") == (None, False)
+    assert pc.decompress(b"", "zlib") == (None, False)
+    assert pc.decompress(b"anything", "not-a-codec") == (None, False)
 
 
 @pytest.mark.parametrize("blob", [

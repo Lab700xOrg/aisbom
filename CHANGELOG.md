@@ -16,6 +16,12 @@
 - **A `.npy` header no longer decides whether to look.** `descr` is attacker-supplied, so a pickle behind a header claiming `'<f8'` would have been a one-line evasion. The data section is disassembled whatever the header says. An array of ordinary numbers with no pickle in it reports `LOW`, not "pickle present".
 - **`STACK_GLOBAL` operands arriving from the pickle memo are now resolved correctly.** Either operand can reach the stack via `BINGET` rather than a literal, which a real joblib file does routinely. Reading only the literals resolved `numpy.dtype` as `dtype.dtype` — a false positive in strict mode on every ordinary joblib model, and, on other shapes, a dangerous global resolving to a module name matching nothing.
 - **`.npz` members are read even when the archive fights back.** A tampered CRC or header name goes through the same raw local-header read the PyTorch path already used, because numpy's reader does not verify what `ZipFile.open` verifies.
+- **No scan limit ends in a clean verdict.** Four bounds apply to these formats — the file-read budget, the `.npz` member count, the decompressor's output cap, and the disassembler's stream budget. Each leaves bytes unexamined, so each now reports `MEDIUM (Pickle Scan Incomplete)` instead of passing off a prefix as the whole file: a pickle can carry a large `BINBYTES` value ahead of its payload, and 512 benign arrays can precede a malicious one. A real finding still outranks the marker.
+
+### Fixed
+
+- **`hf://` scans now resolve the new formats.** The Hugging Face resolver filters the file list before dispatch runs, so a repo containing a `.joblib`, `.pkl`, `.dill`, `.npy` or `.npz` model would have returned no target for it. The resolver's extension list is now derived from the scanner's own dispatch sets rather than restated, so the two cannot drift again.
+- **The decompression budget now follows the read budget.** It came from a default argument, which binds once at import — so a remote scan that fetched 2 MB could expand 16 MB, and the remote limit was unreachable.
 
 ## 1.3.1 — 2026-08-16
 

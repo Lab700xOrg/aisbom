@@ -666,6 +666,10 @@ class DeepScanner:
             threats: List[str] = []
             carries_pickle = False
             unreadable = None   # a container we could name but not open
+            # Set whenever bytes went unexamined for a reason other than the
+            # disassembler's own stream budget. Every one of these is a place a
+            # payload could sit, so none of them may end in a clean verdict.
+            unexamined = False
 
             if zipfile.is_zipfile(stream):
                 # `.npz` is a zip of `.npy` members. Compressed or stored, and
@@ -676,8 +680,15 @@ class DeepScanner:
                 details["container"] = "npz"
                 stream.seek(0)
                 with zipfile.ZipFile(stream, "r") as z:
-                    members = z.namelist()[:NPZ_MAX_MEMBERS]
-                    details["internal_files"] = len(z.namelist())
+                    all_members = z.namelist()
+                    members = all_members[:NPZ_MAX_MEMBERS]
+                    details["internal_files"] = len(all_members)
+                    if len(all_members) > NPZ_MAX_MEMBERS:
+                        # 512 benign numeric arrays followed by an object array
+                        # would otherwise leave every later member unopened and
+                        # the archive reported LOW.
+                        details["members_capped"] = NPZ_MAX_MEMBERS
+                        unexamined = True
                     read_notes = []
                     for member in members:
                         blob, note = self._read_zip_member(z, member, stream)
@@ -696,14 +707,27 @@ class DeepScanner:
                 blob = stream.read(budget)
                 if not isinstance(blob, bytes):
                     blob = bytes(blob)
-                details["truncated"] = len(blob) >= budget
+                if len(blob) >= budget:
+                    # The read stopped at the budget with bytes still on disk.
+                    # A valid pickle can carry a large BINBYTES value ahead of
+                    # its payload, so the prefix can disassemble clean while the
+                    # part that matters was never read.
+                    details["truncated"] = True
+                    unexamined = True
+                else:
+                    details["truncated"] = False
 
                 if blob.startswith(pc.NPY_MAGIC):
                     meta["framework"] = "NumPy"
                     details["container"] = "npy"
                     threats, carries_pickle = self._npy_member_threats(blob, details)
                 else:
-                    wrapper = pc.describe_container(blob)
+                    # The decompression budget is the read budget: a remote
+                    # scan pays per byte and must not expand 16MB after
+                    # fetching 2. Passed explicitly rather than left to the
+                    # default, which binds once at import and so ignores both
+                    # the remote case and any override.
+                    wrapper = pc.describe_container(blob, limit=budget)
                     if wrapper["compression"]:
                         meta["framework"] = "Joblib"
                         details["container"] = wrapper["compression"]
@@ -721,6 +745,12 @@ class DeepScanner:
                                 wrapper["payload"], strict_mode=self.strict_mode
                             )
                             details["decompressed_bytes"] = len(wrapper["payload"])
+                            if wrapper["truncated"]:
+                                # The decompressor stopped before the stream's
+                                # end marker: either it hit the output cap or
+                                # the compressed data was itself cut short.
+                                details["decompression_truncated"] = True
+                                unexamined = True
                     else:
                         details["container"] = "bare"
                         threats = scan_pickle_stream(blob, strict_mode=self.strict_mode)
@@ -741,7 +771,7 @@ class DeepScanner:
 
             if threats:
                 meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
-            elif incomplete:
+            elif incomplete or unexamined:
                 details["scan_incomplete"] = True
                 meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
             elif unreadable:
