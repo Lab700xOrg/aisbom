@@ -1149,3 +1149,64 @@ def looks_like_pickle_stream(data: bytes) -> bool:
     except Exception:
         return False
     return False
+
+
+class _NullWriter:
+    """Sink for `pickletools.dis`, which validates by writing a listing."""
+
+    def write(self, _text: str) -> None:
+        pass
+
+
+def head_looks_like_pickle(data: bytes) -> tuple[bool, bool]:
+    """Does the head of a file begin with a genuinely valid pickle?
+
+    Used by discovery on files no extension claimed, where the question is not
+    "what does this pickle import" but the earlier one: is this a pickle at
+    all? Getting that wrong in either direction is expensive — miss it and a
+    payload is invisible, over-claim it and every SBOM fills with phantom
+    components — so the bar here is deliberately higher than elsewhere.
+
+    Parsing as opcodes is *not* enough, and assuming it was is a trap worth
+    recording: `.` is the STOP opcode, so on a "reaches STOP" test every CSS
+    file that opens with a class selector is a pickle. Measured against a real
+    `node_modules`, that rule claimed JavaScript, stylesheets, TypeScript
+    declarations and a man page.
+
+    So the head must *validate*: `pickletools.dis` walks the stack, and a
+    pickle that pops from an empty stack or ends holding anything other than
+    one object is rejected. Validation runs against the prefix ending at the
+    first STOP rather than the whole buffer, so a payload followed by a corrupt
+    tail — the nullifAI shape — is still recognized instead of being thrown
+    out along with its own garbage.
+
+    Returns `(is_pickle, may_be_truncated)`. The second flag is the caller's
+    escalation signal: opcodes parsed cleanly but no STOP appeared, which is
+    what a real pickle larger than the read window looks like.
+
+    Disassembly only. The stream is never unpickled.
+    """
+    if not data:
+        return (False, False)
+
+    stop_at = None
+    parsed = 0
+    try:
+        for opcode, _arg, pos in pickletools.genops(io.BytesIO(data)):
+            parsed += 1
+            if opcode.name == "STOP":
+                stop_at = pos + 1
+                break
+    except Exception:
+        pass
+
+    if stop_at is None:
+        # No complete pickle in view. Worth a bigger read only if something
+        # actually parsed; a file that yielded nothing is simply not a pickle.
+        return (False, parsed > 0)
+
+    try:
+        pickletools.dis(io.BytesIO(data[:stop_at]), out=_NullWriter())
+    except Exception:
+        return (False, False)
+    return (True, False)

@@ -29,8 +29,8 @@
       "strict": "detected"
     },
     "cve-2025-1889-nonstandard-extension": {
-      "blocklist": "missed",
-      "strict": "missed"
+      "blocklist": "detected",
+      "strict": "detected"
     },
     "cve-2025-1944-zip-filename-tamper": {
       "blocklist": "detected",

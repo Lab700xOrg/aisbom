@@ -13,6 +13,7 @@ from aisbom import protobuf_reader as pb
 from aisbom.safety import (
     PICKLE_SCAN_INCOMPLETE,
     _threat_kind as _jinja_threat_kind,
+    head_looks_like_pickle,
     jinja_threats_are_critical,
     looks_like_pickle_stream,
     onnx_domain_is_custom,
@@ -43,6 +44,20 @@ PICKLE_VARIANT_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill', '.npy', '.np
 # HTTP Range request per call and gets the tighter one.
 PICKLE_VARIANT_MAX_SCAN_BYTES = 16 * 1024 * 1024
 PICKLE_VARIANT_MAX_REMOTE_SCAN_BYTES = 2 * 1024 * 1024
+
+# Discovery by content, for files no extension claims (CVE-2025-1889). The
+# attacker names the file, so the suffix cannot be the thing that decides
+# whether we look inside it. Every unclaimed file gets its head disassembled.
+#
+# The first read is small because it is paid on *every* unclaimed file in a
+# tree — the READMEs, the parquet, the images. Non-pickles are rejected here
+# for a few kilobytes: they hold no valid pickle and are never re-read.
+PICKLE_SNIFF_BYTES = 64 * 1024
+# A head that *did* parse opcodes cleanly and then ran out of data may be a
+# real pickle whose STOP sits past the window, so it earns a larger read. The
+# ceiling is the variant inspector's own budget on purpose: discovery is
+# exactly as far-sighted as the inspection that follows it, never further.
+PICKLE_SNIFF_MAX_BYTES = PICKLE_VARIANT_MAX_SCAN_BYTES
 
 # How many members of an `.npz` are opened. An archive is attacker-controlled,
 # so the member count is bounded like every other declared length.
@@ -325,9 +340,58 @@ class DeepScanner:
             self.artifacts.append(self._inspect_pickle_variant(full_path))
         elif full_path.name == REQUIREMENTS_FILENAME:
             self._parse_requirements(full_path)
+        elif self._sniff_is_pickle(full_path):
+            # Nothing claimed this file by name, but its bytes read as a
+            # pickle. This is the CVE-2025-1889 class: `config.p`, `weights.dat`,
+            # a file with no extension at all. The inspector below already
+            # decides what a file *is* from its contents rather than its
+            # suffix — only discovery was still trusting the name.
+            self.artifacts.append(self._inspect_pickle_variant(full_path))
         else:
             return False
         return True
+
+    def _sniff_is_pickle(self, full_path: Path) -> bool:
+        """Decide by content whether an unclaimed file is a pickle.
+
+        Reads a small head first and gives up on it unless opcodes actually
+        parsed, which is what keeps a walk over a tree full of parquet and PNGs
+        cheap: those yield zero opcodes and are never opened a second time.
+
+        Known limit, stated rather than hidden: a pickle whose *first* opcode
+        carries an argument longer than the whole sniff budget parses zero
+        opcodes here and is not discovered by content. Reaching that requires
+        a single 16MB-plus literal ahead of the payload. Files carrying a
+        recognized model extension are unaffected — they never reach this path.
+        """
+        try:
+            size = full_path.stat().st_size
+        except OSError:
+            return False
+        if not size:
+            return False
+
+        budget = PICKLE_SNIFF_BYTES
+        while True:
+            try:
+                with open(full_path, "rb") as handle:
+                    head = handle.read(min(budget, PICKLE_SNIFF_MAX_BYTES))
+            except OSError:
+                return False
+
+            verdict, truncated = head_looks_like_pickle(head)
+            if verdict:
+                return True
+            # Settled: either the head held a complete pickle and it failed
+            # validation, or nothing parsed at all. Reading more cannot change
+            # the answer. This is the branch nearly every file in a real
+            # repository takes.
+            if not truncated:
+                return False
+            # We saw the whole file, or spent the budget.
+            if len(head) >= size or budget >= PICKLE_SNIFF_MAX_BYTES:
+                return False
+            budget *= 8
 
     def _record_target_error(self, target: str, message: str) -> None:
         """Record an unusable scan target as a structured, non-fatal error.

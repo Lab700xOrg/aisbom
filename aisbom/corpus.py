@@ -313,14 +313,6 @@ CASES: tuple[BypassCase, ...] = (
             "so nothing is scanned. Fixed in picklescan 0.0.22."
         ),
         builder=_build_nonstandard_extension,
-        limitation=(
-            "The only outright miss in the corpus: the scan reports `No AI models found` "
-            "and emits zero artifacts, so a user gets a clean run on a file carrying a "
-            "payload. Nothing subtle blocks this — discovery is extension-driven and "
-            "`.p` is not on the list. picklescan closed it in 0.0.22 and AIsbom has not, "
-            "which is precisely why the case stays on the scorecard at "
-            "`expected=detected`."
-        ),
     ),
     BypassCase(
         id="cve-2025-1944-zip-filename-tamper",
