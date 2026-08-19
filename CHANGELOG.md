@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.3.2 — 2026-08-18
 
-> **New components in your SBOM.** Five extensions that were previously skipped are now scanned, so a repo containing them will produce more components than before and may newly exit `2`. Nothing that was already scanned changes verdict — the old-vs-new differential across the bypass corpus and 134 fixture verdicts is empty in both modes, and the scorecard holds at 8/11.
+> **New components in your SBOM.** Five extensions that were previously skipped are now scanned, *and* files carrying no recognized extension at all are now opened when their bytes are a pickle — so a repo containing them will produce more components than before and may newly exit `2`. Nothing that was already scanned changes verdict — the old-vs-new differential across the bypass corpus and 134 fixture verdicts is empty in both modes. The scorecard moves from 8/11 to 9/11.
+
+### Security
+
+- **A payload no longer hides behind an unexpected file extension** (CVE-2025-1889 class). Discovery decided what to open from a file's suffix alone, so a pickle named `config.p` — or `weights.dat`, or a file with no extension — was never opened, and the scan reported "No AI models found" and exited `0`. A clean bill of health on a directory carrying a reverse shell. Files nothing claims by name are now identified by content.
+
+  Adding `.p` to the extension list was deliberately rejected: the technique is *any* unexpected suffix, and the attacker picks the name. The check validates the pickle stack rather than trusting that bytes parse as opcodes — `.` is the STOP opcode, so a weaker "reaches STOP" rule claimed JavaScript, stylesheets and a man page when measured against a real `node_modules`. Validation runs on the prefix ending at the first STOP, so a payload followed by a corrupt tail is still caught rather than discarded with its own garbage.
+
+  Reads are bounded — 64KB per unclaimed file, escalating only for a stream that parses cleanly and has not yet ended, capped at the same budget the inspector uses. Known limit: a pickle whose *first* opcode carries an argument larger than that entire budget is not discovered by content.
 
 ### New formats scanned
 
