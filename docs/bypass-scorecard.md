@@ -7,7 +7,7 @@ past a model scanner, reproduced here as an inert artifact and scanned with
 AIsbom's own engine. Artifacts are synthesized, never copied from live malware,
 and are only ever disassembled — no pickle in this corpus is executed.
 
-**8 of 11** evasion cases are caught in at least one scan mode.
+**9 of 11** evasion cases are caught in at least one scan mode.
 
 `blocklist` is the default mode (flag known-dangerous globals); `strict` is
 `--strict` (allowlist — anything unrecognized is flagged). A ⚠️ partial means
@@ -21,7 +21,7 @@ reports the wrong reason.
 | `nullifai-7z-container`<br>Model packed with 7z instead of ZIP | container-format | ⚠️ partial | ⚠️ partial | [ReversingLabs — nullifAI (malicious models on Hugging Face)](https://www.reversinglabs.com/blog/rl-identifies-malware-ml-model-hosted-on-hugging-face) |
 | `nullifai-broken-stream`<br>Deliberately broken pickle stream, payload first | broken-stream | ✅ detected | ✅ detected | [ReversingLabs — nullifAI (malicious models on Hugging Face)](https://www.reversinglabs.com/blog/rl-identifies-malware-ml-model-hosted-on-hugging-face) |
 | `cve-2025-1716-pip-main`<br>Code execution via pip.main() | unlisted-global | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1716](https://www.sonatype.com/security-advisories/cve-2025-1716) |
-| `cve-2025-1889-nonstandard-extension`<br>Payload in a file with a non-standard extension | file-extension | ❌ missed | ❌ missed | [Sonatype — CVE-2025-1889](https://www.sonatype.com/security-advisories/cve-2025-1889) |
+| `cve-2025-1889-nonstandard-extension`<br>Payload in a file with a non-standard extension | file-extension | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1889](https://www.sonatype.com/security-advisories/cve-2025-1889) |
 | `cve-2025-1944-zip-filename-tamper`<br>ZIP local-header filename differs from the central directory | zip-tampering | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1944](https://www.sonatype.com/security-advisories/cve-2025-1944) |
 | `cve-2025-1945-zip-flag-bits`<br>ZIP general-purpose flag bits modified | zip-tampering | ✅ detected | ✅ detected | [Sonatype — CVE-2025-1945](https://www.sonatype.com/security-advisories/cve-2025-1945) |
 | `cve-2025-10155-extension-confusion`<br>Bare pickle wearing a PyTorch extension | file-extension | ✅ detected | ✅ detected | [JFrog — CVE-2025-10155](https://jfrog.com/blog/unveiling-3-zero-day-vulnerabilities-in-picklescan/) |
@@ -88,8 +88,6 @@ Reaches execution through a global nobody thought to blocklist: pip.main() insta
 **A correct scanner should:** detected
 
 The pickle is named config.p. Extension-driven discovery never opens it, so nothing is scanned. Fixed in picklescan 0.0.22.
-
-**Current limitation:** The only outright miss in the corpus: the scan reports `No AI models found` and emits zero artifacts, so a user gets a clean run on a file carrying a payload. Nothing subtle blocks this — discovery is extension-driven and `.p` is not on the list. picklescan closed it in 0.0.22 and AIsbom has not, which is precisely why the case stays on the scorecard at `expected=detected`.
 
 ### `cve-2025-1944-zip-filename-tamper` — ZIP local-header filename differs from the central directory
 
