@@ -723,14 +723,14 @@ files = [
 
 [[package]]
 name = "dill"
-version = "0.3.9"
+version = "0.4.1"
 description = "serialize all of Python"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "dill-0.3.9-py3-none-any.whl", hash = "sha256:468dff3b89520b474c0397703366b7b95eebe6303f108adf9b19da1f702be87a"},
-    {file = "dill-0.3.9.tar.gz", hash = "sha256:81aa267dddf68cbfe8029c42ca9ec6a4ab3b22371d1c450abc54422577b4512c"},
+    {file = "dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d"},
+    {file = "dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa"},
 ]
 
 [package.extras]
@@ -1045,7 +1045,7 @@ files = [
 
 [package.dependencies]
 numpy = [
-    {version = ">=2.0.0", markers = "python_version < \"3.13\""},
+    {version = ">=2.0.0"},
     {version = ">=2.1.0", markers = "python_version == \"3.13\""},
     {version = ">=2.3.0", markers = "python_version >= \"3.14\""},
 ]
@@ -2139,4 +2139,4 @@ test = ["pytest", "pytest-cov"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "748e1137426250ea7ca4cfc50e30af452e6d2a52587c90ce982deb2b66560468"
+content-hash = "468a275f8175943c9f9346caa81499ccaf3f753aef266cfc7006b91ebfdfc310"
