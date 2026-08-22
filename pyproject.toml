@@ -32,7 +32,7 @@ onnx = "^1.17"
 # here to generate realistic artifacts and to cross-validate the hand-written
 # parsers in both directions.
 joblib = "^1.4"
-dill = "^0.3.8"
+dill = ">=0.3.8,<0.5.0"
 numpy = "^2.0"
 [build-system]
 requires = ["poetry-core"]
