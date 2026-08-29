@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **A 64KB literal ahead of a payload no longer hides it from discovery.** v1.3.2 identifies unclaimed files by content, reading a 64KB head and re-reading with a larger budget only when that head looked like an unfinished pickle. The signal for "unfinished" was *at least one opcode parsed* — and a pickle that opens with a single literal bigger than the first read completes **no** opcodes, so the larger read never happened and the file was never discovered.
+
+  The practical effect: the limit v1.3.2 documented as needing "a 16MB-plus literal" was in fact reachable with roughly **64KB**. Measured on the released code, a 65,000-byte pad was caught and a 70,000-byte pad was not.
+
+  Discovery now also re-reads when the first opcode declares an argument that runs past the buffer. Length-prefixed arguments are read exactly; newline-terminated ones are admitted only for the few opcodes that can genuinely begin a pickle, and only when the following byte matches what that opcode's argument must start with — which is what keeps a parquet file (`PAR1`, where `P` is a valid opcode byte) from being re-read to the cap. The documented 16MB ceiling is now the real one: verified caught at 16,773,120 bytes and not discovered at 16,781,312.
+
+  Only affects files whose extension nothing claims. A padded payload under a recognized extension was always caught.
+
 ## 1.3.2 — 2026-08-18
 
 > **New components in your SBOM.** Five extensions that were previously skipped are now scanned, *and* files carrying no recognized extension at all are now opened when their bytes are a pickle — so a repo containing them will produce more components than before and may newly exit `2`. Nothing that was already scanned changes verdict — the old-vs-new differential across the bypass corpus and 134 fixture verdicts is empty in both modes. The scorecard moves from 8/11 to 9/11.

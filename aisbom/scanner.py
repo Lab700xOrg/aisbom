@@ -354,15 +354,23 @@ class DeepScanner:
     def _sniff_is_pickle(self, full_path: Path) -> bool:
         """Decide by content whether an unclaimed file is a pickle.
 
-        Reads a small head first and gives up on it unless opcodes actually
-        parsed, which is what keeps a walk over a tree full of parquet and PNGs
-        cheap: those yield zero opcodes and are never opened a second time.
+        Reads a small head first and re-reads with a larger budget only when
+        that head looked like an unfinished pickle, which is what keeps a walk
+        over a tree full of parquet and PNGs cheap: those settle on the first
+        read and are never opened a second time.
 
-        Known limit, stated rather than hidden: a pickle whose *first* opcode
-        carries an argument longer than the whole sniff budget parses zero
-        opcodes here and is not discovered by content. Reaching that requires
-        a single 16MB-plus literal ahead of the payload. Files carrying a
-        recognized model extension are unaffected — they never reach this path.
+        Two things can leave a head unfinished, and both must count. Opcodes
+        may parse cleanly without reaching STOP — an ordinary large pickle. Or
+        *no* opcode completes because the first one carries an argument running
+        past the buffer; `_first_argument_overruns` recognizes that case. The
+        original rule counted only the first, so one 64KB literal ahead of a
+        payload hid it from discovery entirely while the documented limit
+        claimed 16MB.
+
+        Known limit, stated rather than hidden: past PICKLE_SNIFF_MAX_BYTES we
+        stop looking, so a payload behind a literal larger than that is not
+        discovered by content. Files carrying a recognized model extension are
+        unaffected — they never reach this path.
         """
         try:
             size = full_path.stat().st_size

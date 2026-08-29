@@ -1158,6 +1158,77 @@ class _NullWriter:
         pass
 
 
+# Opcodes whose argument runs to a newline and can plausibly *start* a real
+# pickle while carrying a lot of bytes. Each maps to the characters its
+# argument legitimately begins with, so a file is only re-read when its second
+# byte is consistent with the opcode its first byte claims to be.
+#
+# This guard is why a parquet file is not re-read: it opens `PAR1`, and while
+# `P` is the PERSID opcode, PERSID is not on this list — no real pickle starts
+# with a persistent id, and accepting it would mean re-reading every parquet,
+# ORC and arrow file in a tree up to the sniff cap.
+_NEWLINE_ARG_STARTS = {
+    "S": b"'\"",                  # STRING — always quoted
+    "V": None,                    # UNICODE — raw text, no reliable lead byte
+    "I": b"0123456789+-",         # INT
+    "L": b"0123456789+-",         # LONG
+    "F": b"0123456789+-.",        # FLOAT
+}
+
+
+def _first_argument_overruns(data: bytes) -> bool:
+    """Does `data`'s first opcode declare an argument longer than `data`?
+
+    Discovery reads a bounded head and only re-reads when the head looked like
+    an unfinished pickle. "At least one opcode parsed" is the usual signal, but
+    a pickle that opens with a single huge literal completes *no* opcodes — so
+    without this check a payload hidden behind one 64KB literal is never found,
+    while the documented limit claims 16MB. Measured before it was fixed: a
+    65,000-byte pad was caught and a 70,000-byte pad was not.
+
+    Length-prefixed arguments are read exactly. Newline-terminated ones cannot
+    be measured without the newline, so they are admitted only for the handful
+    of opcodes that can really begin a pickle, and only when the following byte
+    matches what that opcode's argument must start with.
+    """
+    if not data:
+        return False
+    op = pickletools.code2op.get(chr(data[0]))
+    if op is None or op.arg is None:
+        return False
+
+    n = op.arg.n
+    if n >= 0:
+        # A fixed-width argument. These are a handful of bytes; they cannot be
+        # what overran a 64KB read.
+        return False
+
+    if n == pickletools.UP_TO_NEWLINE:
+        if op.code not in _NEWLINE_ARG_STARTS:
+            return False
+        if b"\n" in data:
+            # The terminator is already in view, so the argument is not what
+            # ran off the end — something else failed, and re-reading will not
+            # change that.
+            return False
+        lead = _NEWLINE_ARG_STARTS[op.code]
+        return lead is None or (len(data) > 1 and data[1] in lead)
+
+    # Length-prefixed: read the declared size and believe it only far enough to
+    # decide whether a bigger read would reach the end of the argument.
+    widths = {
+        pickletools.TAKEN_FROM_ARGUMENT1: 1,
+        pickletools.TAKEN_FROM_ARGUMENT4: 4,
+        pickletools.TAKEN_FROM_ARGUMENT4U: 4,
+        pickletools.TAKEN_FROM_ARGUMENT8U: 8,
+    }
+    width = widths.get(n)
+    if width is None or len(data) < 1 + width:
+        return False
+    declared = int.from_bytes(data[1 : 1 + width], "little")
+    return 1 + width + declared > len(data)
+
+
 def head_looks_like_pickle(data: bytes) -> tuple[bool, bool]:
     """Does the head of a file begin with a genuinely valid pickle?
 
@@ -1201,9 +1272,11 @@ def head_looks_like_pickle(data: bytes) -> tuple[bool, bool]:
         pass
 
     if stop_at is None:
-        # No complete pickle in view. Worth a bigger read only if something
-        # actually parsed; a file that yielded nothing is simply not a pickle.
-        return (False, parsed > 0)
+        # No complete pickle in view. Worth a bigger read if something parsed
+        # — or if nothing parsed *because* the very first opcode carries an
+        # argument that runs off the end of the buffer, which is the one way a
+        # genuine pickle yields no opcodes at all.
+        return (False, parsed > 0 or _first_argument_overruns(data))
 
     try:
         pickletools.dis(io.BytesIO(data[:stop_at]), out=_NullWriter())
