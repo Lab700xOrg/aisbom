@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.3 — 2026-08-29
 
 ### Security
 
@@ -23,6 +23,8 @@
   Adding `.p` to the extension list was deliberately rejected: the technique is *any* unexpected suffix, and the attacker picks the name. The check validates the pickle stack rather than trusting that bytes parse as opcodes — `.` is the STOP opcode, so a weaker "reaches STOP" rule claimed JavaScript, stylesheets and a man page when measured against a real `node_modules`. Validation runs on the prefix ending at the first STOP, so a payload followed by a corrupt tail is still caught rather than discarded with its own garbage.
 
   Reads are bounded — 64KB per unclaimed file, escalating only for a stream that parses cleanly and has not yet ended, capped at the same budget the inspector uses. Known limit: a pickle whose *first* opcode carries an argument larger than that entire budget is not discovered by content.
+
+  > **Correction (1.3.3).** The limit described immediately above was wrong as published. Because escalation required at least one opcode to parse, a pickle opening with a single literal larger than the *first 64KB read* completed no opcodes and was never re-read — so the threshold was roughly **64KB**, not the 16MB stated here. Fixed in 1.3.3; the 16MB ceiling is now the real one.
 
 ### New formats scanned
 
