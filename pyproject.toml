@@ -11,7 +11,11 @@ urls = { "Homepage" = "https://www.aisbom.io/" }
 python = "^3.11"
 typer = {extras = ["all"], version = ">=0.12.5,<0.28.0"}
 rich = ">=13.7.1,<16.0.0"
-cyclonedx-python-lib = ">=8.5,<12.0"
+# Floor is 11.4, the first release exporting JsonV1Dot7 / SchemaVersion.V1_7
+# (upstream PR #902). cli.py imports the 1.7 serializer unconditionally, so a
+# resolver that left an older-but-previously-allowed version installed would
+# break the CLI at startup for every format, not just 1.7 output.
+cyclonedx-python-lib = ">=11.4,<12.0"
 pip-requirements-parser = "^32.0.1"
 click = "<8.5.0"
 spdx-tools = "^0.8.3"

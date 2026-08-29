@@ -192,6 +192,26 @@ def build_model_card(
     return card or None
 
 
+def bom_ref_for(index: int, art: Dict[str, Any]) -> str:
+    """Stable `bom-ref` for a scanned artifact, used as the injection join key.
+
+    Both sides must derive this identically: ``cli.py`` stamps it onto the
+    Component at construction, and :func:`inject_model_cards` looks it up in
+    the serialized document.
+
+    The index is load-bearing, not decoration. Artifact names are file
+    *basenames*, so a tree holding two ``model.gguf`` files in different
+    directories yields two components with the same name — and the library
+    serializes its component collection in its own sorted order, not scan
+    order. Joining on name alone could therefore hand a llama model's card to
+    a bert component, producing a document whose `aisbom:gguf:architecture`
+    property contradicts its own `modelCard`. The index is the only field that
+    is unique across artifacts in every scan shape (remote scans share the
+    `remote_unhashed` sentinel, so the hash cannot serve).
+    """
+    return f"artifact-{index}-{art.get('name', 'unknown')}"
+
+
 def inject_model_cards(
     bom_json: str,
     artifacts: List[Dict[str, Any]],
@@ -199,16 +219,8 @@ def inject_model_cards(
 ) -> str:
     """Splice ``modelCard`` blocks into a serialized CycloneDX document.
 
-    Matching is by component name against the artifact's name, FIFO within a
-    name group. Names are file basenames, so a repo with two same-named files
-    in different directories produces a collision — but such files come from
-    one HF repo and share its metadata, so the cards are equal and the order
-    within the group cannot change the output.
-
-    `bom-ref` is deliberately not used as the join key: it is a random UUID per
-    run today, and pinning it to something deterministic would change a field
-    that already ships, breaking the additive-only guarantee this slice is
-    held to.
+    Joined on the `bom-ref` that ``cli.py`` stamped on each model component —
+    see :func:`bom_ref_for` for why a name-based join is not sufficient.
 
     Returns the input unchanged if it does not parse or has no components, so a
     serializer change upstream degrades to 1.6-equivalent output rather than
@@ -221,17 +233,13 @@ def inject_model_cards(
     if not isinstance(doc, dict) or not isinstance(doc.get("components"), list):
         return bom_json
 
-    queued: Dict[str, List[Dict[str, Any]]] = {}
-    for art in artifacts:
+    cards_by_ref: Dict[str, Dict[str, Any]] = {}
+    for index, art in enumerate(artifacts):
         card = build_model_card(art, hf_meta)
-        if card is None:
-            continue
-        name = art.get("name")
-        if not isinstance(name, str):
-            continue
-        queued.setdefault(name, []).append(card)
+        if card is not None:
+            cards_by_ref[bom_ref_for(index, art)] = card
 
-    if not queued:
+    if not cards_by_ref:
         return bom_json
 
     injected = False
@@ -242,10 +250,10 @@ def inject_model_cards(
         # never grow a modelCard.
         if component.get("type") != _ML_COMPONENT_TYPE:
             continue
-        pending = queued.get(component.get("name"))
-        if not pending:
+        card = cards_by_ref.get(component.get("bom-ref"))
+        if card is None:
             continue
-        component["modelCard"] = pending.pop(0)
+        component["modelCard"] = card
         injected = True
 
     if not injected:

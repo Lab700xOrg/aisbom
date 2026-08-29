@@ -20,7 +20,7 @@ import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
 from .properties import build_component_properties
-from .modelcard import inject_model_cards
+from .modelcard import bom_ref_for, inject_model_cards
 from .spdx_gen import _sha256_or_none
 
 import threading
@@ -663,10 +663,16 @@ def scan(
     lf = LicenseFactory()
     
     # Add Models
-    for art in results['artifacts']:
+    for art_index, art in enumerate(results['artifacts']):
         c = Component(
             name=art['name'],
             type=ComponentType.MACHINE_LEARNING_MODEL,
+            # An explicit, stable bom-ref. Left to the library this is a fresh
+            # random string on every run, which nothing downstream can rely on
+            # and which cannot be computed ahead of serialization — so the
+            # modelCard splice would have no identifier to join on and would
+            # fall back to matching by basename, which collides (#111).
+            bom_ref=bom_ref_for(art_index, art),
             description=f"Risk: {art['risk_level']} | Framework: {art['framework']} | Legal: {art['legal_status']} | License: {art.get('license')}"
         )
         # Add SHA256 Hash only when the field actually holds one. The scanner

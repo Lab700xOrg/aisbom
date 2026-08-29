@@ -23,7 +23,7 @@ from cyclonedx.output.json import JsonV1Dot6, JsonV1Dot7
 from cyclonedx.schema import SchemaVersion
 from cyclonedx.validation.json import JsonStrictValidator
 
-from aisbom.modelcard import build_model_card, inject_model_cards
+from aisbom.modelcard import bom_ref_for, build_model_card, inject_model_cards
 
 
 # --- Fixtures -------------------------------------------------------------
@@ -70,13 +70,19 @@ def validate_1_7(doc):
 
 
 def build_sbom(artifacts, outputter=JsonV1Dot7):
-    """Serialize artifacts the way cli.py does, without invoking the CLI."""
+    """Serialize artifacts the way cli.py does, without invoking the CLI.
+
+    The `bom_ref` stamping mirrors cli.py exactly — it is the join key the
+    splice relies on, so a helper that skipped it would test a document shape
+    the CLI never produces.
+    """
     bom = Bom()
-    for art in artifacts:
+    for index, art in enumerate(artifacts):
         bom.components.add(
             Component(
                 name=art["name"],
                 type=ComponentType.MACHINE_LEARNING_MODEL,
+                bom_ref=bom_ref_for(index, art),
                 description=f"Risk: {art['risk_level']} | Framework: {art['framework']}",
             )
         )
@@ -209,28 +215,97 @@ def test_injects_into_the_matching_model_component():
 
 
 def test_library_components_never_receive_a_model_card():
+    """The component-type check is the only thing guarding this.
+
+    The library component is deliberately handed the exact bom-ref the splice
+    will look up, so if the type check were dropped it would receive the card.
+    """
+    arts = [artifact(name="model.safetensors")]
     bom = Bom()
-    bom.components.add(Component(name="numpy", version="2.1.0", type=ComponentType.LIBRARY))
-    bom.components.add(Component(name="model.safetensors", type=ComponentType.MACHINE_LEARNING_MODEL))
-    arts = [artifact(name="model.safetensors"), artifact(name="numpy")]
+    bom.components.add(
+        Component(
+            name="numpy",
+            version="2.1.0",
+            bom_ref=bom_ref_for(0, arts[0]),
+            type=ComponentType.LIBRARY,
+        )
+    )
 
     out = json.loads(inject_model_cards(JsonV1Dot7(bom).output_as_string(), arts, FULL_HF_META))
-    by_name = {c["name"]: c for c in out["components"]}
-    assert "modelCard" in by_name["model.safetensors"]
-    assert "modelCard" not in by_name["numpy"], "a library is not a model"
+    (numpy_component,) = out["components"]
+    assert "modelCard" not in numpy_component, "a library is not a model"
 
 
 def test_same_named_artifacts_each_get_a_card():
     """Basename collisions across directories: one card each, not one total."""
-    bom = Bom()
-    for bom_ref in ("a", "b"):
-        bom.components.add(
-            Component(name="model.bin", bom_ref=bom_ref, type=ComponentType.MACHINE_LEARNING_MODEL)
-        )
     arts = [artifact(name="model.bin"), artifact(name="model.bin")]
-
-    out = json.loads(inject_model_cards(JsonV1Dot7(bom).output_as_string(), arts, FULL_HF_META))
+    out = json.loads(inject_model_cards(build_sbom(arts), arts, FULL_HF_META))
     assert all("modelCard" in c for c in out["components"])
+
+
+def test_same_named_artifacts_keep_their_own_cards():
+    """Regression: a name-based join handed one file's card to the other.
+
+    Two `model.gguf` files in different directories with *different*
+    architectures. The library serializes its component collection in its own
+    sorted order, not scan order, so a basename join popping FIFO could
+    produce a component whose `aisbom:gguf:architecture` property contradicts
+    its own `modelCard`.
+
+    Serialization order is deliberately forced *opposite* to scan order here —
+    that is the condition under which the old join silently swapped the cards.
+    Caught by Codex on PR #97; the original test gave both artifacts identical
+    HF metadata, so the swap was invisible.
+    """
+    arts = [
+        artifact(name="model.gguf", framework="GGUF", architecture="llama"),
+        artifact(name="model.gguf", framework="GGUF", architecture="bert"),
+    ]
+    # Refs chosen so the serialized order is the reverse of the scan order.
+    bom = Bom()
+    for ref, art in zip(("zzz", "aaa"), arts):
+        bom.components.add(
+            Component(name=art["name"], bom_ref=ref, type=ComponentType.MACHINE_LEARNING_MODEL)
+        )
+    serialized = json.loads(JsonV1Dot7(bom).output_as_string())
+    assert [c["bom-ref"] for c in serialized["components"]] == ["aaa", "zzz"], (
+        "fixture precondition: serialized order must be reversed vs scan order"
+    )
+
+    # With the real (cli.py-matching) refs, each card lands on its own file
+    # regardless of what order the serializer chose.
+    out = json.loads(inject_model_cards(build_sbom(arts), arts, None))
+    by_ref = {c["bom-ref"]: c for c in out["components"]}
+    assert by_ref["artifact-0-model.gguf"]["modelCard"]["modelParameters"] == {
+        "architectureFamily": "llama"
+    }
+    assert by_ref["artifact-1-model.gguf"]["modelCard"]["modelParameters"] == {
+        "architectureFamily": "bert"
+    }
+
+
+def test_bom_refs_are_stable_across_runs():
+    """The join key must not be a fresh random string on every scan.
+
+    Left to the library, `bom-ref` is regenerated per run — which is both why
+    the splice could not use it before and why nothing downstream could rely
+    on it to identify an artifact between scans.
+    """
+    arts = [artifact(name="a.pt"), artifact(name="b.gguf")]
+    first = [c["bom-ref"] for c in json.loads(build_sbom(arts))["components"]]
+    second = [c["bom-ref"] for c in json.loads(build_sbom(arts))["components"]]
+    assert first == second == ["artifact-0-a.pt", "artifact-1-b.gguf"]
+
+
+def test_a_component_with_no_matching_artifact_gets_no_card():
+    """A component the splice cannot identify is left alone, never guessed at."""
+    bom = Bom()
+    bom.components.add(
+        Component(name="stranger.pt", bom_ref="not-an-artifact-ref", type=ComponentType.MACHINE_LEARNING_MODEL)
+    )
+    arts = [artifact(name="stranger.pt")]
+    out = json.loads(inject_model_cards(JsonV1Dot7(bom).output_as_string(), arts, FULL_HF_META))
+    assert "modelCard" not in out["components"][0]
 
 
 def test_no_cards_returns_the_input_byte_for_byte():

@@ -70,7 +70,7 @@ A compliant `sbom.json` (CycloneDX v1.7 / ECMA-424) including SHA256 hashes and 
 
 For `hf://` scans, each model component also carries a CycloneDX ML-BOM `modelCard` block — task, architecture family, model architecture, and training datasets, read from the model's Hugging Face metadata. Local scans get whatever the file itself declares (a GGUF header's architecture, for example) and make no extra network calls. The block is simply omitted when nothing is known.
 
-Need the older schema for a downstream tool? `--schema-version 1.6` (or `1.5`) still works and produces the same document as before, without the `modelCard` block.
+Need the older schema for a downstream tool? `--schema-version 1.6` (or `1.5`) still works, without the `modelCard` block. One thing changed for those versions too: each model component's `bom-ref` is now a stable `artifact-<n>-<filename>` instead of a value regenerated on every run, so the same file keeps the same identifier between scans.
 
 ### Formats and what's checked in each
 
