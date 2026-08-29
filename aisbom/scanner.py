@@ -213,7 +213,7 @@ NONSTANDARD_CONTAINER_MAGICS = (
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 
-from aisbom.remote import RemoteStream, resolve_huggingface_repo
+from aisbom.remote import RemoteStream, fetch_huggingface_model_card, resolve_huggingface_repo
 
 
 class _GGUFTruncated(Exception):
@@ -228,6 +228,10 @@ class DeepScanner:
         self.artifacts = []
         self.dependencies = []
         self.errors = []
+        # HF model-card metadata for an `hf://` target (#111). Stays None for
+        # every other target shape, which is what guarantees a local scan makes
+        # no network call.
+        self.hf_model_card = None
         self.is_remote = isinstance(root_path, str) and (
             root_path.startswith("http://")
             or root_path.startswith("https://")
@@ -245,6 +249,15 @@ class DeepScanner:
             except Exception as e:
                 self._record_fetch_error(self.root_path, e)
                 targets = []
+
+            # Enrichment only (#111), and only for hf:// — a plain https:// URL
+            # is a single file with no repo to describe. Fetched once per scan
+            # rather than per artifact, and never allowed to raise: see
+            # fetch_huggingface_model_card for why this failure is swallowed
+            # while the file-listing failure above is not.
+            if targets and self.root_path.startswith("hf://"):
+                self.hf_model_card = fetch_huggingface_model_card(self.root_path)
+
             for url in targets:
                 ext = Path(url).suffix.lower()
                 # Per-target isolation: one gated/missing file in a multi-file
@@ -308,7 +321,12 @@ class DeepScanner:
                     else "Not a regular file or directory",
                 )
 
-        return {"artifacts": self.artifacts, "dependencies": self.dependencies, "errors": self.errors}
+        return {
+            "artifacts": self.artifacts,
+            "dependencies": self.dependencies,
+            "errors": self.errors,
+            "hf_model_card": self.hf_model_card,
+        }
 
     def _resolve_remote_targets(self, target: str):
         if target.startswith("hf://"):

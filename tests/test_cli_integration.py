@@ -138,6 +138,158 @@ def test_cli_scan_schema_v15_branch(tmp_path):
     assert output_path.exists()
 
 
+# ---------------------------------------------------------------------------
+# #111 — CycloneDX 1.7 is the default output.
+# ---------------------------------------------------------------------------
+
+
+def _scan_to_sbom(tmp_path, name, *extra_args):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+    output_path = tmp_path / name
+    result = runner.invoke(
+        app, ["scan", str(tmp_path), "--output", str(output_path), *extra_args]
+    )
+    assert result.exit_code == 2
+    return json.loads(output_path.read_text())
+
+
+def test_cli_scan_defaults_to_cyclonedx_1_7(tmp_path):
+    sbom = _scan_to_sbom(tmp_path, "default.json")
+    assert sbom["specVersion"] == "1.7"
+    assert sbom["bomFormat"] == "CycloneDX"
+
+
+def test_cli_scan_explicit_1_6_still_emits_1_6_without_model_cards(tmp_path):
+    """Pinning the old version keeps the exact pre-#111 document shape."""
+    sbom = _scan_to_sbom(tmp_path, "pinned.json", "--schema-version", "1.6")
+    assert sbom["specVersion"] == "1.6"
+    assert all("modelCard" not in c for c in sbom["components"])
+
+
+def test_local_gguf_scan_carries_a_model_card_with_no_network(tmp_path):
+    """AC: local scans benefit too — the family comes from the GGUF header.
+
+    Uses a GGUF that actually declares `general.architecture`; the shared mock
+    fixture only carries a license key, so it legitimately yields no card.
+    """
+    from tests.test_gguf_template import _gguf_with_templates
+
+    _gguf_with_templates(tmp_path / "llama-model.gguf", {})
+    output_path = tmp_path / "gguf.json"
+    runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    sbom = json.loads(output_path.read_text())
+    (gguf,) = [c for c in sbom["components"] if c["name"] == "llama-model.gguf"]
+    assert gguf["modelCard"]["modelParameters"] == {"architectureFamily": "llama"}
+
+
+def test_gguf_without_an_architecture_gets_no_model_card(tmp_path):
+    """Nothing known → no empty `modelCard: {}` noise in the artifact."""
+    sbom = _scan_to_sbom(tmp_path, "sparse.json")
+    gguf = [c for c in sbom["components"] if c["name"].endswith(".gguf")]
+    assert gguf and "modelCard" not in gguf[0]
+
+
+def test_default_scan_preserves_every_1_6_component_field(tmp_path):
+    """The additive guarantee, asserted through the real CLI rather than a
+    hand-built BOM: descriptions, hashes, licenses and aisbom:* properties all
+    survive the default flip untouched."""
+    old = _scan_to_sbom(tmp_path, "old.json", "--schema-version", "1.6")
+    new = _scan_to_sbom(tmp_path, "new.json")
+
+    old_by_name = {c["name"]: c for c in old["components"]}
+    new_by_name = {c["name"]: c for c in new["components"]}
+    assert set(old_by_name) == set(new_by_name)
+
+    for name, old_component in old_by_name.items():
+        for key, value in old_component.items():
+            if key == "bom-ref":
+                continue  # random UUID per run
+            assert new_by_name[name][key] == value, f"{name}.{key} regressed"
+        added = set(new_by_name[name]) - set(old_component)
+        assert added <= {"modelCard"}, f"{name} grew unexpected keys: {added}"
+
+
+def test_remote_sentinel_hashes_are_never_emitted_as_digests(tmp_path, monkeypatch):
+    """Regression: `remote_unhashed` was written into a SHA-256 hash field.
+
+    Range-request scans never read the whole file, so the scanner stores a
+    sentinel where a digest would go. The old guard only filtered
+    `hash_error`, so every hf:// SBOM carried `"content": "remote_unhashed"`
+    and failed CycloneDX validation — at 1.6 as well as 1.7. Caught by
+    validating a real `hf://` scan rather than a fixture.
+    """
+    from cyclonedx.schema import SchemaVersion
+    from cyclonedx.validation.json import JsonStrictValidator
+    import aisbom.scanner as scanner_module
+
+    def fake_scan(self):
+        return {
+            "artifacts": [
+                {
+                    "name": "remote.safetensors",
+                    "framework": "SafeTensors",
+                    "risk_level": "LOW",
+                    "legal_status": "OK",
+                    "hash": "remote_unhashed",
+                    "details": {},
+                },
+                {
+                    "name": "unreadable.pt",
+                    "framework": "PyTorch",
+                    "risk_level": "LOW",
+                    "legal_status": "OK",
+                    "hash": "hash_error",
+                    "details": {},
+                },
+                {
+                    "name": "local.gguf",
+                    "framework": "GGUF",
+                    "risk_level": "LOW",
+                    "legal_status": "OK",
+                    "hash": "a" * 64,
+                    "details": {},
+                },
+            ],
+            "dependencies": [],
+            "errors": [],
+            "hf_model_card": None,
+        }
+
+    monkeypatch.setattr(scanner_module.DeepScanner, "scan", fake_scan)
+    output_path = tmp_path / "sentinels.json"
+    runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    raw = output_path.read_text()
+    assert "remote_unhashed" not in raw
+    assert "hash_error" not in raw
+
+    by_name = {c["name"]: c for c in json.loads(raw)["components"]}
+    assert "hashes" not in by_name["remote.safetensors"], "sentinel must omit the field"
+    assert "hashes" not in by_name["unreadable.pt"]
+    assert by_name["local.gguf"]["hashes"] == [{"alg": "SHA-256", "content": "a" * 64}]
+
+    errors = JsonStrictValidator(SchemaVersion.V1_7).validate_str(raw)
+    assert errors is None, f"sentinel hashes broke 1.7 validation: {errors}"
+
+
+def test_default_scan_output_validates_against_the_1_7_schema(tmp_path):
+    """AC #1, end to end: what the CLI actually writes to disk is valid 1.7."""
+    from cyclonedx.schema import SchemaVersion
+    from cyclonedx.validation.json import JsonStrictValidator
+
+    output_path = tmp_path / "validated.json"
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_restricted_file(tmp_path)
+    create_mock_gguf(tmp_path)
+    runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+
+    errors = JsonStrictValidator(SchemaVersion.V1_7).validate_str(output_path.read_text())
+    assert errors is None, f"CLI output failed 1.7 validation: {errors}"
+
+
 def test_cli_scan_markdown_default_output(tmp_path, monkeypatch):
     _write_malicious_pt(tmp_path / "mock_malware.pt")
     create_mock_restricted_file(tmp_path)

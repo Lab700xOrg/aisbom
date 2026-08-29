@@ -34,6 +34,12 @@ onnx = "^1.17"
 joblib = "^1.4"
 dill = "^0.3.8"
 numpy = "^2.0"
+# cyclonedx-python-lib's `validation` extra. Test-only on purpose: the CLI
+# never validates its own output at runtime (that would add a hard dependency
+# and a per-scan cost to every user), but the 1.7 modelCard block is spliced
+# into the serialized JSON outside the library's type system, so the suite
+# validates generated SBOMs against the bundled schema instead.
+jsonschema = "^4.23"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
