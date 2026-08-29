@@ -11,7 +11,7 @@ from rich.panel import Panel
 from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.model import HashAlgorithm, HashType, Property
-from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6
+from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6, JsonV1Dot7
 from cyclonedx.factory.license import LicenseFactory
 from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms, create_mock_broken_file
 from pathlib import Path
@@ -20,6 +20,8 @@ import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
 from .properties import build_component_properties
+from .modelcard import bom_ref_for, inject_model_cards
+from .spdx_gen import _sha256_or_none
 
 import threading
 import time
@@ -417,7 +419,7 @@ def scan(
         ),
     ),
     output: str | None = typer.Option(None, help="Output file path"),
-    schema_version: str = typer.Option("1.6", help="CycloneDX schema version (default is 1.6)", case_sensitive=False, rich_help_panel="Advanced Options"),
+    schema_version: str = typer.Option("1.7", help="CycloneDX schema version: 1.7 (default), 1.6, or 1.5", case_sensitive=False, rich_help_panel="Advanced Options"),
     spdx_version: str = typer.Option("2.3", help="SPDX version (2.3 or 3.0)", case_sensitive=False, rich_help_panel="Advanced Options"),
     fail_on_risk: bool = typer.Option(True, help="Return exit code 2 if Critical risks are found"),
     strict: bool = typer.Option(False, help="Enable strict allowlisting mode (flags any unknown imports)"),
@@ -661,17 +663,31 @@ def scan(
     lf = LicenseFactory()
     
     # Add Models
-    for art in results['artifacts']:
+    for art_index, art in enumerate(results['artifacts']):
         c = Component(
             name=art['name'],
             type=ComponentType.MACHINE_LEARNING_MODEL,
+            # An explicit, stable bom-ref. Left to the library this is a fresh
+            # random string on every run, which nothing downstream can rely on
+            # and which cannot be computed ahead of serialization — so the
+            # modelCard splice would have no identifier to join on and would
+            # fall back to matching by basename, which collides (#111).
+            bom_ref=bom_ref_for(art_index, art),
             description=f"Risk: {art['risk_level']} | Framework: {art['framework']} | Legal: {art['legal_status']} | License: {art.get('license')}"
         )
-        # Add SHA256 Hash if available
-        if 'hash' in art and art['hash'] != 'hash_error':
+        # Add SHA256 Hash only when the field actually holds one. The scanner
+        # stores the sentinels `remote_unhashed` (range-request scans never
+        # read the whole file) and `hash_error` in the same field, and the old
+        # `!= 'hash_error'` guard let `remote_unhashed` through as a SHA-256
+        # digest — which made every hf:// SBOM fail CycloneDX validation, at
+        # 1.6 as well as 1.7. Reuses spdx_gen's predicate, which already had to
+        # solve this for SPDX (#101), rather than blacklisting sentinel names:
+        # a sentinel added later would silently reintroduce the bug.
+        digest = _sha256_or_none(art.get('hash'))
+        if digest:
             c.hashes.add(HashType(
                 alg=HashAlgorithm.SHA_256,
-                content=art['hash']
+                content=digest
             ))
         # Add License info to SBOM if known
         if art.get('license') and art['license'] != 'Unknown':
@@ -708,11 +724,26 @@ def scan(
     if format == OutputFormat.JSON:
         if schema_version == "1.5":
             outputter = JsonV1Dot5(bom)
-        else:
+        elif schema_version == "1.6":
             outputter = JsonV1Dot6(bom)
-            
+        else:
+            outputter = JsonV1Dot7(bom)
+
+        sbom_json = outputter.output_as_string()
+
+        # ML-BOM enrichment (#111). `modelCard` only exists from CycloneDX 1.5
+        # on, but 1.5/1.6 output is what older platform receivers and third
+        # party tools were pinned against, so the block is added to 1.7 only —
+        # asking for an older schema version keeps giving byte-identical
+        # output to before this change. cyclonedx-python-lib cannot model the
+        # field, hence the post-serialization splice.
+        if schema_version == "1.7":
+            sbom_json = inject_model_cards(
+                sbom_json, results['artifacts'], results.get('hf_model_card')
+            )
+
         with open(output, "w") as f:
-            f.write(outputter.output_as_string())
+            f.write(sbom_json)
         
         console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
 
@@ -731,7 +762,10 @@ def scan(
             if do_share:
                 with console.status("[cyan]Uploading SBOM to aisbom.io...[/cyan]"):
                     try:
-                        json_str = outputter.output_as_string()
+                        # The spliced string, not a fresh output_as_string() —
+                        # otherwise the shared SBOM would silently lack the
+                        # modelCard the local file has.
+                        json_str = sbom_json
                         res = requests.post(
                             "https://aisbom.io/api/sbom-share",
                             data=json_str,

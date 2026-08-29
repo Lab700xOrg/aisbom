@@ -174,3 +174,44 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
             urls.append(f"https://huggingface.co/{repo_id}/resolve/main/{path}")
 
     return urls
+
+
+# The model-card fetch is deliberately capped well below the file-listing
+# timeout: it is enrichment, not the scan, and a slow HF API must never be
+# what makes a CI scan hang.
+_MODEL_CARD_TIMEOUT_SECONDS = 10
+
+
+def fetch_huggingface_model_card(repo_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a repo's model-card metadata from the HF API. Best-effort.
+
+    Unlike :func:`resolve_huggingface_repo`, every failure here is swallowed and
+    returns ``None``. That asymmetry is intentional and is the whole contract:
+    the file listing decides *what gets scanned*, so losing it silently would
+    hide a malicious model (#58). This call only decides whether the SBOM
+    carries a richer ``modelCard`` block. A gated repo, a rate limit, an API
+    outage, or a network blip must degrade to an SBOM without that block —
+    never to a failed scan or a new exit code. Callers get ``None`` and omit
+    the field.
+
+    Returns the raw API payload (``cardData``, ``config``, ``pipeline_tag``,
+    ``tags``, ``sha`` …) so mapping stays in :mod:`aisbom.modelcard`.
+    """
+    if repo_id.startswith("hf://"):
+        repo_id = repo_id[len("hf://") :]
+
+    api_url = f"https://huggingface.co/api/models/{repo_id}"
+    try:
+        resp = requests.get(
+            api_url,
+            headers=_auth_headers(api_url),
+            timeout=_MODEL_CARD_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return None
+
+    # A 200 that isn't a JSON object (HTML error page, proxy interstitial) is
+    # as useless as a failure and must not reach the mapper as, say, a list.
+    return data if isinstance(data, dict) else None

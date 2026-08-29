@@ -11,7 +11,11 @@ urls = { "Homepage" = "https://www.aisbom.io/" }
 python = "^3.11"
 typer = {extras = ["all"], version = ">=0.12.5,<0.28.0"}
 rich = ">=13.7.1,<16.0.0"
-cyclonedx-python-lib = ">=8.5,<12.0"
+# Floor is 11.4, the first release exporting JsonV1Dot7 / SchemaVersion.V1_7
+# (upstream PR #902). cli.py imports the 1.7 serializer unconditionally, so a
+# resolver that left an older-but-previously-allowed version installed would
+# break the CLI at startup for every format, not just 1.7 output.
+cyclonedx-python-lib = ">=11.4,<12.0"
 pip-requirements-parser = "^32.0.1"
 click = "<8.5.0"
 spdx-tools = "^0.8.3"
@@ -34,6 +38,12 @@ onnx = "^1.17"
 joblib = "^1.4"
 dill = "^0.3.8"
 numpy = "^2.0"
+# cyclonedx-python-lib's `validation` extra. Test-only on purpose: the CLI
+# never validates its own output at runtime (that would add a hard dependency
+# and a per-scan cost to every user), but the 1.7 modelCard block is spliced
+# into the serialized JSON outside the library's type system, so the suite
+# validates generated SBOMs against the bundled schema instead.
+jsonschema = "^4.23"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

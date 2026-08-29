@@ -279,3 +279,155 @@ def test_scanner_isolates_one_gated_file_and_scans_the_rest(monkeypatch):
     fetch_errors = [e for e in results["errors"] if e.get("fetch_failure")]
     assert len(fetch_errors) == 1
     assert fetch_errors[0]["file"].endswith("boom.safetensors")
+
+
+# ---------------------------------------------------------------------------
+# #111 — HF model-card metadata fetch. Enrichment only: unlike the file
+# listing above, every failure here must degrade silently to None so a gated
+# repo or an HF outage costs a modelCard, never a scan.
+# ---------------------------------------------------------------------------
+
+from aisbom.remote import fetch_huggingface_model_card
+
+
+def test_fetch_model_card_returns_the_api_payload(monkeypatch):
+    payload = {"id": "org/model", "pipeline_tag": "fill-mask"}
+    seen_urls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen_urls.append(url)
+        return _mock_response(json.dumps(payload).encode(), status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_model_card("org/model") == payload
+    assert seen_urls == ["https://huggingface.co/api/models/org/model"]
+
+
+def test_fetch_model_card_accepts_the_hf_scheme_prefix(monkeypatch):
+    seen_urls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen_urls.append(url)
+        return _mock_response(b"{}", status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_model_card("hf://org/model")
+    assert seen_urls == ["https://huggingface.co/api/models/org/model"]
+
+
+def test_fetch_model_card_sends_bearer_to_huggingface(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "secret-tok")
+    seen_headers = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen_headers.append(headers or {})
+        return _mock_response(b"{}", status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_model_card("org/gated-model")
+    assert seen_headers[0].get("Authorization") == "Bearer secret-tok"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+def test_fetch_model_card_swallows_every_http_failure(monkeypatch, status):
+    """A gated repo, a typo, a rate limit, an outage — all degrade to None."""
+
+    def fake_get(url, headers=None, timeout=None):
+        raise _http_error(status)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_model_card("org/model") is None
+
+
+def test_fetch_model_card_swallows_network_errors(monkeypatch):
+    def fake_get(url, headers=None, timeout=None):
+        raise _requests.exceptions.ConnectTimeout("no route")
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_model_card("org/model") is None
+
+
+def test_fetch_model_card_rejects_a_non_object_200(monkeypatch):
+    """An HTML error page or proxy interstitial must not reach the mapper."""
+
+    def fake_get(url, headers=None, timeout=None):
+        return _mock_response(b"[1, 2, 3]", status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_model_card("org/model") is None
+
+
+def test_fetch_model_card_sets_a_timeout(monkeypatch):
+    """A hanging HF API must never be what makes a CI scan hang forever."""
+    seen = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return _mock_response(b"{}", status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_model_card("org/model")
+    assert isinstance(seen["timeout"], (int, float)) and seen["timeout"] > 0
+
+
+def test_local_scan_never_fetches_model_card(monkeypatch, tmp_path):
+    """AC: local scans make no new network calls."""
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a local scan must not touch the HF API")
+
+    monkeypatch.setattr(scanner_module, "fetch_huggingface_model_card", explode)
+    (tmp_path / "notes.txt").write_text("nothing to scan here")
+    results = DeepScanner(str(tmp_path)).scan()
+    assert results["hf_model_card"] is None
+
+
+def test_plain_https_target_does_not_fetch_model_card(monkeypatch):
+    """A single-file URL has no repo to describe — no metadata call."""
+
+    def explode(*args, **kwargs):
+        raise AssertionError("only hf:// targets have a model card")
+
+    monkeypatch.setattr(scanner_module, "fetch_huggingface_model_card", explode)
+    monkeypatch.setattr(
+        "aisbom.scanner.DeepScanner._resolve_remote_targets", lambda self, t: []
+    )
+    results = DeepScanner("https://example.com/model.safetensors").scan()
+    assert results["hf_model_card"] is None
+
+
+def test_hf_scan_attaches_model_card_to_results(monkeypatch):
+    payload = {"id": "org/model", "pipeline_tag": "fill-mask"}
+    monkeypatch.setattr(
+        scanner_module, "fetch_huggingface_model_card", lambda target: payload
+    )
+    monkeypatch.setattr(
+        "aisbom.scanner.DeepScanner._resolve_remote_targets",
+        lambda self, t: ["https://huggingface.co/org/model/resolve/main/m.safetensors"],
+    )
+    # The artifact fetch itself fails; the metadata must still be carried, so
+    # a partly-unreadable repo still produces a described SBOM.
+    results = DeepScanner("hf://org/model").scan()
+    assert results["hf_model_card"] == payload
+
+
+def test_model_card_fetch_failure_does_not_fail_the_scan(monkeypatch):
+    """The asymmetry with the file listing, asserted end to end."""
+    monkeypatch.setattr(
+        scanner_module, "fetch_huggingface_model_card", lambda target: None
+    )
+    monkeypatch.setattr(
+        "aisbom.scanner.DeepScanner._resolve_remote_targets",
+        lambda self, t: ["https://huggingface.co/org/model/resolve/main/m.safetensors"],
+    )
+    results = DeepScanner("hf://org/model").scan()
+    assert results["hf_model_card"] is None
+    # No error recorded for the metadata call itself.
+    assert not [e for e in results["errors"] if "api/models" in str(e.get("file", ""))]
