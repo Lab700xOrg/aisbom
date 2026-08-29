@@ -238,3 +238,99 @@ def test_a_valid_payload_followed_by_a_corrupt_tail_is_still_found(tmp_path):
     found = artifacts_of(results)
     assert len(found) == 1, found
     assert "CRITICAL" in found[0]["risk_level"]
+
+
+# --- large first argument: the escalation gap ----------------------------
+
+# Discovery reads a small head, then re-reads with a larger budget only when
+# the head looked like an unfinished pickle. The first version of that rule
+# used "at least one opcode parsed" as the signal, which a pickle can defeat
+# by opening with a single literal bigger than the first read: zero opcodes
+# complete, so no re-read ever happens.
+#
+# Measured, not assumed -- a 65,000-byte pad was found and a 70,000-byte pad
+# was not, so the real bound was the 64KB first read rather than the documented
+# 16MB ceiling. These tests pin the ceiling to what we actually claim.
+
+def padded_first_literal(pad_bytes, proto0=True):
+    """A valid pickle whose FIRST opcode is one huge literal, then the payload.
+
+    Protocol 0 uses a quoted STRING; the binary form uses a length-prefixed
+    BINBYTES. Both are popped, so the stream ends holding exactly one object
+    and is a structurally valid pickle either way.
+    """
+    payload = harmless_reduce_pickle("os", "system")
+    if proto0:
+        return b"S'" + (b"x" * pad_bytes) + b"'\n0" + payload
+    import struct
+
+    return b"B" + struct.pack("<I", pad_bytes) + (b"\x00" * pad_bytes) + b"0" + payload
+
+
+@pytest.mark.parametrize("pad", [70_000, 250_000, 2_000_000])
+def test_a_payload_behind_a_large_protocol0_literal_is_found(tmp_path, pad):
+    """`S'<70KB>'` ahead of the payload must not buy silence."""
+    results = scan_dir(tmp_path, "payload.dat", padded_first_literal(pad))
+    found = artifacts_of(results)
+    assert len(found) == 1, f"pad={pad} evaded discovery"
+    assert "CRITICAL" in found[0]["risk_level"]
+
+
+@pytest.mark.parametrize("pad", [70_000, 2_000_000])
+def test_a_payload_behind_a_large_binary_literal_is_found(tmp_path, pad):
+    """The same trick in a binary protocol, where the length is declared."""
+    results = scan_dir(tmp_path, "payload.dat", padded_first_literal(pad, proto0=False))
+    found = artifacts_of(results)
+    assert len(found) == 1, f"pad={pad} evaded discovery"
+    assert "CRITICAL" in found[0]["risk_level"]
+
+
+def test_the_documented_ceiling_is_the_real_ceiling(tmp_path):
+    """Past the cap we stop looking -- that is the limit we publish."""
+    from aisbom import scanner as scanner_mod
+
+    over = scanner_mod.PICKLE_SNIFF_MAX_BYTES + 1024
+    results = scan_dir(tmp_path, "payload.dat", padded_first_literal(over))
+    assert artifacts_of(results) == []
+
+
+def test_binary_junk_with_no_newline_is_not_re_read(tmp_path):
+    """The cost guard the escalation rule must not break.
+
+    A parquet file opens with `PAR1` -- `P` happens to be a valid opcode byte
+    -- and carries no newline for megabytes. If escalation fires on "first byte
+    could be an opcode", every such file in a tree gets read to the cap.
+    """
+    from aisbom import scanner as scanner_mod
+
+    holder = tmp_path / "cost"
+    holder.mkdir()
+    big = holder / "dataset.parquet"
+    big.write_bytes(b"PAR1" + b"\x00" * (3 * 1024 * 1024))
+
+    reads = []
+    real_open = open
+
+    def counting_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if str(path) == str(big):
+            real_read = handle.read
+
+            def tracked(size=-1):
+                data = real_read(size)
+                reads.append(len(data))
+                return data
+
+            handle.read = tracked
+        return handle
+
+    scanner_mod.open = counting_open
+    try:
+        results = DeepScanner(str(holder)).scan()
+    finally:
+        del scanner_mod.open
+
+    assert artifacts_of(results) == []
+    assert sum(reads) <= scanner_mod.PICKLE_SNIFF_BYTES, (
+        f"parquet was re-read: {reads}"
+    )
