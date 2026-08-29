@@ -66,7 +66,7 @@ A typical scan against a project with mixed artifacts:
 └──────────────────────────────┴─────────────┴────────────────────────────────────────────────┴──────────────────────────────┘
 ```
 
-A compliant `sbom.json` (CycloneDX v1.7 / ECMA-424) including SHA256 hashes and license data is generated in your working directory. SPDX 2.3 export is one flag away (`--format spdx`).
+A compliant `sbom.json` (CycloneDX v1.7 / ECMA-424) including SHA256 hashes and license data is generated in your working directory. SPDX export is one flag away (`--format spdx`) — 2.3 by default, or 3.0 with the AI Profile via `--spdx-version 3.0`.
 
 For `hf://` scans, each model component also carries a CycloneDX ML-BOM `modelCard` block — task, architecture family, model architecture, and training datasets, read from the model's Hugging Face metadata. Local scans get whatever the file itself declares (a GGUF header's architecture, for example) and make no extra network calls. The block is simply omitted when nothing is known.
 
@@ -236,11 +236,32 @@ aisbom scan . --format markdown --output report.md
 
 Generates a GitHub-flavored Markdown report suitable for PR comments and CI artifacts.
 
-### SPDX 2.3 export (enterprise compliance)
+### SPDX export (enterprise compliance)
+
+SPDX 2.3 (the default):
 
 ```bash
 aisbom scan . --format spdx --output sbom.spdx.json
 ```
+
+SPDX 3.0 with the **AI Profile** — JSON-LD, increasingly required by
+procurement teams standardizing on the ISO-aligned model:
+
+```bash
+aisbom scan . --format spdx --spdx-version 3.0 --output sbom.spdx.json
+```
+
+The 3.0 document emits each scanned model as an `ai_AIPackage`, declared
+training datasets (from Hugging Face model-card metadata) as
+`dataset_DatasetPackage` elements linked by `trainedOn` relationships, and
+`requirements.txt` pins as `software_Package` elements. Output conforms to the
+released SPDX 3.0.1 schema.
+
+AI Profile fields AIsbom has no source of truth for — energy consumption,
+metrics, safety-risk assessment, hyperparameters — are **omitted rather than
+filled with placeholders**, so a consumer can tell "not asserted" from
+"asserted as unknown". `--spdx-version` defaults to `2.3`; existing output is
+unchanged.
 
 ---
 

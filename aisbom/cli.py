@@ -376,6 +376,12 @@ class OutputFormat(str, Enum):
     MARKDOWN = "markdown"
     SPDX = "spdx"
 
+
+# `--spdx-version` values the emitter can actually honour. 2.3 stays the
+# default so existing `--format spdx` output is unchanged; 3.0 emits the
+# AI Profile JSON-LD from `spdx3_gen`.
+_SPDX_VERSIONS = {"2.3", "3.0"}
+
 def _generate_markdown(results: dict) -> str:
     """Render a GitHub-flavored Markdown report for CI artifacts."""
     lines = []
@@ -451,6 +457,16 @@ def scan(
     t.start()
 
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
+
+    # Rejected up front rather than after the scan: the option is only read at
+    # emission time, so an unrecognised value used to fall through to 2.3 and
+    # hand back a document the user did not ask for, after a full scan's wait.
+    if spdx_version not in _SPDX_VERSIONS:
+        console.print(
+            f"[bold red]✖ Unsupported SPDX version:[/bold red] {spdx_version} "
+            f"(expected one of: {', '.join(sorted(_SPDX_VERSIONS))})"
+        )
+        raise typer.Exit(code=1)
 
     # Telemetry: per-invocation scan_id groups all events from this scan into
     # one GA4 session. Started here so an early failure still has an id.
@@ -790,11 +806,17 @@ def scan(
                         console.print(f"\n[bold red]✖ Failed to create share link:[/bold red] {e}")
 
     elif format == OutputFormat.SPDX:
-        from .spdx_gen import generate_spdx_sbom
-        spdx_json = generate_spdx_sbom(results)
+        # 3.0 is opt-in. Existing `--format spdx` users keep byte-identical
+        # 2.3 output, matching how the CycloneDX path treats 1.5/1.6.
+        if spdx_version == "3.0":
+            from .spdx3_gen import generate_spdx3_sbom
+            spdx_json = generate_spdx3_sbom(results)
+        else:
+            from .spdx_gen import generate_spdx_sbom
+            spdx_json = generate_spdx_sbom(results)
         with open(output, "w") as f:
             f.write(spdx_json)
-        console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (SPDX v2.3)")
+        console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (SPDX v{spdx_version})")
     else:
         markdown = _generate_markdown(results)
         with open(output, "w") as f:
