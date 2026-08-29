@@ -314,7 +314,7 @@ You'll see `mock_malware.pt` flagged as **CRITICAL**, license issues flagged on 
 
 ## Does AIsbom catch known scanner bypasses?
 
-Some of them. Run the scorecard and see for yourself:
+Most of them — and the ones it doesn't are published rather than hidden. Run the scorecard and see for yourself:
 
 ```bash
 aisbom bypass-scorecard
@@ -322,7 +322,9 @@ aisbom bypass-scorecard
 
 This rebuilds a corpus of publicly-documented pickle-evasion techniques — the nullifAI 7z and broken-stream tricks, Sonatype's four picklescan CVEs, JFrog's three zero-days, ShadowPickle, and the Checkmarx `bdb.Bdb.run` gadget — scans each one, and prints what was caught in blocklist mode and in `--strict`.
 
-The results are published verbatim in [docs/bypass-scorecard.md](docs/bypass-scorecard.md), including the cases we currently **miss**. Static analysis is not magic, and a scanner that only advertises its wins isn't worth trusting; the misses are tracked as work in progress and the corpus is the regression gate that keeps them from silently coming back.
+The results are published verbatim in [docs/bypass-scorecard.md](docs/bypass-scorecard.md), including the cases we only **partially** catch — where the file is refused but the payload was never disassembled, so the reason you're given isn't the real one. Static analysis is not magic, and a scanner that only advertises its wins isn't worth trusting; the corpus is the regression gate that keeps a fixed case from silently coming back.
+
+There's a full write-up of the table, why each partial is a decision rather than an oversight, and the miss that until recently reported "No AI models found" on a directory carrying a reverse shell, at **[Does AIsbom catch it?](https://aisbom.io/blog/does-aisbom-catch-it)**.
 
 Two principles come out of that corpus and shape how the pickle path behaves:
 
