@@ -40,6 +40,7 @@ one, and a downstream consumer can tell "not asserted" from "asserted as
 unknown".
 """
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -103,12 +104,51 @@ class SPDX3Generator:
         self.creation_time = creation_time or datetime.now(timezone.utc)
         # Element IRIs must be absolute and must not be blank nodes (the
         # schema's `IRI` pattern rejects a leading `_:`), so every id is
-        # rooted in a document namespace.
-        self.namespace = namespace or (
-            "https://aisbom.io/spdxdocs/aisbom-scan-"
-            f"{int(self.creation_time.timestamp())}"
-        )
+        # rooted in a document namespace. When not supplied it is derived
+        # from the scan's content in `generate()` — see `_content_namespace`.
+        self.namespace = namespace
         self._used_ids: set[str] = set()
+
+    def _content_namespace(self, results: Dict[str, Any]) -> str:
+        """Derive the document namespace from what was scanned, not from the clock.
+
+        A timestamp is the obvious choice and the wrong one in both directions:
+
+        * Truncated to whole seconds it *collides* — two unrelated scans
+          starting in the same second (parallel CI jobs are the normal case)
+          produce documents whose `SpdxDocument`, agent, package and
+          relationship IRIs are identical while describing different data, so
+          a store importing both can merge or overwrite unrelated results.
+        * Given sub-second precision instead, it never collides but is never
+          stable either: re-scanning unchanged inputs yields all-new IRIs,
+          which reads downstream as churn. `aisbom.modelcard` avoids emitting
+          hourly-changing HF fields for exactly this reason — an SBOM that
+          differs between two scans of an unchanged model produces phantom
+          drift on the platform's diff.
+
+        Deriving it from content satisfies both: identical inputs yield
+        identical IRIs (they genuinely describe the same artifacts), and
+        different inputs yield different ones no matter how close together the
+        scans ran.
+        """
+        fingerprint = {
+            "artifacts": [
+                [
+                    art.get("name") or art.get("filename") or "unknown-model",
+                    art.get("hash"),
+                ]
+                for art in results.get("artifacts", [])
+            ],
+            "dependencies": [
+                [dep.get("name"), dep.get("version")]
+                for dep in results.get("dependencies", [])
+            ],
+            "datasets": _card_datasets(results.get("hf_model_card")),
+        }
+        digest = hashlib.sha256(
+            json.dumps(fingerprint, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"https://aisbom.io/spdxdocs/aisbom-scan-{digest[:32]}"
 
     # -- identifiers ------------------------------------------------------
 
@@ -252,6 +292,8 @@ class SPDX3Generator:
 
     def generate(self, results: Dict[str, Any]) -> str:
         hf_meta = results.get("hf_model_card")
+        if self.namespace is None:
+            self.namespace = self._content_namespace(results)
         tool_id = self._iri("Agent-aisbom-cli")
 
         graph: List[Dict[str, Any]] = [

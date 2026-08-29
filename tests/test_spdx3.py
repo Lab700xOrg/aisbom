@@ -16,12 +16,13 @@ hand-rolled mapping honest.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 
-from aisbom.spdx3_gen import generate_spdx3_sbom
+from aisbom.spdx3_gen import SPDX3Generator, generate_spdx3_sbom
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -244,6 +245,48 @@ def test_ids_unique_when_every_artifact_is_remote(validator):
     ids = [p["spdxId"] for p in _graph(data, "ai_AIPackage")]
     assert len(set(ids)) == 2
     _assert_valid(validator, data)
+
+
+def test_different_scans_never_share_a_namespace():
+    """Two unrelated scans must not claim the same IRIs.
+
+    The namespace was originally a whole-second timestamp, so parallel CI jobs
+    starting in the same second produced documents whose SpdxDocument, agent,
+    package and relationship IRIs collided while describing different data —
+    a store importing both could merge or overwrite unrelated results. Freezing
+    the clock reproduces that exactly.
+    """
+    frozen = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+    def doc(artifacts):
+        return json.loads(SPDX3Generator(creation_time=frozen).generate(
+            {"artifacts": artifacts, "dependencies": [], "errors": []}
+        ))
+
+    a = doc([_pytorch_artifact(name="a.pt", artifact_hash=SHA_A)])
+    b = doc([_pytorch_artifact(name="b.pt", artifact_hash=SHA_B)])
+
+    ids_a = {e["spdxId"] for e in a["@graph"] if "spdxId" in e}
+    ids_b = {e["spdxId"] for e in b["@graph"] if "spdxId" in e}
+    assert not (ids_a & ids_b), "distinct scans emitted colliding IRIs"
+
+
+def test_identical_content_yields_identical_ids_across_time():
+    """Determinism must come from content, not from two runs sharing a second."""
+    def doc(moment):
+        return json.loads(SPDX3Generator(creation_time=moment).generate(
+            {
+                "artifacts": [_pytorch_artifact(artifact_hash=SHA_A)],
+                "dependencies": [{"name": "requests", "version": "2.28.1"}],
+                "errors": [],
+            }
+        ))
+
+    early = doc(datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc))
+    later = doc(datetime(2026, 12, 25, 3, 30, 45, tzinfo=timezone.utc))
+
+    assert [e.get("spdxId") for e in early["@graph"]] == \
+           [e.get("spdxId") for e in later["@graph"]]
 
 
 def test_id_derived_from_content_hash():
