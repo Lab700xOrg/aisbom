@@ -625,6 +625,11 @@ class DeepScanner:
                         # The member is there but could not be read at all. A
                         # loader that does not verify integrity the way we do
                         # would still run it, so this is not a clean bill.
+                        # The structured marker matters as much as the label:
+                        # without it a consumer reading properties rather than
+                        # prose (the VEX emitter, #113) sees an empty threat
+                        # list and concludes the member was inspected and clean.
+                        meta["details"]["scan_incomplete"] = True
                         meta["risk_level"] = "MEDIUM (Unreadable Pickle Member)"
                     elif pickle_files:
                         meta["risk_level"] = "MEDIUM (Pickle Present)"
@@ -865,6 +870,12 @@ class DeepScanner:
                 details["scan_incomplete"] = True
                 meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
             elif unreadable:
+                # Named but never opened — no standard-library decompressor
+                # exists for lz4/zstd. Carries the same structured marker as a
+                # truncated stream: nothing in this container was inspected, so
+                # a consumer reading properties must not read the empty threat
+                # list as a clean result (#113).
+                details["scan_incomplete"] = True
                 meta["risk_level"] = f"MEDIUM (Unscanned Container: {unreadable})"
             elif carries_pickle:
                 meta["risk_level"] = "MEDIUM (Pickle Present)"

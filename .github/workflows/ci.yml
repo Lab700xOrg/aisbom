@@ -64,3 +64,10 @@ jobs:
           poetry run aisbom scan . --format spdx --output sbom.spdx.json --no-fail-on-risk
           poetry run aisbom scan . --format spdx --spdx-version 3.0 --output sbom.spdx3.json --no-fail-on-risk
           poetry run aisbom scan . --format json --output sbom.json --no-fail-on-risk
+
+      - name: Smoke Test #11 - VEX Export (OpenVEX & CycloneDX VEX)
+        run: |
+          poetry run aisbom scan . --vex --output vex-sbom.json --no-fail-on-risk
+          test -s vex-sbom.openvex.json
+          test -s vex-sbom.vex.cdx.json
+          poetry run aisbom scan . --vex --vex-baseline vex-sbom.json --output vex-rescan.json --no-fail-on-risk

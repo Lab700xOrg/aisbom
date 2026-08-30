@@ -208,6 +208,29 @@ def test_unreadable_codec_is_named_not_called_clean(tmp_path, magic, label):
     assert artifact["risk_level"] == f"MEDIUM (Unscanned Container: {label})"
     assert artifact["details"]["compression"] == label
     assert "CRITICAL" not in artifact["risk_level"]
+    # Nothing inside was inspected, so the structured marker must say so too —
+    # the prose label alone is invisible to a consumer reading properties.
+    assert artifact["details"]["scan_incomplete"] is True
+
+
+@pytest.mark.parametrize("magic,label", [(b"\x04\x22\x4d\x18", "lz4"), (b"\x28\xb5\x2f\xfd", "zstd")])
+def test_unreadable_codec_is_not_cleared_in_vex_either(tmp_path, magic, label):
+    """The "different answer from clean" rule, end to end through VEX (#113).
+
+    Raised by review on PR #99: the container is named and reported unscanned,
+    but the marker `_classify` reads was only set for a *truncated* stream, so
+    every pickle class came out `not_affected` with justification
+    `vulnerable_code_not_present` for a payload that was never opened.
+    """
+    from aisbom.vex import derive_statements
+
+    artifact = scan_one(tmp_path, "model.joblib", magic + b"\x00" * 256)
+    statuses = {
+        s.finding_class.id: s.status for s in derive_statements([artifact])
+    }
+    assert statuses["AISBOM-PICKLE-RCE"] == "under_investigation"
+    assert statuses["AISBOM-PICKLE-UNSCANNED"] == "under_investigation"
+    assert all(s.justification is None for s in derive_statements([artifact]))
 
 
 # --- numpy -------------------------------------------------------------

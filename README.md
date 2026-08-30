@@ -263,6 +263,52 @@ filled with placeholders**, so a consumer can tell "not asserted" from
 "asserted as unknown". `--spdx-version` defaults to `2.3`; existing output is
 unchanged.
 
+### VEX export (exploitability statements)
+
+An SBOM says what is in the model. A VEX document says which of those findings
+actually matter. FDA §524B has required VEX alongside the SBOM since March
+2026.
+
+```bash
+aisbom scan . --vex --output sbom.json
+```
+
+That writes `sbom.openvex.json` (OpenVEX 0.2.0) and `sbom.vex.cdx.json`
+(CycloneDX VEX) next to the SBOM. Use `--vex-format openvex` or
+`--vex-format cyclonedx` for just one. Every statement addresses the SBOM's
+own components by serial number and `bom-ref`, so the documents join without
+guesswork — which is why `--vex` requires the CycloneDX output format.
+
+Statuses follow the VEX vocabulary. The valuable ones are usually the
+negatives: a `.safetensors` model gets a `not_affected` statement for pickle
+deserialization RCE with justification `vulnerable_code_not_present`, which is
+the machine-readable form of "you can stop asking about this one". A scan that
+could not read a pickle stream to completion reports `under_investigation`
+rather than a clean result.
+
+**These identifiers are AIsbom finding classes, not CVE identifiers.** They
+name categories of content found *inside a model file* — a pickle stream
+importing `os.system`, a Keras Lambda layer, a Jinja chat template with a
+sandbox escape. None of those have a CVE, because the file itself is the
+payload rather than a published component with a patchable defect. The full
+registry is at [`docs/vex-finding-classes.md`](docs/vex-finding-classes.md)
+and each identifier resolves under `https://aisbom.io/vex/`. CVE-keyed
+statements about your `requirements.txt` pins are a separate, additive
+concern and arrive with OSV mapping.
+
+#### Remediation evidence (`fixed`)
+
+`fixed` is the one status a single scan cannot honestly assert — it is a claim
+about change over time. Pass a previous SBOM and findings that were present
+then and are absent now are reported as `fixed`:
+
+```bash
+aisbom scan . --vex --vex-baseline last-release-sbom.json --output sbom.json
+```
+
+Baselines predating structured findings still work: the finding is recovered
+from the component description rather than reported as a spurious `fixed`.
+
 ---
 
 ## Use as a GitHub Action
