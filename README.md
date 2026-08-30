@@ -388,6 +388,7 @@ You'll see `mock_malware.pt` flagged as **CRITICAL**, license issues flagged on 
 Most of them — and the ones it doesn't are published rather than hidden. Run the scorecard and see for yourself:
 
 ```bash
+pip install py7zr          # only to build the 7z case; the scanner never unpacks 7z
 aisbom bypass-scorecard
 ```
 
