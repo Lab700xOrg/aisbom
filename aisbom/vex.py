@@ -350,9 +350,20 @@ def signals_from_artifact(art: Dict[str, Any]) -> Dict[str, Any]:
     details = art.get("details") or {}
     fmt = sig["format"]
 
+    # An inspection that raised produced whatever it had reached and stopped.
+    # The scanner records that as `error` — at the artifact level in most
+    # inspectors and under `details` in the GGUF one — and the resulting detail
+    # dict is simply sparse, which is indistinguishable from "looked and found
+    # nothing" unless it is treated as incompleteness here. It feeds the
+    # per-format flags below so it routes through the same
+    # `under_investigation` paths rather than needing its own branch.
+    inspection_error = bool(art.get("error") or details.get("error"))
+
     if fmt in _PICKLE_BEARING_FORMATS:
         sig["pickle_opcodes"] = list(details.get("threats") or [])
-        sig["pickle_scan_incomplete"] = bool(details.get("scan_incomplete"))
+        sig["pickle_scan_incomplete"] = (
+            bool(details.get("scan_incomplete")) or inspection_error
+        )
         sig["pickle_code_objects"] = bool(details.get("dill_code_objects"))
     elif fmt == "keras":
         sig["keras_threats"] = list(details.get("threats") or [])
@@ -361,13 +372,17 @@ def signals_from_artifact(art: Dict[str, Any]) -> Dict[str, Any]:
         # after the cut would never have been seen — padding a config with
         # harmless layers is cheap and keeps the archive small and loadable.
         # A config that was never located at all cannot be cleared either.
-        sig["keras_incomplete"] = bool(details.get("truncated")) or not details.get(
-            "config_found"
+        sig["keras_incomplete"] = (
+            bool(details.get("truncated"))
+            or not details.get("config_found")
+            or inspection_error
         )
     elif fmt == "gguf":
         sig["gguf_template_present"] = bool(details.get("chat_template_present"))
         sig["gguf_template_threats"] = list(details.get("chat_template_threats") or [])
-        sig["gguf_metadata_truncated"] = bool(details.get("metadata_truncated"))
+        sig["gguf_metadata_truncated"] = (
+            bool(details.get("metadata_truncated")) or inspection_error
+        )
     elif fmt == "onnx":
         sig["onnx_custom_ops"] = len(details.get("custom_ops") or [])
         external = details.get("external_data") or []
@@ -382,8 +397,10 @@ def signals_from_artifact(art: Dict[str, Any]) -> Dict[str, Any]:
         # streamed re-walk did cover in full still reports truncated — this
         # errs toward "we may not have finished looking", which is the safe
         # direction for a compliance claim. See the follow-ups on #113.
-        sig["onnx_incomplete"] = bool(details.get("truncated")) or not details.get(
-            "parsed", True
+        sig["onnx_incomplete"] = (
+            bool(details.get("truncated"))
+            or not details.get("parsed", True)
+            or inspection_error
         )
     return sig
 
@@ -613,17 +630,46 @@ def _classify(cls: FindingClass, sig: Dict[str, Any]) -> Optional[tuple]:
     return None  # pragma: no cover - every class is handled above
 
 
+def _prior_for(
+    art: Dict[str, Any],
+    digest: Optional[str],
+    baseline: Optional[BaselineIndex],
+    name_counts: Dict[str, int],
+) -> Dict[str, str]:
+    """Find this artifact's findings in the baseline, or nothing.
+
+    Content hash first, then a basename unique on *both* sides. Anything
+    ambiguous yields no prior: a missed ``fixed`` costs the document a nice-to
+    -have, while a mis-attributed one asserts a remediation that never
+    happened. See :class:`BaselineIndex`.
+    """
+    if baseline is None:
+        return {}
+    if digest and digest in baseline.by_hash:
+        return baseline.by_hash[digest]
+    name = art.get("name")
+    if name and name_counts.get(name) == 1:
+        return baseline.by_name.get(name, {})
+    return {}
+
+
 def derive_statements(
     artifacts: Sequence[Dict[str, Any]],
-    baseline: Optional[Dict[str, Dict[str, Any]]] = None,
+    baseline: Optional[BaselineIndex] = None,
 ) -> List[VexStatement]:
     """Build the VEX statements for one scan.
 
-    ``baseline`` is the mapping returned by :func:`baseline_findings`. A class
+    ``baseline`` is the index returned by :func:`baseline_findings`. A class
     that was ``affected`` in the baseline and is ``not_affected`` now becomes
     ``fixed`` — the only way AIsbom can honestly assert that status, since a
     single scan observes one point in time.
     """
+    name_counts: Dict[str, int] = {}
+    for art in artifacts:
+        name = art.get("name")
+        if name:
+            name_counts[name] = name_counts.get(name, 0) + 1
+
     statements: List[VexStatement] = []
     for index, art in enumerate(artifacts):
         sig = signals_from_artifact(art)
@@ -631,7 +677,7 @@ def derive_statements(
             continue
         ref = bom_ref_for(index, art)
         digest = _sha256_or_none(art.get("hash"))
-        prior = (baseline or {}).get(ref, {})
+        prior = _prior_for(art, digest, baseline, name_counts)
 
         for cls in VEX_FINDING_CLASSES:
             classified = _classify(cls, sig)
@@ -668,13 +714,51 @@ def derive_statements(
     return statements
 
 
-def baseline_findings(sbom: Any) -> Dict[str, Dict[str, str]]:
-    """Map ``bom-ref -> {finding class id: status}`` from a previous SBOM.
+@dataclass(frozen=True)
+class BaselineIndex:
+    """A previous scan's findings, addressable by an identity that survives it.
+
+    **Not** keyed on ``bom-ref``. That identifier embeds the artifact's
+    enumeration index (``artifact-<n>-<name>``, see
+    :func:`aisbom.modelcard.bom_ref_for`), which is stable *within* a scan —
+    which is all #111 needed it for — and not across two. Adding one file
+    earlier in the tree shifts every later index, so matching on it would miss
+    a genuinely remediated finding and report ``not_affected`` instead of
+    ``fixed``.
+
+    The serious case is worse than a miss. Artifact names are basenames, so a
+    tree holding ``a/model.pt`` and ``b/model.pt`` yields two components whose
+    refs differ only by index. If their order swaps between scans, the affected
+    baseline entry lands on the *other*, always-clean artifact and the document
+    claims it was fixed — a fabricated remediation, in the artifact whose whole
+    purpose is evidencing remediation.
+
+    So identity is content first, name second, and neither when ambiguous:
+
+    * ``by_hash`` — SHA-256 is unforgeable identity, but only proves the file
+      is byte-identical. Remediation usually *changes* the file, so this mostly
+      serves to disambiguate same-named artifacts rather than to find fixes.
+    * ``by_name`` — holds only names that appear exactly once in the baseline.
+      A duplicated basename is dropped rather than guessed at.
+
+    The caller additionally requires the name to be unique in the *current*
+    scan. Where identity cannot be established, no prior is claimed and the
+    finding is simply reported on its own merits — a missed ``fixed`` is a
+    disappointing document; a fabricated one is a false statement.
+    """
+
+    by_hash: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    by_name: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+
+def baseline_findings(sbom: Any) -> BaselineIndex:
+    """Build a :class:`BaselineIndex` of ``{finding class id: status}`` from a
+    previous CycloneDX SBOM.
 
     Accepts a path, a JSON string or an already-parsed document. Only
     ``affected`` entries matter to the caller (they are what a later scan can
-    report as ``fixed``), but the full classification is returned so the
-    mapping stays useful if that changes.
+    report as ``fixed``), but the full classification is kept so the mapping
+    stays useful if that changes.
     """
     if isinstance(sbom, dict):
         document = sbom
@@ -685,11 +769,11 @@ def baseline_findings(sbom: Any) -> Dict[str, Dict[str, str]]:
                 text = fh.read()
         document = json.loads(text)
 
-    findings: Dict[str, Dict[str, str]] = {}
+    by_hash: Dict[str, Dict[str, str]] = {}
+    by_name: Dict[str, Dict[str, str]] = {}
+    seen_names: Dict[str, int] = {}
+
     for component in document.get("components") or []:
-        ref = component.get("bom-ref")
-        if not ref:
-            continue
         sig = signals_from_component(component)
         if sig["format"] is None:
             continue
@@ -698,8 +782,24 @@ def baseline_findings(sbom: Any) -> Dict[str, Dict[str, str]]:
             classified = _classify(cls, sig)
             if classified is not None:
                 per_class[cls.id] = classified[0]
-        findings[ref] = per_class
-    return findings
+
+        for entry in component.get("hashes") or []:
+            if str(entry.get("alg")).upper().replace("_", "-") == "SHA-256":
+                digest = _sha256_or_none(entry.get("content"))
+                if digest:
+                    by_hash[digest] = per_class
+
+        name = component.get("name")
+        if name:
+            seen_names[name] = seen_names.get(name, 0) + 1
+            by_name[name] = per_class
+
+    # A basename that occurs more than once identifies nothing.
+    for name, count in seen_names.items():
+        if count > 1:
+            by_name.pop(name, None)
+
+    return BaselineIndex(by_hash=by_hash, by_name=by_name)
 
 
 # --------------------------------------------------------------------------

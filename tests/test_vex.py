@@ -20,6 +20,7 @@ from cyclonedx.validation.json import JsonStrictValidator
 from jsonschema import Draft202012Validator
 
 from aisbom.vex import (
+    BaselineIndex,
     FINDING_CLASSES_BY_ID,
     JUSTIFICATION_CODE_NOT_PRESENT,
     PUBLISHED_FINDING_CLASS_IDS,
@@ -318,9 +319,9 @@ def test_under_investigation_when_the_stream_was_not_fully_read(openvex_validato
 
 def test_fixed_requires_a_baseline_that_saw_the_finding(openvex_validator):
     """`fixed` is the one status a single scan cannot honestly assert."""
-    baseline = {
-        "artifact-0-model.pt": {"AISBOM-PICKLE-RCE": "affected"},
-    }
+    baseline = BaselineIndex(
+        by_name={"model.pt": {"AISBOM-PICKLE-RCE": "affected"}}
+    )
     doc = _openvex([_artifact()], baseline=baseline)
     openvex_validator.validate(doc)
 
@@ -339,9 +340,103 @@ def test_no_baseline_means_no_fixed_statement(openvex_validator):
 
 def test_a_still_affected_finding_is_not_reported_fixed():
     """A baseline finding that is still present stays `affected`."""
-    baseline = {"artifact-0-model.pt": {"AISBOM-PICKLE-RCE": "affected"}}
+    baseline = BaselineIndex(
+        by_name={"model.pt": {"AISBOM-PICKLE-RCE": "affected"}}
+    )
     doc = _openvex([_artifact(threats=["os.system"])], baseline=baseline)
     assert _statuses(doc, "AISBOM-PICKLE-RCE") == ["affected"]
+
+
+# --------------------------------------------------------------------------
+# Baseline identity must survive a change in scan order.
+#
+# `bom-ref` embeds the enumeration index, which is stable within one scan and
+# not across two. Matching on it misses remediated findings when a file is
+# added earlier in the tree, and — because artifact names are basenames — can
+# apply an affected baseline entry to a different, always-clean artifact and
+# fabricate a remediation.
+# --------------------------------------------------------------------------
+
+def test_a_fix_is_still_recognised_when_an_earlier_file_shifts_the_index():
+    """Adding a file ahead of the fixed one must not hide the `fixed`."""
+    baseline = baseline_findings({
+        "components": [{
+            "bom-ref": "artifact-0-model.pt",
+            "name": "model.pt",
+            "properties": [
+                {"name": "aisbom:format", "value": "pickle"},
+                {"name": "aisbom:pickle:opcode", "value": "os.system"},
+            ],
+        }]
+    })
+    # `model.pt` is now index 1 — its bom-ref changed, the artifact did not.
+    doc = _openvex(
+        [_artifact(name="added.safetensors", framework="SafeTensors"),
+         _artifact(name="model.pt", artifact_hash=SHA_B)],
+        baseline=baseline,
+    )
+    assert "fixed" in _statuses(doc, "AISBOM-PICKLE-RCE")
+
+
+def test_duplicate_basenames_never_fabricate_a_fix():
+    """The serious case: an affected entry landing on the wrong artifact.
+
+    Two directories holding `model.pt` yield two components differing only by
+    index. If their order swaps between scans, index-based matching applies the
+    affected baseline entry to the other, always-clean file and claims it was
+    fixed — a remediation that never happened, in the document whose purpose is
+    evidencing remediation. An ambiguous name must yield no prior at all.
+    """
+    baseline = baseline_findings({
+        "components": [
+            {
+                "bom-ref": "artifact-0-model.pt",
+                "name": "model.pt",
+                "properties": [
+                    {"name": "aisbom:format", "value": "pickle"},
+                    {"name": "aisbom:pickle:opcode", "value": "os.system"},
+                ],
+            },
+            {
+                "bom-ref": "artifact-1-model.pt",
+                "name": "model.pt",
+                "properties": [{"name": "aisbom:format", "value": "pickle"}],
+            },
+        ]
+    })
+    assert "model.pt" not in baseline.by_name
+
+    doc = _openvex(
+        [_artifact(name="model.pt", artifact_hash=SHA_A),
+         _artifact(name="model.pt", artifact_hash=SHA_B)],
+        baseline=baseline,
+    )
+    assert "fixed" not in _statuses(doc, "AISBOM-PICKLE-RCE")
+
+
+def test_a_matching_content_hash_resolves_an_ambiguous_name():
+    """SHA-256 identifies the file even when the basename cannot."""
+    baseline = baseline_findings({
+        "components": [
+            {
+                "bom-ref": "artifact-0-model.pt",
+                "name": "model.pt",
+                "hashes": [{"alg": "SHA-256", "content": SHA_A}],
+                "properties": [
+                    {"name": "aisbom:format", "value": "pickle"},
+                    {"name": "aisbom:pickle:opcode", "value": "os.system"},
+                ],
+            },
+            {
+                "bom-ref": "artifact-1-model.pt",
+                "name": "model.pt",
+                "hashes": [{"alg": "SHA-256", "content": SHA_B}],
+                "properties": [{"name": "aisbom:format", "value": "pickle"}],
+            },
+        ]
+    })
+    assert baseline.by_hash[SHA_A]["AISBOM-PICKLE-RCE"] == "affected"
+    assert baseline.by_hash[SHA_B]["AISBOM-PICKLE-RCE"] == "not_affected"
 
 
 # --------------------------------------------------------------------------
@@ -558,6 +653,25 @@ def test_a_truncated_keras_read_still_reports_a_payload_it_did_see():
     assert _statuses(doc, "AISBOM-KERAS-LAMBDA-RCE") == ["affected"]
 
 
+def test_an_artifact_whose_inspection_raised_is_under_investigation():
+    """A sparse detail dict from an exception is not "looked and found nothing".
+
+    Most inspectors record the failure as `error` on the artifact; the GGUF one
+    puts it under `details`. Both leave a detail dict indistinguishable from a
+    clean scan unless the error is treated as incompleteness.
+    """
+    art = _artifact()
+    art["error"] = "unexpected EOF while reading archive"
+    assert _statuses(_openvex([art]), "AISBOM-PICKLE-RCE") == [
+        "under_investigation"
+    ]
+
+    gguf = _artifact(name="m.gguf", framework="GGUF", error="bad header")
+    assert _statuses(_openvex([gguf]), "AISBOM-GGUF-TEMPLATE-INJECTION") == [
+        "under_investigation"
+    ]
+
+
 def test_truncated_onnx_graph_is_under_investigation():
     doc = _openvex([
         _artifact(name="m.onnx", framework="ONNX", parsed=True, truncated=True)
@@ -652,7 +766,9 @@ def test_cyclonedx_vex_validates_against_the_strict_1_7_schema():
 
 def test_cyclonedx_vex_maps_every_openvex_status():
     """The two vocabularies differ; the mapping must be total."""
-    baseline = {"artifact-3-fixed.pt": {"AISBOM-PICKLE-RCE": "affected"}}
+    baseline = BaselineIndex(
+        by_name={"fixed.pt": {"AISBOM-PICKLE-RCE": "affected"}}
+    )
     statements = derive_statements(
         [
             _artifact(name="bad.pt", threats=["os.system"]),
@@ -749,7 +865,7 @@ def test_baseline_findings_reads_structured_properties():
         ]
     }
     findings = baseline_findings(sbom)
-    assert findings["artifact-0-model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
+    assert findings.by_name["model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
 
 
 def test_baseline_findings_degrades_to_the_description_for_pre_54_sboms():
@@ -772,7 +888,7 @@ def test_baseline_findings_degrades_to_the_description_for_pre_54_sboms():
         ]
     }
     findings = baseline_findings(sbom)
-    assert findings["artifact-0-model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
+    assert findings.by_name["model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
 
 
 def test_pre_54_baseline_does_not_manufacture_a_fixed_statement():
@@ -781,6 +897,7 @@ def test_pre_54_baseline_does_not_manufacture_a_fixed_statement():
         "components": [
             {
                 "bom-ref": "artifact-0-model.pt",
+                "name": "model.pt",
                 "description": (
                     "Risk: CRITICAL (RCE Detected: os.system) | "
                     "Framework: PyTorch | Legal: PASS | License: MIT"
@@ -798,6 +915,7 @@ def test_baseline_findings_accepts_a_path(tmp_path):
         "components": [
             {
                 "bom-ref": "artifact-0-model.pt",
+                "name": "model.pt",
                 "properties": [
                     {"name": "aisbom:format", "value": "pickle"},
                     {"name": "aisbom:pickle:opcode", "value": "os.system"},
@@ -806,17 +924,20 @@ def test_baseline_findings_accepts_a_path(tmp_path):
         ]
     }))
     findings = baseline_findings(str(path))
-    assert findings["artifact-0-model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
+    assert findings.by_name["model.pt"]["AISBOM-PICKLE-RCE"] == "affected"
 
 
-def test_baseline_findings_skips_components_without_a_ref_or_format():
+def test_baseline_findings_skips_components_with_no_recognised_format():
+    """Library components carry no `aisbom:format` and are not artifacts."""
     sbom = {
         "components": [
-            {"name": "no-ref", "properties": [{"name": "aisbom:format", "value": "pickle"}]},
             {"bom-ref": "lib-1", "name": "torch", "version": "2.0.1"},
+            {"bom-ref": "lib-2", "name": "requests", "version": "2.31.0"},
         ]
     }
-    assert baseline_findings(sbom) == {}
+    findings = baseline_findings(sbom)
+    assert findings.by_name == {}
+    assert findings.by_hash == {}
 
 
 def test_signals_from_component_reads_onnx_counts():
