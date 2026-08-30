@@ -21,6 +21,12 @@ from .scanner import DeepScanner
 from .diff import SBOMDiff
 from .properties import build_component_properties
 from .modelcard import bom_ref_for, inject_model_cards
+from .vex import (
+    baseline_findings,
+    derive_statements,
+    generate_cyclonedx_vex,
+    generate_openvex,
+)
 from .spdx_gen import _sha256_or_none
 
 import threading
@@ -377,10 +383,85 @@ class OutputFormat(str, Enum):
     SPDX = "spdx"
 
 
+class VexFormat(str, Enum):
+    OPENVEX = "openvex"
+    CYCLONEDX = "cyclonedx"
+    BOTH = "both"
+
+
 # `--spdx-version` values the emitter can actually honour. 2.3 stays the
 # default so existing `--format spdx` output is unchanged; 3.0 emits the
 # AI Profile JSON-LD from `spdx3_gen`.
 _SPDX_VERSIONS = {"2.3", "3.0"}
+
+def _vex_paths(output: str) -> tuple[str, str]:
+    """Derive the two VEX filenames from the SBOM's own output path.
+
+    ``sbom.json`` yields ``sbom.openvex.json`` and ``sbom.vex.cdx.json``, so the
+    three files sort together and it is obvious which SBOM they describe.
+    """
+    stem = output[: -len(".json")] if output.endswith(".json") else output
+    return f"{stem}.openvex.json", f"{stem}.vex.cdx.json"
+
+
+def _emit_vex(
+    *,
+    sbom_json: str,
+    artifacts: list[dict],
+    output: str,
+    vex_format: "VexFormat",
+    baseline_path: str | None,
+    schema_version: str,
+) -> None:
+    """Write the VEX document(s) that accompany a just-written SBOM.
+
+    The serial number is read back out of the serialized SBOM rather than off
+    the ``Bom`` object: it is the value the file on disk actually carries, and
+    it is what makes every statement's product reference resolvable.
+    """
+    serial = json.loads(sbom_json).get("serialNumber")
+
+    baseline = None
+    if baseline_path:
+        try:
+            baseline = baseline_findings(baseline_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            # A bad baseline must not silently produce a document claiming
+            # every finding is `fixed` — that is the one failure mode of this
+            # feature a consumer could act on and be badly wrong.
+            err_console.print(
+                f"[bold red]✖ Could not read VEX baseline[/bold red] "
+                f"{baseline_path}: {exc}"
+            )
+            raise typer.Exit(code=1)
+
+    statements = derive_statements(artifacts, baseline)
+    openvex_path, cyclonedx_path = _vex_paths(output)
+
+    if vex_format in (VexFormat.OPENVEX, VexFormat.BOTH):
+        with open(openvex_path, "w") as f:
+            f.write(generate_openvex(statements, sbom_serial=serial))
+        console.print(
+            f"[bold green]✔ VEX Generated:[/bold green] {openvex_path} (OpenVEX 0.2.0)"
+        )
+
+    if vex_format in (VexFormat.CYCLONEDX, VexFormat.BOTH):
+        with open(cyclonedx_path, "w") as f:
+            f.write(generate_cyclonedx_vex(
+                statements, sbom_serial=serial, spec_version=schema_version
+            ))
+        console.print(
+            f"[bold green]✔ VEX Generated:[/bold green] {cyclonedx_path} "
+            f"(CycloneDX v{schema_version} VEX)"
+        )
+
+    affected = sum(1 for s in statements if s.status == "affected")
+    fixed = sum(1 for s in statements if s.status == "fixed")
+    summary = f"[dim]{len(statements)} VEX statement(s): {affected} affected"
+    if fixed:
+        summary += f", {fixed} fixed since baseline"
+    console.print(summary + ".[/dim]")
+
 
 def _generate_markdown(results: dict) -> str:
     """Render a GitHub-flavored Markdown report for CI artifacts."""
@@ -448,6 +529,28 @@ def scan(
             "uploaded SBOM becomes publicly viewable for 30 days."
         ),
     ),
+    vex: bool = typer.Option(
+        False,
+        "--vex",
+        help=(
+            "Also emit VEX documents alongside the SBOM, stating per finding "
+            "whether each scanned artifact is actually affected."
+        ),
+        rich_help_panel="Advanced Options",
+    ),
+    vex_format: VexFormat = typer.Option(
+        VexFormat.BOTH,
+        help="VEX flavor to emit with --vex: openvex, cyclonedx, or both.",
+        rich_help_panel="Advanced Options",
+    ),
+    vex_baseline: str | None = typer.Option(
+        None,
+        help=(
+            "A previous CycloneDX SBOM. Findings present there and absent now "
+            "are reported with VEX status `fixed`."
+        ),
+        rich_help_panel="Advanced Options",
+    ),
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
@@ -465,6 +568,25 @@ def scan(
         console.print(
             f"[bold red]✖ Unsupported SPDX version:[/bold red] {spdx_version} "
             f"(expected one of: {', '.join(sorted(_SPDX_VERSIONS))})"
+        )
+        raise typer.Exit(code=1)
+
+    # Rejected up front for the same reason. VEX statements address components
+    # by the CycloneDX document's serial number and bom-refs, so a VEX file
+    # emitted next to a Markdown report or an SPDX document would reference a
+    # document the run never wrote — a dangling cross-reference is worse than
+    # a refusal, and the user finds out now rather than after the scan.
+    if vex and format != OutputFormat.JSON:
+        console.print(
+            "[bold red]✖ --vex requires --format json[/bold red] — VEX "
+            "statements reference the CycloneDX SBOM's components by bom-ref, "
+            f"which a '{format.value}' run does not produce."
+        )
+        raise typer.Exit(code=1)
+
+    if vex and vex_baseline and not Path(vex_baseline).is_file():
+        console.print(
+            f"[bold red]✖ VEX baseline not found:[/bold red] {vex_baseline}"
         )
         raise typer.Exit(code=1)
 
@@ -762,6 +884,16 @@ def scan(
             f.write(sbom_json)
         
         console.print(f"\n[bold green]✔ Compliance Artifact Generated:[/bold green] {output} (CycloneDX v{schema_version})")
+
+        if vex:
+            _emit_vex(
+                sbom_json=sbom_json,
+                artifacts=results['artifacts'],
+                output=output,
+                vex_format=vex_format,
+                baseline_path=vex_baseline,
+                schema_version=schema_version,
+            )
 
         has_content = bool(results.get('artifacts') or results.get('dependencies'))
         if share and has_content:

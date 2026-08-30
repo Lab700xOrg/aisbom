@@ -320,3 +320,154 @@ def test_cli_diff_command(tmp_path):
     assert result.exit_code == 1
     assert "FAILURE" in result.stdout
     assert "mock_malware.pt" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# #113 — VEX output alongside the SBOM.
+# ---------------------------------------------------------------------------
+
+
+def _scan_with_vex(tmp_path, *extra_args, expect_exit=2):
+    """Scan a tree holding one malicious .pt and one GGUF, emitting VEX."""
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_gguf(tmp_path)
+    output_path = tmp_path / "sbom.json"
+    result = runner.invoke(
+        app,
+        ["scan", str(tmp_path), "--output", str(output_path), "--vex", *extra_args],
+    )
+    assert result.exit_code == expect_exit, result.output
+    return output_path, result
+
+
+def test_vex_writes_both_flavors_beside_the_sbom(tmp_path):
+    _scan_with_vex(tmp_path)
+    assert (tmp_path / "sbom.openvex.json").exists()
+    assert (tmp_path / "sbom.vex.cdx.json").exists()
+
+
+def test_vex_products_resolve_into_the_sbom_the_same_run_wrote(tmp_path):
+    """AC #3: the cross-reference must actually join the two documents."""
+    output_path, _ = _scan_with_vex(tmp_path)
+    sbom = json.loads(output_path.read_text())
+    openvex = json.loads((tmp_path / "sbom.openvex.json").read_text())
+
+    serial = sbom["serialNumber"]
+    sbom_refs = {c["bom-ref"] for c in sbom["components"]}
+
+    assert openvex["statements"], "expected at least one statement"
+    for statement in openvex["statements"]:
+        document, _, ref = statement["products"][0]["@id"].partition("#")
+        assert document == serial
+        assert ref in sbom_refs
+
+
+def test_vex_cyclonedx_affects_resolve_into_the_sbom(tmp_path):
+    output_path, _ = _scan_with_vex(tmp_path)
+    sbom = json.loads(output_path.read_text())
+    vex = json.loads((tmp_path / "sbom.vex.cdx.json").read_text())
+
+    sbom_refs = {c["bom-ref"] for c in sbom["components"]}
+    for vulnerability in vex["vulnerabilities"]:
+        for affected in vulnerability["affects"]:
+            assert affected["ref"] in sbom_refs
+
+
+def test_vex_reports_the_malicious_pickle_as_affected(tmp_path):
+    _scan_with_vex(tmp_path)
+    openvex = json.loads((tmp_path / "sbom.openvex.json").read_text())
+    affected = [
+        s for s in openvex["statements"]
+        if s["status"] == "affected"
+        and s["vulnerability"]["name"] == "AISBOM-PICKLE-RCE"
+    ]
+    assert len(affected) == 1
+    assert "mock_malware.pt" in affected[0]["products"][0]["@id"]
+
+
+def test_vex_format_openvex_writes_only_that_flavor(tmp_path):
+    _scan_with_vex(tmp_path, "--vex-format", "openvex")
+    assert (tmp_path / "sbom.openvex.json").exists()
+    assert not (tmp_path / "sbom.vex.cdx.json").exists()
+
+
+def test_vex_format_cyclonedx_writes_only_that_flavor(tmp_path):
+    _scan_with_vex(tmp_path, "--vex-format", "cyclonedx")
+    assert (tmp_path / "sbom.vex.cdx.json").exists()
+    assert not (tmp_path / "sbom.openvex.json").exists()
+
+
+def test_no_vex_flag_writes_no_vex_files(tmp_path):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    output_path = tmp_path / "sbom.json"
+    runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+    assert output_path.exists()
+    assert not (tmp_path / "sbom.openvex.json").exists()
+    assert not (tmp_path / "sbom.vex.cdx.json").exists()
+
+
+def test_vex_is_refused_for_non_cyclonedx_output(tmp_path):
+    """A VEX file next to an SPDX document would dangle."""
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    result = runner.invoke(
+        app,
+        [
+            "scan", str(tmp_path),
+            "--format", "spdx",
+            "--output", str(tmp_path / "sbom.spdx.json"),
+            "--vex",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--vex requires --format json" in result.output
+    assert not list(tmp_path.glob("*openvex*"))
+
+
+def test_vex_missing_baseline_fails_before_scanning(tmp_path):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    result = runner.invoke(
+        app,
+        [
+            "scan", str(tmp_path),
+            "--output", str(tmp_path / "sbom.json"),
+            "--vex",
+            "--vex-baseline", str(tmp_path / "nope.json"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "VEX baseline not found" in result.output
+
+
+def test_vex_baseline_turns_a_removed_finding_into_fixed(tmp_path):
+    """Remediation evidence: scan a dirty tree, clean it, re-scan with baseline."""
+    import pickle
+    import zipfile
+
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    baseline_path = tmp_path / "baseline.json"
+    runner.invoke(app, ["scan", str(tmp_path), "--output", str(baseline_path)])
+    assert baseline_path.exists()
+
+    # Replace the malicious payload with a benign pickle at the same path, so
+    # the artifact index (and therefore the bom-ref) is unchanged.
+    with zipfile.ZipFile(tmp_path / "mock_malware.pt", "w") as zf:
+        zf.writestr("archive/data.pkl", pickle.dumps({"weights": [1, 2, 3]}))
+        zf.writestr("archive/version", "3")
+
+    result = runner.invoke(
+        app,
+        [
+            "scan", str(tmp_path),
+            "--output", str(tmp_path / "after.json"),
+            "--vex",
+            "--vex-format", "openvex",
+            "--vex-baseline", str(baseline_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    openvex = json.loads((tmp_path / "after.openvex.json").read_text())
+    fixed = [s for s in openvex["statements"] if s["status"] == "fixed"]
+    assert len(fixed) == 1
+    assert fixed[0]["vulnerability"]["name"] == "AISBOM-PICKLE-RCE"
+    assert "fixed since baseline" in result.output

@@ -418,6 +418,40 @@ def test_config_larger_than_the_read_budget_is_not_called_clean(tmp_path, monkey
     assert "CRITICAL" not in art["risk_level"]
 
 
+def test_truncated_config_is_not_cleared_in_vex_either(tmp_path, monkeypatch):
+    """The same "not called clean" rule, end to end through VEX (#113).
+
+    Found on a live target rather than a fixture: `hf://google-bert/
+    bert-base-uncased` ships a `tf_model.h5` whose config exceeds the read
+    budget over a range request, and the first VEX implementation answered
+    `not_affected` — "declares no Lambda layer" — for it. Over a range request
+    that is the common case for a `.h5`, so this asserts the scanner's
+    truncation flag actually reaches the compliance artifact.
+    """
+    import aisbom.scanner as scanner_mod
+    from aisbom.vex import derive_statements
+
+    cfg = _keras2_config(with_lambda=False)
+    cfg["config"]["layers"].extend(
+        {"class_name": "Dense", "config": {"name": f"pad_{i}", "units": 64}}
+        for i in range(2000)
+    )
+    with zipfile.ZipFile(tmp_path / "big.keras", "w") as z:
+        z.writestr("config.json", json.dumps(cfg))
+        z.writestr("metadata.json", json.dumps({"keras_version": "3.5.0"}))
+
+    monkeypatch.setattr(scanner_mod, "KERAS_MAX_SCAN_BYTES", 4096)
+    artifacts = DeepScanner(str(tmp_path)).scan()["artifacts"]
+
+    statements = derive_statements(artifacts)
+    keras_statements = [
+        s for s in statements
+        if s.finding_class.id == "AISBOM-KERAS-LAMBDA-RCE"
+    ]
+    assert [s.status for s in keras_statements] == ["under_investigation"]
+    assert keras_statements[0].justification is None
+
+
 # --- Hugging Face resolution ----------------------------------------------
 
 @pytest.mark.parametrize("filename", [
