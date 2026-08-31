@@ -71,3 +71,16 @@ jobs:
           test -s vex-sbom.openvex.json
           test -s vex-sbom.vex.cdx.json
           poetry run aisbom scan . --vex --vex-baseline vex-sbom.json --output vex-rescan.json --no-fail-on-risk
+
+      # Exercises all three input routes and both gate outcomes. `--fail-under 0`
+      # must pass and `--fail-under 101` must exit 2, so a gate that silently
+      # stopped gating would fail the build rather than going unnoticed.
+      - name: Smoke Test #12 - Completeness Score
+        run: |
+          poetry run aisbom score sbom.json
+          poetry run aisbom score sbom.json --json
+          poetry run aisbom score . --json
+          poetry run aisbom score vex-sbom.json --fail-under 0
+          if poetry run aisbom score sbom.json --fail-under 101; then
+            echo "::error::--fail-under did not gate on a failing score"; exit 1
+          fi

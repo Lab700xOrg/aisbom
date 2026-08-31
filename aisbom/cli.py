@@ -8,26 +8,20 @@ from enum import Enum
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from cyclonedx.model.bom import Bom
-from cyclonedx.model.component import Component, ComponentType
-from cyclonedx.model import HashAlgorithm, HashType, Property
-from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6, JsonV1Dot7
-from cyclonedx.factory.license import LicenseFactory
 from .mock_generator import create_mock_malware_file, create_mock_restricted_file, create_mock_gguf, create_demo_diff_sboms, create_mock_broken_file
 from pathlib import Path
 from urllib.parse import urlparse
 import importlib.metadata
 from .scanner import DeepScanner
 from .diff import SBOMDiff
-from .properties import build_component_properties
-from .modelcard import bom_ref_for, inject_model_cards
+from .cyclonedx_gen import build_cyclonedx_json
+from . import score as score_mod
 from .vex import (
     baseline_findings,
     derive_statements,
     generate_cyclonedx_vex,
     generate_openvex,
 )
-from .spdx_gen import _sha256_or_none
 
 import threading
 import time
@@ -796,61 +790,7 @@ def scan(
         for err in parse_errors:
             console.print(f"  - Could not parse [yellow]{err['file']}[/yellow]: {err['error']}")
     
-    # 3. Generate CycloneDX SBOM (Standard Compliance)
-    bom = Bom()
-    lf = LicenseFactory()
-    
-    # Add Models
-    for art_index, art in enumerate(results['artifacts']):
-        c = Component(
-            name=art['name'],
-            type=ComponentType.MACHINE_LEARNING_MODEL,
-            # An explicit, stable bom-ref. Left to the library this is a fresh
-            # random string on every run, which nothing downstream can rely on
-            # and which cannot be computed ahead of serialization — so the
-            # modelCard splice would have no identifier to join on and would
-            # fall back to matching by basename, which collides (#111).
-            bom_ref=bom_ref_for(art_index, art),
-            description=f"Risk: {art['risk_level']} | Framework: {art['framework']} | Legal: {art['legal_status']} | License: {art.get('license')}"
-        )
-        # Add SHA256 Hash only when the field actually holds one. The scanner
-        # stores the sentinels `remote_unhashed` (range-request scans never
-        # read the whole file) and `hash_error` in the same field, and the old
-        # `!= 'hash_error'` guard let `remote_unhashed` through as a SHA-256
-        # digest — which made every hf:// SBOM fail CycloneDX validation, at
-        # 1.6 as well as 1.7. Reuses spdx_gen's predicate, which already had to
-        # solve this for SPDX (#101), rather than blacklisting sentinel names:
-        # a sentinel added later would silently reintroduce the bug.
-        digest = _sha256_or_none(art.get('hash'))
-        if digest:
-            c.hashes.add(HashType(
-                alg=HashAlgorithm.SHA_256,
-                content=digest
-            ))
-        # Add License info to SBOM if known
-        if art.get('license') and art['license'] != 'Unknown':
-            # Create a License object (using name since we don't have SPDX ID validation yet)
-            lic = lf.make_from_string(art['license'])
-            c.licenses.add(lic)
-
-        # Attach structured, namespaced per-format findings as CycloneDX
-        # properties so consumers can render them directly (the description
-        # string above is kept unchanged for backwards compatibility).
-        for prop_name, prop_value in build_component_properties(art):
-            c.properties.add(Property(name=prop_name, value=prop_value))
-
-        bom.components.add(c)
-
-    # Add Libraries
-    for dep in results['dependencies']:
-        c = Component(
-            name=dep['name'],
-            version=dep['version'],
-            type=ComponentType.LIBRARY
-        )
-        bom.components.add(c)
-
-    # 4. Save to Disk
+    # 3. Save to Disk
     if output is None:
         if format == OutputFormat.JSON:
              output = "sbom.json"
@@ -860,25 +800,7 @@ def scan(
              output = "aisbom-report.md"
 
     if format == OutputFormat.JSON:
-        if schema_version == "1.5":
-            outputter = JsonV1Dot5(bom)
-        elif schema_version == "1.6":
-            outputter = JsonV1Dot6(bom)
-        else:
-            outputter = JsonV1Dot7(bom)
-
-        sbom_json = outputter.output_as_string()
-
-        # ML-BOM enrichment (#111). `modelCard` only exists from CycloneDX 1.5
-        # on, but 1.5/1.6 output is what older platform receivers and third
-        # party tools were pinned against, so the block is added to 1.7 only —
-        # asking for an older schema version keeps giving byte-identical
-        # output to before this change. cyclonedx-python-lib cannot model the
-        # field, hence the post-serialization splice.
-        if schema_version == "1.7":
-            sbom_json = inject_model_cards(
-                sbom_json, results['artifacts'], results.get('hf_model_card')
-            )
+        sbom_json = build_cyclonedx_json(results, schema_version)
 
         with open(output, "w") as f:
             f.write(sbom_json)
@@ -1169,6 +1091,242 @@ def bypass_scorecard(
             )
             raise typer.Exit(code=2)
         console.print("\n[green]Scorecard gate passed[/green] — no case below the floor.")
+
+
+def _render_score_footer() -> None:
+    """Print the post-score footer, mirroring `scan`'s "Next steps" panel.
+
+    Deliberately does *not* sell the gaps back to the user. Almost everything
+    the plan asks for — `--vex`, a local re-scan, `hf://` metadata — is a free
+    CLI action, so framing the gap list as a reason to buy would be both a dark
+    pattern and inaccurate. What the platform genuinely adds over a one-shot
+    grade is the trend across scans, which is what this points at.
+    """
+    console.print(Panel(
+        "📈 [bold]Track this score across scans:[/bold]\n"
+        f"   [underline cyan]{_attribution_ref('https://app.aisbom.io')}[/underline cyan]\n"
+        f"📰 [bold]Latest model advisories:[/bold] "
+        f"[underline cyan]{_attribution_ref('https://aisbom.io/advisories')}[/underline cyan]",
+        title=" Next steps ",
+        border_style="blue",
+        expand=False,
+    ))
+
+
+def _grade_style(grade: str) -> str:
+    return {
+        "A": "bold green", "B": "green", "C": "yellow",
+        "D": "bold yellow", "F": "bold red",
+    }.get(grade, "white")
+
+
+def _score_style(value: float) -> str:
+    if value >= 85:
+        return "green"
+    if value >= 55:
+        return "yellow"
+    return "red"
+
+
+@app.command()
+def score(
+    target: str = typer.Argument(
+        "sbom.json",
+        help=(
+            "A CycloneDX SBOM to grade, or a scan target to scan and then grade "
+            "(directory, hf:// slug, or HTTP(S) URL)."
+        ),
+    ),
+    fail_under: float = typer.Option(
+        None,
+        "--fail-under",
+        help="Exit with code 2 if the overall score is below this threshold (CI gate).",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the machine-readable result only."
+    ),
+    vex_file: str = typer.Option(
+        None,
+        "--vex",
+        help=(
+            "A VEX document to credit for the VEX dimension. Defaults to the "
+            "files `scan --vex` writes next to the SBOM."
+        ),
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="List every affected component under each improvement, not just a count.",
+    ),
+    strict: bool = typer.Option(
+        False, help="Use strict allowlisting mode when TARGET is a scan target."
+    ),
+):
+    """
+    Grade an AIBOM for completeness and quality.
+
+    Scores a CycloneDX document across seven dimensions — component identity,
+    checksums, licenses, model-card coverage, dataset provenance, VEX presence
+    and document provenance — and names the specific gaps behind each one.
+    Use --fail-under to gate CI on the result.
+    """
+    t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+    t.start()
+
+    scan_id = uuid.uuid4().hex
+    telemetry_threads: list[threading.Thread | None] = [_maybe_emit_install_event()]
+
+    path = Path(target)
+    sbom_path: Path | None = None
+
+    if path.is_file():
+        # An existing file is graded as-is. Its siblings are where `scan --vex`
+        # would have put the VEX documents, so they are discoverable from here.
+        try:
+            doc = score_mod.load_sbom(path)
+        except score_mod.ScoreInputError as exc:
+            console.print(f"[bold red]✖ {exc}[/bold red]")
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+        sbom_path = path
+    elif path.is_dir() or _classify_target(target) in ("huggingface", "https", "http"):
+        # A scan target: produce the document, then grade what was produced.
+        # Built through the same `build_cyclonedx_json` that `scan` writes, so
+        # the grade describes exactly the file a scan would have handed over.
+        #
+        # Under --json the scan chrome goes to stderr: the flag promises the
+        # machine-readable result *only*, so a progress panel on stdout would
+        # make `aisbom score <dir> --json | jq` fail on the first line.
+        progress = err_console if json_output else console
+        progress.print(
+            Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]")
+        )
+        try:
+            scanner = DeepScanner(target, strict_mode=strict, lint=False)
+            with progress.status("[cyan]Scanning...[/cyan]"):
+                results = scanner.scan()
+        except Exception as exc:
+            console.print(f"[bold red]✖ Scan failed:[/bold red] {exc}")
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+
+        # A fetch or parse failure is recorded in results["errors"] and the
+        # scan returns normally, so the except above never fires. Grading what
+        # survived would hand back a completeness score for a document that is
+        # silently missing the shard that failed — precisely the claim this
+        # command exists to make trustworthy. `scan` already exits 1 on these;
+        # scoring must not be the softer path.
+        if results.get("errors"):
+            console.print(
+                "[bold red]✖ Refusing to score a partial scan[/bold red] — "
+                f"{len(results['errors'])} target(s) could not be read:"
+            )
+            for err in results["errors"]:
+                console.print(
+                    f"  [red]•[/red] {err.get('file', '?')}: {err.get('error', '?')}"
+                )
+            console.print(
+                "\n[dim]A grade computed from only the artifacts that scanned "
+                "would overstate the document's completeness.[/dim]"
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+
+        doc = json.loads(build_cyclonedx_json(results, "1.7"))
+    else:
+        console.print(
+            f"[bold red]✖ Cannot score[/bold red] {target}: not an existing file, "
+            "a directory, an hf:// slug or an HTTP(S) URL."
+        )
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=1)
+
+    if vex_file:
+        vex_documents = [Path(vex_file)]
+        if not vex_documents[0].is_file():
+            console.print(f"[bold red]✖ VEX document not found:[/bold red] {vex_file}")
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+    else:
+        vex_documents = score_mod.discover_vex(sbom_path)
+
+    report = score_mod.score_sbom(doc, vex_documents=vex_documents)
+
+    telemetry_threads.append(telemetry.post_event(
+        "cli_score",
+        {"grade": report.grade, "models": str(report.model_count)},
+        scan_id=scan_id,
+    ))
+
+    if json_output:
+        console.print_json(json.dumps(report.to_dict()))
+        _flush_telemetry_threads(telemetry_threads)
+        if fail_under is not None and report.overall < fail_under:
+            raise typer.Exit(code=2)
+        return
+
+    grade_style = _grade_style(report.grade)
+    console.print(Panel.fit(
+        f"[{grade_style}]{report.grade}[/{grade_style}]  "
+        f"[bold]{report.overall:.1f}[/bold]/100\n"
+        f"[dim]{report.component_count} component(s), "
+        f"{report.model_count} model(s), CycloneDX {report.spec_version or '?'}[/dim]",
+        title="AIBOM completeness",
+    ))
+
+    table = Table(title="Score by dimension", show_lines=False)
+    table.add_column("Dimension", style="cyan", no_wrap=True)
+    table.add_column("Weight", justify="right", style="dim")
+    table.add_column("Score", justify="right")
+    for dim in report.dimensions:
+        style = _score_style(dim.score)
+        table.add_row(
+            dim.label, str(dim.weight), f"[{style}]{dim.score:.0f}[/{style}]"
+        )
+    console.print(table)
+
+    # Ranked by points recoverable rather than listed by dimension. A flat list
+    # gives a one-flag ten-point VEX fix the same weight as a sub-point missing
+    # version string, and repeats an identical remedy once per component — on a
+    # 50-model scan that is ~150 lines nobody reads. Per-component detail is
+    # still available under --verbose, and always in --json.
+    plan = report.improvement_plan()
+    if plan:
+        console.print(
+            f"\n[bold]How to improve[/bold] "
+            f"[dim]({report.overall:.1f} → {report.potential:.1f} possible)[/dim]"
+        )
+        for dim in plan:
+            console.print(
+                f"  [green]{'+' + format(dim.points_recoverable, '.1f'):>6}[/green]  "
+                f"[bold]{dim.label}[/bold]"
+                + (f" [dim]— {dim.summary}[/dim]" if dim.summary else "")
+            )
+            if dim.remediation:
+                console.print(f"         [cyan]→[/cyan] {dim.remediation}")
+            if verbose:
+                for gap in dim.gaps:
+                    console.print(f"           [dim]•[/dim] [dim]{gap}[/dim]")
+        if not verbose and any(len(d.gaps) > 1 for d in plan):
+            console.print(
+                "\n[dim]Re-run with --verbose to list every affected component, "
+                "or --json for the full breakdown.[/dim]"
+            )
+    else:
+        console.print("\n[green]No gaps found — every dimension is complete.[/green]")
+
+    _render_score_footer()
+
+    if fail_under is not None and report.overall < fail_under:
+        console.print(
+            f"\n[bold red]FAILURE: score {report.overall:.1f} is below the "
+            f"--fail-under threshold of {fail_under:.1f}.[/bold red]"
+        )
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=2)
+
+    _check_update_status()
+    _flush_telemetry_threads(telemetry_threads)
 
 
 @app.command()

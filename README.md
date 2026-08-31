@@ -309,6 +309,92 @@ aisbom scan . --vex --vex-baseline last-release-sbom.json --output sbom.json
 Baselines predating structured findings still work: the finding is recovered
 from the component description rather than reported as a spurious `fixed`.
 
+### Completeness score (`aisbom score`)
+
+A scan can come back perfectly clean and still produce an SBOM that names no
+licenses, carries no checksums and describes none of the models. `aisbom score`
+grades the document you are about to hand an auditor:
+
+```bash
+aisbom score sbom.json
+```
+
+```
+╭─ AIBOM completeness ─╮
+│ C  63.6/100          │
+│ 7 component(s), 4 model(s), CycloneDX 1.7 │
+╰──────────────────────╯
+```
+
+Seven dimensions, weighted to 100 — 65 points of NTIA-style minimum elements,
+25 of AI-specific description, 10 of VEX:
+
+| Dimension | Weight | Earned by |
+|---|---|---|
+| Component identity | 20 | name, stable `bom-ref`, real version |
+| Checksums | 20 | SHA-256 on every model component |
+| Licenses | 15 | a declared license per component |
+| Model-card coverage | 15 | task / architecture per model |
+| Dataset provenance | 10 | named training datasets |
+| VEX presence | 10 | exploitability statements alongside the inventory |
+| Document provenance | 10 | `metadata.tools`, timestamp, serial number, spec version |
+
+Grades: **A** ≥85, **B** ≥70, **C** ≥55, **D** ≥40, **F** below 40.
+
+The output is a worklist, not a verdict. Gaps are grouped by dimension and
+ranked by how many points closing them is worth, so the cheapest large win
+comes first:
+
+```
+How to improve (53.6 → 100.0 possible)
+   +15.0  Model-card coverage — 4 of 4 model(s) declare no task or architecture
+          → aisbom scan hf://<org>/<model>
+   +10.7  Licenses — 5 of 7 component(s) declare no license
+   +10.0  Dataset provenance — 4 of 4 model(s) name no training data
+   +10.0  VEX presence — no exploitability statements
+          → aisbom scan . --vex --output sbom.json
+    +0.7  Component identity — 1 component(s) incompletely identified
+```
+
+`--verbose` lists every affected component under each entry; `--json` always
+carries the full per-component detail.
+
+Score a target directly and it is scanned first — the document graded is the
+one `aisbom scan` would have written:
+
+```bash
+aisbom score ./models
+aisbom score hf://google-bert/bert-base-uncased
+```
+
+VEX documents written by `scan --vex` are found automatically next to the SBOM;
+`--vex <path>` points elsewhere. A VEX document only counts if it actually
+describes *this* SBOM — both formats bind to the document's serial number — so
+files left behind by an earlier scan are not credited. Scoring a target whose
+scan hit a fetch or parse error exits `1` rather than grading the partial
+result, since a completeness score computed from only the artifacts that
+scanned would overstate the document.
+
+**As a CI gate:**
+
+```bash
+aisbom score sbom.json --fail-under 70
+```
+
+Exit `2` if the score is below the threshold, `1` on an unreadable or
+non-CycloneDX input, `0` otherwise. `--json` emits the full breakdown for
+programmatic use, and still honours `--fail-under`.
+
+A note on what is reachable: `hf://` scans stream byte ranges and never read a
+whole file, so they cannot produce checksums and top out at 80. That is
+reported as a gap with its cause named, not silently excused — scan a local
+copy to fill it in. Scoring is deliberately fixed-denominator: every document
+is graded against all seven dimensions, because a grade computed on a
+per-document denominator is not comparable with anyone else's.
+
+`aisbom score` grades CycloneDX. SPDX input is rejected rather than partially
+scored.
+
 ---
 
 ## Use as a GitHub Action
