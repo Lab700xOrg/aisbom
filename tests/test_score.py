@@ -334,14 +334,130 @@ def test_gaps_are_not_repeated_per_component_in_the_remediation():
 
 
 # ---------------------------------------------------------------------------
-# VEX discovery.
+# Review findings (PR #100).
 # ---------------------------------------------------------------------------
 
-def test_inline_vulnerabilities_satisfy_the_vex_dimension():
+@pytest.mark.parametrize("alg", ["MD5", "SHA-1"])
+def test_a_non_sha256_digest_earns_no_checksum_credit(alg):
+    """The dimension is defined as SHA-256; a weaker digest is not it."""
     doc = _minimal_sbom()
-    doc["vulnerabilities"] = [{"id": "x"}]
+    doc["components"][0]["hashes"] = [{"alg": alg, "content": "d" * 32}]
+    assert _dim(score.score_sbom(doc), "checksums").score == 0.0
+
+
+def test_a_malformed_sha256_earns_no_checksum_credit():
+    doc = _minimal_sbom()
+    doc["components"][0]["hashes"] = [{"alg": "SHA-256", "content": "not-a-digest"}]
+    assert _dim(score.score_sbom(doc), "checksums").score == 0.0
+
+
+def test_sha256_alongside_a_weaker_digest_still_counts():
+    doc = _minimal_sbom()
+    doc["components"][0]["hashes"] = [
+        {"alg": "MD5", "content": "d" * 32},
+        {"alg": "SHA-256", "content": "e" * 64},
+    ]
+    assert _dim(score.score_sbom(doc), "checksums").score == 100.0
+
+
+def test_vulnerabilities_without_an_analysis_state_are_not_vex():
+    """A vulnerability inventory is not an exploitability statement."""
+    doc = _minimal_sbom()
+    doc["vulnerabilities"] = [{"id": "CVE-2024-1", "ratings": [{"severity": "high"}]}]
+    assert _dim(score.score_sbom(doc), "vex").score == 0.0
+
+
+def test_vulnerabilities_with_an_analysis_state_are_vex():
+    doc = _minimal_sbom()
+    doc["vulnerabilities"] = [
+        {"id": "CVE-2024-1", "analysis": {"state": "not_affected"}}
+    ]
     assert _dim(score.score_sbom(doc), "vex").score == 100.0
 
+
+def _openvex(serial, ref="artifact-0-model.pt"):
+    return {
+        "@id": f"{serial}#openvex",
+        "statements": [{
+            "vulnerability": {"name": "AISBOM-PICKLE-RCE"},
+            "status": "not_affected",
+            "products": [{"@id": f"{serial}#{ref}"}],
+        }],
+    }
+
+
+def test_a_stale_sibling_vex_from_a_previous_scan_earns_nothing(tmp_path):
+    """Regenerating an SBOM without --vex leaves the old VEX files on disk.
+    They describe a document with a different serial, so crediting them would
+    award ten points for statements about a scan that no longer exists."""
+    doc = _minimal_sbom()
+    doc["serialNumber"] = "urn:uuid:aaaaaaaa-0000-0000-0000-000000000000"
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps(doc))
+    (tmp_path / "sbom.openvex.json").write_text(json.dumps(
+        _openvex("urn:uuid:bbbbbbbb-1111-1111-1111-111111111111")   # a prior run
+    ))
+    report = score.score_sbom(doc, vex_documents=score.discover_vex(sbom))
+    assert _dim(report, "vex").score == 0.0
+
+
+def test_a_sibling_vex_for_this_document_is_credited(tmp_path):
+    doc = _minimal_sbom()
+    doc["serialNumber"] = "urn:uuid:aaaaaaaa-0000-0000-0000-000000000000"
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps(doc))
+    (tmp_path / "sbom.openvex.json").write_text(
+        json.dumps(_openvex(doc["serialNumber"]))
+    )
+    report = score.score_sbom(doc, vex_documents=score.discover_vex(sbom))
+    assert _dim(report, "vex").score == 100.0
+
+
+def test_a_cyclonedx_vex_is_matched_on_its_serial_number(tmp_path):
+    doc = _minimal_sbom()
+    doc["serialNumber"] = "urn:uuid:aaaaaaaa-0000-0000-0000-000000000000"
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps(doc))
+    (tmp_path / "sbom.vex.cdx.json").write_text(json.dumps({
+        "bomFormat": "CycloneDX",
+        "serialNumber": doc["serialNumber"],
+        "vulnerabilities": [{"id": "X", "analysis": {"state": "not_affected"}}],
+    }))
+    report = score.score_sbom(doc, vex_documents=score.discover_vex(sbom))
+    assert _dim(report, "vex").score == 100.0
+
+
+def test_vex_cannot_be_bound_to_a_document_with_no_serial(tmp_path):
+    """Without a serial there is nothing to bind the statements to, so the
+    claim that they describe *this* document cannot be checked."""
+    doc = _minimal_sbom()                      # no serialNumber
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps(doc))
+    (tmp_path / "sbom.openvex.json").write_text(
+        json.dumps(_openvex("urn:uuid:cccccccc-2222-2222-2222-222222222222"))
+    )
+    report = score.score_sbom(doc, vex_documents=score.discover_vex(sbom))
+    assert _dim(report, "vex").score == 0.0
+
+
+def test_load_sbom_requires_the_cyclonedx_bomformat(tmp_path):
+    """`specVersion` alone does not identify a document as CycloneDX."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"specVersion": "1.7", "components": []}))
+    with pytest.raises(score.ScoreInputError, match="not a CycloneDX"):
+        score.load_sbom(path)
+
+
+def test_load_sbom_rejects_a_document_declaring_another_bomformat(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"bomFormat": "SomethingElse", "specVersion": "1.7"}))
+    with pytest.raises(score.ScoreInputError, match="not a CycloneDX"):
+        score.load_sbom(path)
+
+
+# ---------------------------------------------------------------------------
+# VEX discovery.
+# ---------------------------------------------------------------------------
 
 def test_sibling_vex_filenames_match_what_scan_writes(tmp_path):
     """Mirrors cli._vex_paths so `scan --vex` then `score` needs no flags."""
@@ -359,12 +475,14 @@ def test_discover_vex_finds_only_files_that_exist(tmp_path):
 
 
 def test_a_discovered_vex_document_scores_the_dimension(tmp_path):
+    doc = _minimal_sbom()
+    doc["serialNumber"] = "urn:uuid:dddddddd-3333-3333-3333-333333333333"
     sbom = tmp_path / "sbom.json"
-    sbom.write_text("{}")
+    sbom.write_text(json.dumps(doc))
     (tmp_path / "sbom.openvex.json").write_text(
-        json.dumps({"statements": [{"vulnerability": {"name": "x"}}]})
+        json.dumps(_openvex(doc["serialNumber"]))
     )
-    report = score.score_sbom(_minimal_sbom(), vex_documents=score.discover_vex(sbom))
+    report = score.score_sbom(doc, vex_documents=score.discover_vex(sbom))
     assert _dim(report, "vex").score == 100.0
 
 
@@ -496,9 +614,10 @@ def test_cli_missing_vex_override_is_an_error_not_a_silent_zero(tmp_path):
 
 
 def test_cli_autodiscovers_sibling_vex(tmp_path):
-    path = _write(tmp_path, _partial_sbom())
+    doc = _partial_sbom()
+    path = _write(tmp_path, doc)
     (tmp_path / "sbom.openvex.json").write_text(
-        json.dumps({"statements": [{"vulnerability": {"name": "x"}}]})
+        json.dumps(_openvex(doc["serialNumber"], ref="artifact-1-model.pt"))
     )
     result = runner.invoke(app, ["score", str(path), "--json"])
     payload = json.loads(result.stdout)
@@ -580,6 +699,29 @@ def test_json_still_carries_every_per_component_gap(tmp_path):
     assert len(modelcard["gaps"]) == 2
 
 
+def test_cli_refuses_to_grade_a_partial_scan(tmp_path, monkeypatch):
+    """A fetch or parse failure is recorded in results["errors"] and the scan
+    returns normally, so scoring what survived would hand back a completeness
+    grade for a document that is missing the shard that failed."""
+    from aisbom import cli as cli_mod
+
+    class _PartialScanner:
+        def __init__(self, *a, **kw):
+            pass
+
+        def scan(self):
+            return {
+                "artifacts": [],
+                "dependencies": [],
+                "errors": [{"file": "broken.pt", "error": "unreadable"}],
+            }
+
+    monkeypatch.setattr(cli_mod, "DeepScanner", _PartialScanner)
+    result = runner.invoke(app, ["score", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "broken.pt" in result.stdout
+
+
 def test_cli_scores_a_scan_target_directory(tmp_path):
     """AC #1's second half: score a target, not just a file."""
     from aisbom.mock_generator import create_mock_restricted_file
@@ -615,9 +757,12 @@ def test_scoring_a_directory_matches_scanning_then_scoring_the_file(tmp_path):
 
 
 def test_cli_vex_override_is_honoured(tmp_path):
-    path = _write(tmp_path, _partial_sbom())
+    doc = _partial_sbom()
+    path = _write(tmp_path, doc)
     override = tmp_path / "elsewhere.json"
-    override.write_text(json.dumps({"statements": [{"vulnerability": {"name": "x"}}]}))
+    override.write_text(json.dumps(
+        _openvex(doc["serialNumber"], ref="artifact-1-model.pt")
+    ))
     result = runner.invoke(app, ["score", str(path), "--vex", str(override), "--json"])
     payload = json.loads(result.stdout)
     vex = next(d for d in payload["dimensions"] if d["key"] == "vex")

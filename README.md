@@ -368,7 +368,12 @@ aisbom score hf://google-bert/bert-base-uncased
 ```
 
 VEX documents written by `scan --vex` are found automatically next to the SBOM;
-`--vex <path>` points elsewhere.
+`--vex <path>` points elsewhere. A VEX document only counts if it actually
+describes *this* SBOM — both formats bind to the document's serial number — so
+files left behind by an earlier scan are not credited. Scoring a target whose
+scan hit a fetch or parse error exits `1` rather than grading the partial
+result, since a completeness score computed from only the artifacts that
+scanned would overstate the document.
 
 **As a CI gate:**
 

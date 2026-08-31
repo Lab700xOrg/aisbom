@@ -1209,6 +1209,29 @@ def score(
             console.print(f"[bold red]✖ Scan failed:[/bold red] {exc}")
             _flush_telemetry_threads(telemetry_threads)
             raise typer.Exit(code=1)
+
+        # A fetch or parse failure is recorded in results["errors"] and the
+        # scan returns normally, so the except above never fires. Grading what
+        # survived would hand back a completeness score for a document that is
+        # silently missing the shard that failed — precisely the claim this
+        # command exists to make trustworthy. `scan` already exits 1 on these;
+        # scoring must not be the softer path.
+        if results.get("errors"):
+            console.print(
+                "[bold red]✖ Refusing to score a partial scan[/bold red] — "
+                f"{len(results['errors'])} target(s) could not be read:"
+            )
+            for err in results["errors"]:
+                console.print(
+                    f"  [red]•[/red] {err.get('file', '?')}: {err.get('error', '?')}"
+                )
+            console.print(
+                "\n[dim]A grade computed from only the artifacts that scanned "
+                "would overstate the document's completeness.[/dim]"
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+
         doc = json.loads(build_cyclonedx_json(results, "1.7"))
     else:
         console.print(

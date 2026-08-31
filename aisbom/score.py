@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .spdx_gen import _sha256_or_none
+
 _ML_COMPONENT_TYPE = "machine-learning-model"
 
 # The property #111 routes a Hugging Face card's declared license to. It is
@@ -214,10 +216,14 @@ def load_sbom(path: Path) -> Dict[str, Any]:
             "SPDX scoring is tracked as a follow-up."
         )
 
-    if doc.get("bomFormat") != "CycloneDX" and "specVersion" not in doc:
-        raise ScoreInputError(
-            f"{path} is not a CycloneDX document (no bomFormat/specVersion)."
-        )
+    # `bomFormat` is required by the CycloneDX spec and is the only field that
+    # actually identifies the format. Accepting a bare `specVersion` let any
+    # unrelated JSON object carrying that key be graded and exit 0, despite the
+    # command documenting exit 1 for non-CycloneDX input.
+    if doc.get("bomFormat") != "CycloneDX":
+        declared = doc.get("bomFormat")
+        detail = f"declares bomFormat {declared!r}" if declared else "has no bomFormat"
+        raise ScoreInputError(f"{path} is not a CycloneDX document — it {detail}.")
 
     return doc
 
@@ -245,24 +251,73 @@ def discover_vex(sbom_path: Optional[Path]) -> List[Path]:
     return [p for p in vex_paths_for(sbom_path) if p.is_file()]
 
 
-def _vex_statement_count(path: Path) -> int:
-    """How many statements a VEX document carries, or 0 if it is unreadable.
+def _has_analysed_vulnerabilities(doc: Dict[str, Any]) -> bool:
+    """Whether a CycloneDX document states exploitability, not merely presence.
 
-    An unreadable or empty VEX file scores as absent rather than raising: the
+    A `vulnerabilities` array is an inventory: it can carry an id, ratings and
+    affected components without ever saying whether the product is actually
+    exploitable. VEX *is* the analysis, so only entries carrying an
+    `analysis.state` satisfy the dimension — otherwise ordinary vulnerability
+    data would be mislabelled as VEX and awarded the full ten points.
+    """
+    entries = doc.get("vulnerabilities")
+    if not isinstance(entries, list):
+        return False
+    return any(
+        isinstance(e, dict)
+        and isinstance(e.get("analysis"), dict)
+        and e["analysis"].get("state")
+        for e in entries
+    )
+
+
+def _vex_describes(path: Path, serial: Optional[str]) -> bool:
+    """Whether a VEX document makes statements about *this* SBOM.
+
+    Both formats bind to the SBOM's serial number — a CycloneDX VEX carries it
+    as its own `serialNumber`, and OpenVEX embeds it in every product `@id`
+    (`<serial>#<bom-ref>`, see `vex._product_id`). Checking that binding
+    matters because the sibling filenames are stable: an SBOM regenerated
+    *without* `--vex` leaves the previous run's VEX files sitting next to it,
+    and crediting those would award ten points for statements about a document
+    that no longer exists.
+
+    An unreadable or empty document scores as absent rather than raising — the
     dimension asks whether exploitability was stated, and a file that states
     nothing has not stated it.
     """
+    # Without a serial there is nothing to bind the statements to, so the claim
+    # that they describe this document cannot be checked. `docprov` already
+    # deducts for the missing serial; this declines to compound a guess on top.
+    if not serial:
+        return False
+
     try:
         doc = json.loads(path.read_text())
     except (OSError, ValueError):
-        return 0
+        return False
     if not isinstance(doc, dict):
-        return 0
-    for key in ("statements", "vulnerabilities"):
-        value = doc.get(key)
-        if isinstance(value, list):
-            return len(value)
-    return 0
+        return False
+
+    # CycloneDX VEX: same serial number as the document it describes.
+    if doc.get("serialNumber") == serial:
+        return _has_analysed_vulnerabilities(doc)
+
+    # OpenVEX: statements whose products address components inside this SBOM.
+    statements = doc.get("statements")
+    if not isinstance(statements, list):
+        return False
+    for statement in statements:
+        if not isinstance(statement, dict) or not statement.get("status"):
+            continue
+        products = statement.get("products")
+        if not isinstance(products, list):
+            continue
+        for product in products:
+            if isinstance(product, dict) and \
+                    str(product.get("@id") or "").startswith(f"{serial}#"):
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +406,27 @@ def _score_identity(doc: Dict[str, Any], comps: List[Dict[str, Any]]) -> Dimensi
     )
 
 
+def _has_sha256(component: Dict[str, Any]) -> bool:
+    """Whether a component carries a genuine SHA-256 digest.
+
+    The dimension is defined as SHA-256, so an MD5 or SHA-1 entry does not
+    satisfy it — counting any non-empty `content` would award the full twenty
+    points for a weaker digest than the one being asked for. The digest itself
+    is shape-checked with the same predicate `spdx_gen` uses, so a sentinel or
+    a truncated value cannot pass either.
+    """
+    hashes = component.get("hashes")
+    if not isinstance(hashes, list):
+        return False
+    for entry in hashes:
+        if not isinstance(entry, dict):
+            continue
+        alg = str(entry.get("alg") or "").upper().replace("_", "-")
+        if alg in ("SHA-256", "SHA256") and _sha256_or_none(entry.get("content")):
+            return True
+    return False
+
+
 def _score_checksums(models: List[Dict[str, Any]]) -> DimensionScore:
     label = _BY_KEY["checksums"].label
     if not models:
@@ -364,10 +440,7 @@ def _score_checksums(models: List[Dict[str, Any]]) -> DimensionScore:
     gaps: List[str] = []
     hashed = 0
     for c in models:
-        hashes = c.get("hashes")
-        digests = [h for h in hashes if isinstance(h, dict) and h.get("content")] \
-            if isinstance(hashes, list) else []
-        if digests:
+        if _has_sha256(c):
             hashed += 1
         else:
             gaps.append(f"{_name_of(c)}: no checksum")
@@ -490,12 +563,12 @@ def _score_datasets(models: List[Dict[str, Any]]) -> DimensionScore:
 def _score_vex(doc: Dict[str, Any], vex_documents: Sequence[Path]) -> DimensionScore:
     label = _BY_KEY["vex"].label
 
-    inline = doc.get("vulnerabilities")
-    if isinstance(inline, list) and inline:
+    if _has_analysed_vulnerabilities(doc):
         return DimensionScore("vex", label, 10, 100.0, [])
 
+    serial = doc.get("serialNumber")
     for path in vex_documents:
-        if _vex_statement_count(path) > 0:
+        if _vex_describes(path, serial if isinstance(serial, str) else None):
             return DimensionScore("vex", label, 10, 100.0, [])
 
     return DimensionScore(
