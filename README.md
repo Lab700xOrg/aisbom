@@ -443,11 +443,28 @@ The PR comment shows you each scan; the hosted dashboard at [app.aisbom.io](http
           token: ${{ secrets.AISBOM_TOKEN }}
 ```
 
-Get a per-repo token at <https://app.aisbom.io/connect> (sign in with GitHub). Leave `token` unset and the Action stays purely local — nothing is sent to the dashboard.
+Get a per-repo token at <https://app.aisbom.io/connect> (sign in with GitHub). Leave `token` unset and nothing is sent to the dashboard.
 
 #### Data flow & privacy
 
-When (and only when) `token` is set, the Action POSTs the generated CycloneDX SBOM JSON to `https://app.aisbom.io/v1/scan-result`, along with the branch/tag name (`GITHUB_REF_NAME`) so the dashboard can attribute results to the right ref. That's the entire payload: the SBOM describes the *structure and findings* of your model files (names, hashes, licenses, risk levels) — never the weights or file contents, which don't leave the GitHub runner. Data is stored in the EU (Cloudflare R2/D1, EU jurisdiction). Every upload is announced in a loud log group in your CI output, so your logs always show when a network call happened and where the data went. To stop uploading, remove the `token` input — there is no background or implicit sending.
+The model files themselves never leave the GitHub runner in any configuration — the scan, the SBOM and the PR comment are all produced on the runner. Three things can go over the wire, each with its own switch:
+
+**Dashboard upload — off by default, enabled by setting `token`.** The Action POSTs the generated CycloneDX SBOM JSON to `https://app.aisbom.io/v1/scan-result`, along with the branch/tag name (`GITHUB_REF_NAME`) so the dashboard can attribute results to the right ref. That's the entire payload. Data is stored in the EU (Cloudflare R2/D1, EU jurisdiction). Every upload is announced in a loud log group in your CI output. Remove the `token` input to stop.
+
+**Share upload — off by default, enabled by `share: true`.** The same SBOM is POSTed to `aisbom.io/api/sbom-share`, which mints a **publicly-readable** viewer link retained for 30 days and adds it to the PR comment and the `share-url` output. The unguessable URL token is the only access control, and on a public repository the Action prints that URL into the workflow log, which is itself public. With `share` unset, no request reaches `aisbom.io` and `share-url` is empty.
+
+```yaml
+      - uses: Lab700xOrg/aisbom@v1
+        with:
+          directory: models/
+          share: true       # opt in to the public hosted viewer link
+```
+
+**Anonymous telemetry — on by default,** as described in [Telemetry & Privacy](#telemetry--privacy). `AISBOM_NO_TELEMETRY=1` disables telemetry only; it does not suppress either upload above.
+
+In all three cases the payload is the SBOM — names, hashes, licenses, risk levels — describing the *structure and findings* of your model files, never the weights or file contents.
+
+> **Changed in v1.4.0.** Sharing used to be unconditional: every Action run published its SBOM to a public 30-day link whether or not `token` was set, which contradicted the paragraph above. It is now opt-in and off by default. If you consume the `share-url` output or want the viewer link in your PR comments, set `share: true`.
 
 See [`action/README_ACTION.md`](action/README_ACTION.md) for the full inputs/outputs reference, permissions block, and troubleshooting.
 
@@ -579,7 +596,7 @@ AIsbom collects a small amount of anonymous usage telemetry — what model forma
 
 Per `aisbom scan`: `target_type` (the **bucket**: `local` / `huggingface` / `http` / `https` — never the actual path or URL), `model_format` (the file-type bucket), `risk_level_max`, `scan_duration_ms`, `file_count`, `parse_error_count`, `strict_mode`. A `cli_scan_critical_found` event with a count is added when at least one CRITICAL is found.
 
-If you explicitly use `--share`: the generated `sbom.json` document is uploaded to our servers and retained for 30 days to generate the shareable viewer link. That document is the **full CycloneDX SBOM** — for each scanned model it carries the file name, SHA-256 hash, detected license, and structured `aisbom:*` properties describing the file's format and scan findings (such as dangerous pickle opcodes, tensor/header metadata, model architecture details, and the assessed risk and legal status) so the hosted viewer can render per-format detail. For `hf://` scans it additionally carries the `modelCard` block described above — task, architecture, training datasets and the repo's licence/revision, all of which are already public metadata published on the model's Hugging Face page. These describe the *structure and findings* of your model files, never their weights or data. Nothing leaves your machine unless you pass `--share` and confirm the prompt (or pass `--share-yes`). A `cli_share_created` event is fired tracking whether `has_share_yes=true|false`.
+If you explicitly use `--share`: the generated `sbom.json` document is uploaded to our servers and retained for 30 days to generate the shareable viewer link. That document is the **full CycloneDX SBOM** — for each scanned model it carries the file name, SHA-256 hash, detected license, and structured `aisbom:*` properties describing the file's format and scan findings (such as dangerous pickle opcodes, tensor/header metadata, model architecture details, and the assessed risk and legal status) so the hosted viewer can render per-format detail. For `hf://` scans it additionally carries the `modelCard` block described above — task, architecture, training datasets and the repo's licence/revision, all of which are already public metadata published on the model's Hugging Face page. These describe the *structure and findings* of your model files, never their weights or data. Nothing leaves your machine unless you pass `--share` and confirm the prompt (or pass `--share-yes`). Note that `AISBOM_NO_TELEMETRY=1` does **not** suppress this upload — it withholds the `cli_share_created` event only; dropping `--share` is what stops the upload. If you use the GitHub Action rather than the CLI directly, the Action passes `--share --share-yes` on your behalf when you set its `share: true` input, and passes neither otherwise. A `cli_share_created` event is fired tracking whether `has_share_yes=true|false`.
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 

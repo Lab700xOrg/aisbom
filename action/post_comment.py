@@ -2,10 +2,15 @@
 """
 Phase 4.5 — Post or update an idempotent PR comment with AIsbom findings.
 
-Runs inside the Action Docker container as the second step of entrypoint.sh
-(after `aisbom scan ... --share --share-yes`). Reads the rendered SBOM and
-the scan log, builds a markdown comment, and either creates a new comment or
-updates the existing one identified by the hidden marker.
+Runs inside the Action Docker container as the second step of entrypoint.sh,
+after the scan. Reads the rendered SBOM and the scan log, builds a markdown
+comment, and either creates a new comment or updates the existing one
+identified by the hidden marker.
+
+The comment renders entirely from the local SBOM; the hosted viewer link is
+an optional extra, present only when the user opted into sharing (`share:
+true`, which makes entrypoint.sh pass `--share --share-yes`). With sharing
+off — the default — `parse_share_url` returns None and the link is omitted.
 
 Telemetry is fire-and-forget against api.aisbom.io/v1/telemetry and honors
 AISBOM_NO_TELEMETRY just like the CLI. Never raises from telemetry; never

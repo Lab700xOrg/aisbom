@@ -33,13 +33,14 @@ jobs:
 That's it. The Action will:
 
 1. Scan the `models/` directory in your PR head.
-2. Upload the resulting SBOM to `aisbom.io` (via the existing `--share` flow) for a hosted viewer URL.
-3. Post or update a markdown comment on the PR summarizing findings and linking to the viewer.
-4. Fail the job (exit 2) if any CRITICAL findings were detected, unless you set `fail-on-risk: false`.
+2. Post or update a markdown comment on the PR summarizing findings, rendered from the SBOM on the runner.
+3. Fail the job (exit 2) if any CRITICAL findings were detected, unless you set `fail-on-risk: false`.
+
+That default sends nothing anywhere: the scan, the SBOM and the comment are all produced on the runner. Two inputs, both off by default, add a network call — `share:` uploads the SBOM to `aisbom.io` for a public viewer link, and `token:` posts it to your dashboard at `app.aisbom.io`. See [Data flow & privacy](#data-flow--privacy).
 
 ## What the PR comment looks like
 
-A two-section panel with the highest-risk artifacts and a viewer link:
+A two-section panel with the highest-risk artifacts. The viewer link shown below appears only when `share: true` is set; by default the comment is identical minus that line:
 
 ```
 🛡️ AIsbom Security Scan
@@ -72,13 +73,14 @@ When there are no CRITICAL or HIGH findings, the comment collapses to a one-line
 | `token` | _(empty)_ | Optional. Per-repo API token for posting the generated SBOM to your hosted inventory dashboard at app.aisbom.io. Leave unset for purely local PR-comment behavior. Get a token at <https://app.aisbom.io/connect>. |
 | `platform-url` | `https://app.aisbom.io` | Override for the platform webhook URL. Only meaningful when `token` is set. |
 | `fail-on-platform-error` | `false` | Default false. When true, a failed upload fails the CI job. |
+| `share` | `false` | Upload the SBOM to `aisbom.io` for a **publicly-readable** hosted viewer link, retained 30 days, added to the PR comment and exposed as `share-url`. Off by default: leave it unset and no request reaches `aisbom.io`. |
 
 ## Outputs
 
 | Name | Description |
 |---|---|
 | `sbom-path` | Path to the generated SBOM (default `sbom.json`). |
-| `share-url` | Hosted viewer URL for the SBOM (empty if upload was skipped or failed). |
+| `share-url` | Hosted viewer URL for the SBOM. **Empty unless you set `share: true`** (and empty if that upload failed). |
 
 Example downstream usage:
 
@@ -87,9 +89,12 @@ Example downstream usage:
   id: aisbom
   with:
     directory: models/
+    share: true          # required — without it share-url is empty
 - name: Echo viewer link
   run: echo "SBOM at ${{ steps.aisbom.outputs.share-url }}"
 ```
+
+The `sbom-path` output needs no opt-in — the SBOM is always written to the workspace, so uploading a build artifact or running your own tooling over it works with sharing off.
 
 ## Permissions
 
@@ -107,15 +112,17 @@ If you omit `pull-requests: write`, the scan still runs and the SBOM is still pr
 
 The Action embeds a hidden `<!-- aisbom-action -->` marker in the comment body. On every re-run, it finds the existing comment by that marker and updates it in place — you'll never see stacked AIsbom comments on the same PR. Only the **first** post triggers a PR notification; subsequent updates are silent (GitHub's API treats `edit` differently from `create`).
 
-## Privacy
+## Data flow & privacy
 
-Scans run inside the Action container; the model files themselves never leave the GitHub runner. Three things can be sent over the wire:
+Scans run inside the Action container; the model files themselves never leave the GitHub runner. Three things can be sent over the wire, each with its own switch:
 
-1. **SBOM upload (`--share`):** the rendered CycloneDX JSON is POSTed to `aisbom.io/api/sbom-share` so the comment can link to a hosted viewer. The SBOM is publicly viewable to anyone with the URL and expires after 30 days. The unguessable 12-char URL token is the only access control.
-2. **Hosted dashboard upload (opt-in via `token`):** when you set the `token` input, the same CycloneDX JSON is POSTed to `https://app.aisbom.io/v1/scan-result` (or your `platform-url` override) along with the branch/tag name (`GITHUB_REF_NAME`), so your dashboard at [app.aisbom.io](https://app.aisbom.io) can track the repo's SBOM history. Data is stored in the EU. The upload is logged loudly in your CI output every time it happens. Remove the token (or the input) to stop. Without a token, nothing is sent to the dashboard.
-3. **Anonymous telemetry:** two events (`github_action_run` and `github_action_comment_posted`) are POSTed to `api.aisbom.io/v1/telemetry`. No repo identifier, no file paths, no findings content — just severity buckets and whether the comment was created vs updated.
+1. **SBOM share upload — off by default, enabled by `share: true`.** The rendered CycloneDX JSON is POSTed to `aisbom.io/api/sbom-share`, which mints a **publicly-readable** viewer link retained for 30 days; the unguessable URL token is the only access control. With `share` unset — the default — no request is made to `aisbom.io` and the `share-url` output is empty. Note that on a public repository the Action prints that URL into the workflow log, which is itself public.
+2. **Hosted dashboard upload — off by default, enabled by setting `token`.** The same CycloneDX JSON is POSTed to `https://app.aisbom.io/v1/scan-result` (or your `platform-url` override) along with the branch/tag name (`GITHUB_REF_NAME`), so your dashboard at [app.aisbom.io](https://app.aisbom.io) can track the repo's SBOM history. Data is stored in the EU. The upload is logged loudly in your CI output every time it happens. Remove the token to stop.
+3. **Anonymous telemetry — on by default.** Two events (`github_action_run` and `github_action_comment_posted`) are POSTed to `api.aisbom.io/v1/telemetry`, plus the CLI's own scan events. No repo identifier, no file paths, no findings content — just severity buckets and whether the comment was created vs updated. Set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block to disable.
 
-To disable 1 and 3, set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block. The Action still posts the comment and produces the SBOM; the share upload and telemetry pings are skipped. The dashboard upload (2) is controlled solely by whether `token` is set.
+In every case the payload is the SBOM — file names, SHA-256 hashes, licenses, risk and legal findings — never model weights or file contents.
+
+`AISBOM_NO_TELEMETRY=1` disables (3) only. It does **not** suppress the share upload: with `share: true` the SBOM is still uploaded, and only the `cli_share_created` event is withheld. Leave `share` unset to stop the upload itself.
 
 ## Troubleshooting
 
