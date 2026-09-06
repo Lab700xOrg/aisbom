@@ -15,6 +15,7 @@
 #   $7  token                (optional — opt-in for platform upload)
 #   $8  platform-url         (optional override; blank → default in helper)
 #   $9  fail-on-platform-error  (default "false")
+#   $10 share                (default "false" — opt-in hosted share link)
 #
 # Bash (not POSIX sh) is required for the PIPESTATUS array — we need the
 # scan's exit code, not tee's, to honor fail-on-risk correctly.
@@ -38,34 +39,56 @@ FAIL_ON_RISK="${6:-true}"
 INPUT_TOKEN="${7:-}"
 INPUT_PLATFORM_URL="${8:-}"
 INPUT_FAIL_ON_PLATFORM_ERROR="${9:-false}"
+INPUT_SHARE="${10:-false}"
 
 # Pass the token through to post_comment.py via a clean underscore-only env
 # var. We never echo $GH_TOKEN — GitHub already masks it in the docker-run
 # command log, but using a properly-named env var keeps secret hygiene easy.
 export AISBOM_GITHUB_TOKEN="${GH_TOKEN}"
 
-SCAN_LOG="/tmp/aisbom-scan.log"
+# Overridable so the regression suite can run this script without racing on a
+# fixed /tmp path. Unset in the Docker image, which is the only place it runs
+# for real.
+SCAN_LOG="${AISBOM_SCAN_LOG:-/tmp/aisbom-scan.log}"
 
-# Step 1 — Run the scan. `--share --share-yes` uploads the SBOM and emits
-# a viewer URL we can grep out for the PR comment.
+# Step 1 — Run the scan. Sharing is OPT-IN: `--share --share-yes` uploads the
+# SBOM to aisbom.io and mints a publicly-readable 30-day viewer link, so it is
+# only passed when the user explicitly sets `share: true`. Everything else the
+# Action does — the SBOM artifact, the PR comment, fail-on-risk, the platform
+# upload — renders from the local SBOM and works identically with sharing off.
+SHARE_ARGS=()
+if [ "${INPUT_SHARE}" = "true" ]; then
+    SHARE_ARGS=(--share --share-yes)
+else
+    # Deliberately scoped to the SBOM. Anonymous telemetry is default-on and
+    # goes to api.aisbom.io, so a blanket "nothing is sent" would be false —
+    # the exact kind of overclaim this input exists to correct.
+    echo "[aisbom-action] Sharing is off (share: false, the default): the SBOM is not uploaded to aisbom.io and the share-url output will be empty. Set share: true to publish a hosted viewer link. (Anonymous telemetry is separate and still on; set AISBOM_NO_TELEMETRY=1 to disable it.)"
+fi
+
 echo "::group::aisbom scan output"
 set -o pipefail
+# `${SHARE_ARGS[@]+"${SHARE_ARGS[@]}"}` — expanding an empty array under
+# `set -u` is an unbound-variable error on bash < 4.4; this form yields no
+# words at all when the array is empty.
 aisbom scan "${DIRECTORY}" \
   --output "${OUTPUT_FILE}" \
-  --share \
-  --share-yes \
+  ${SHARE_ARGS[@]+"${SHARE_ARGS[@]}"} \
   2>&1 | tee "${SCAN_LOG}"
 SCAN_EXIT=${PIPESTATUS[0]}
 set +o pipefail
 echo "::endgroup::"
 
 # Echo Action outputs so consumers can reference them in subsequent steps.
+# `share-url` is always written — empty when sharing is off — so consumers read
+# an empty string rather than an unset output.
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "sbom-path=${OUTPUT_FILE}" >> "${GITHUB_OUTPUT}"
-    SHARE_URL=$(grep -oE 'https://aisbom\.io/viewer\?h=[A-Za-z0-9_-]+' "${SCAN_LOG}" | head -n1 || true)
-    if [ -n "${SHARE_URL}" ]; then
-        echo "share-url=${SHARE_URL}" >> "${GITHUB_OUTPUT}"
+    SHARE_URL=""
+    if [ "${INPUT_SHARE}" = "true" ]; then
+        SHARE_URL=$(grep -oE 'https://aisbom\.io/viewer\?h=[A-Za-z0-9_-]+' "${SCAN_LOG}" | head -n1 || true)
     fi
+    echo "share-url=${SHARE_URL}" >> "${GITHUB_OUTPUT}"
 fi
 
 # Step 2 — Post the PR comment. Only run if the scan actually produced
@@ -77,6 +100,7 @@ if [ -f "${OUTPUT_FILE}" ]; then
       --max-rows "${MAX_ROWS}" \
       --comment-on-clean "${COMMENT_ON_CLEAN}" \
       --directory "${DIRECTORY}" \
+      --share-enabled "${INPUT_SHARE}" \
       || echo "[aisbom-action] post_comment.py errored; SBOM artifact still produced."
 else
     echo "[aisbom-action] No SBOM file at ${OUTPUT_FILE}; skipping PR comment."

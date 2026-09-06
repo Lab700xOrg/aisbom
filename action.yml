@@ -44,12 +44,16 @@ inputs:
     description: 'Default false. When true, a failed upload fails the CI job.'
     required: false
     default: 'false'
+  share:
+    description: 'Default false. When true, the generated SBOM is uploaded to aisbom.io to mint a publicly-readable hosted viewer link, retained 30 days, and that link is added to the PR comment and exposed as the `share-url` output. Leave unset and no request is made to aisbom.io.'
+    required: false
+    default: 'false'
 
 outputs:
   sbom-path:
     description: 'Path to the generated SBOM JSON file (relative to the workspace).'
   share-url:
-    description: 'Hosted viewer URL for the scanned SBOM (empty if --share was rejected or upload failed).'
+    description: 'Hosted viewer URL for the scanned SBOM. Empty unless `share: true` is set (and empty if that upload failed).'
 
 runs:
   using: 'docker'
@@ -70,3 +74,5 @@ runs:
     - ${{ inputs.token }}
     - ${{ inputs.platform-url }}
     - ${{ inputs.fail-on-platform-error }}
+    # Appended, not inserted: argv positions 1-9 are load-bearing and must not shift.
+    - ${{ inputs.share }}
