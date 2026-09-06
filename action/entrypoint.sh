@@ -60,7 +60,10 @@ SHARE_ARGS=()
 if [ "${INPUT_SHARE}" = "true" ]; then
     SHARE_ARGS=(--share --share-yes)
 else
-    echo "[aisbom-action] Sharing is off (share: false, the default): nothing is sent to aisbom.io and the share-url output will be empty. Set share: true to publish a hosted viewer link."
+    # Deliberately scoped to the SBOM. Anonymous telemetry is default-on and
+    # goes to api.aisbom.io, so a blanket "nothing is sent" would be false —
+    # the exact kind of overclaim this input exists to correct.
+    echo "[aisbom-action] Sharing is off (share: false, the default): the SBOM is not uploaded to aisbom.io and the share-url output will be empty. Set share: true to publish a hosted viewer link. (Anonymous telemetry is separate and still on; set AISBOM_NO_TELEMETRY=1 to disable it.)"
 fi
 
 echo "::group::aisbom scan output"
@@ -97,6 +100,7 @@ if [ -f "${OUTPUT_FILE}" ]; then
       --max-rows "${MAX_ROWS}" \
       --comment-on-clean "${COMMENT_ON_CLEAN}" \
       --directory "${DIRECTORY}" \
+      --share-enabled "${INPUT_SHARE}" \
       || echo "[aisbom-action] post_comment.py errored; SBOM artifact still produced."
 else
     echo "[aisbom-action] No SBOM file at ${OUTPUT_FILE}; skipping PR comment."

@@ -36,7 +36,7 @@ That's it. The Action will:
 2. Post or update a markdown comment on the PR summarizing findings, rendered from the SBOM on the runner.
 3. Fail the job (exit 2) if any CRITICAL findings were detected, unless you set `fail-on-risk: false`.
 
-That default sends nothing anywhere: the scan, the SBOM and the comment are all produced on the runner. Two inputs, both off by default, add a network call — `share:` uploads the SBOM to `aisbom.io` for a public viewer link, and `token:` posts it to your dashboard at `app.aisbom.io`. See [Data flow & privacy](#data-flow--privacy).
+On that default, **your SBOM is not uploaded anywhere** — the scan, the SBOM and the comment are all produced on the runner. Two inputs, both off by default, send it somewhere: `share:` uploads it to `aisbom.io` for a public viewer link, and `token:` posts it to your dashboard at `app.aisbom.io`. Anonymous telemetry — event names and severity counts, never the SBOM — is separate and on by default. See [Data flow & privacy](#data-flow--privacy).
 
 ## What the PR comment looks like
 
@@ -120,7 +120,7 @@ Scans run inside the Action container; the model files themselves never leave th
 2. **Hosted dashboard upload — off by default, enabled by setting `token`.** The same CycloneDX JSON is POSTed to `https://app.aisbom.io/v1/scan-result` (or your `platform-url` override) along with the branch/tag name (`GITHUB_REF_NAME`), so your dashboard at [app.aisbom.io](https://app.aisbom.io) can track the repo's SBOM history. Data is stored in the EU. The upload is logged loudly in your CI output every time it happens. Remove the token to stop.
 3. **Anonymous telemetry — on by default.** Two events (`github_action_run` and `github_action_comment_posted`) are POSTed to `api.aisbom.io/v1/telemetry`, plus the CLI's own scan events. No repo identifier, no file paths, no findings content — just severity buckets and whether the comment was created vs updated. Set `AISBOM_NO_TELEMETRY=1` in your workflow's `env:` block to disable.
 
-In every case the payload is the SBOM — file names, SHA-256 hashes, licenses, risk and legal findings — never model weights or file contents.
+For the two upload paths (1 and 2) the payload is the SBOM — file names, SHA-256 hashes, licenses, risk and legal findings — never model weights or file contents. Telemetry (3) carries none of that: no SBOM, no file names, no hashes, no repo identifier — just event names and low-cardinality parameters such as severity counts.
 
 `AISBOM_NO_TELEMETRY=1` disables (3) only. It does **not** suppress the share upload: with `share: true` the SBOM is still uploaded, and only the `cli_share_created` event is withheld. Leave `share` unset to stop the upload itself.
 

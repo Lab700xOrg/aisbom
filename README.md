@@ -462,7 +462,7 @@ The model files themselves never leave the GitHub runner in any configuration �
 
 **Anonymous telemetry — on by default,** as described in [Telemetry & Privacy](#telemetry--privacy). `AISBOM_NO_TELEMETRY=1` disables telemetry only; it does not suppress either upload above.
 
-In all three cases the payload is the SBOM — names, hashes, licenses, risk levels — describing the *structure and findings* of your model files, never the weights or file contents.
+For the two upload paths the payload is the SBOM — names, hashes, licenses, risk levels — describing the *structure and findings* of your model files, never the weights or file contents. Telemetry carries none of that: no SBOM, no file names, no hashes, no repo identifier.
 
 > **Changed in v1.4.0.** Sharing used to be unconditional: every Action run published its SBOM to a public 30-day link whether or not `token` was set, which contradicted the paragraph above. It is now opt-in and off by default. If you consume the `share-url` output or want the viewer link in your PR comments, set `share: true`.
 

@@ -211,3 +211,12 @@ class TestUnaffectedByShareSetting:
         assert run.python_argv, "post_comment.py was not invoked"
         assert "/aisbom-action/post_comment.py" in run.python_argv
         assert "--sbom" in run.python_argv
+
+    @pytest.mark.parametrize("share,expected", [("false", "false"), ("true", "true")])
+    def test_share_setting_is_forwarded_to_the_comment_renderer(
+        self, tmp_path, share, expected
+    ):
+        """The comment must not re-derive sharing from the log on its own."""
+        run = run_entrypoint(tmp_path / share, [*BASE_ARGS, share], create_sbom=True)
+        assert "--share-enabled" in run.python_argv
+        assert run.python_argv[run.python_argv.index("--share-enabled") + 1] == expected

@@ -13,6 +13,8 @@ Three test classes match the three risk areas in PHASE_4_5_DESIGN.md §8.1:
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,7 +29,9 @@ from action.post_comment import (  # noqa: E402
     MARKER,
     collect_findings,
     count_by_severity,
+    main,
     max_severity,
+    parse_args,
     parse_share_url,
     post_or_update_comment,
     render_body,
@@ -329,3 +333,69 @@ class TestCommentIdempotency:
         assert action == "created"
         pr.create_issue_comment.assert_called_once()
         comments[0].edit.assert_not_called()
+
+
+class TestShareGateInMain:
+    """`share: false` must mean no viewer link, whatever the scan log holds.
+
+    The share URL is recovered by scraping the scan log with a URL-shaped
+    regex, and a scan target or filename can be URL-shaped too. Gating that
+    scrape on the input — rather than on the log failing to match — is what
+    makes the documented opt-out hold by construction.
+    """
+
+    # Deliberately URL-shaped, and not a link this run minted.
+    DECOY_LOG = "Scanning https://aisbom.io/viewer?h=UnrelatedTarget\n"
+
+    def _run_main(self, tmp_path, share_enabled, scan_log):
+        sbom = tmp_path / "sbom.json"
+        sbom.write_text(json.dumps(SBOM_CRITICAL))
+        log = tmp_path / "scan.log"
+        log.write_text(scan_log)
+
+        captured = {}
+
+        def _capture(body, token, repo, pr_number):
+            captured["body"] = body
+            return "created"
+
+        env = {
+            "AISBOM_GITHUB_TOKEN": "t",
+            "GITHUB_REPOSITORY": "owner/repo",
+            "AISBOM_NO_TELEMETRY": "1",
+        }
+        with patch.dict(os.environ, env, clear=False), \
+             patch("action.post_comment._resolve_pr_number_from_event", return_value=42), \
+             patch("action.post_comment.post_or_update_comment", side_effect=_capture):
+            rc = main([
+                "--sbom", str(sbom),
+                "--scan-log", str(log),
+                "--share-enabled", share_enabled,
+            ])
+        assert rc == 0
+        return captured["body"]
+
+    def test_no_viewer_link_when_sharing_is_off(self, tmp_path):
+        body = self._run_main(tmp_path, "false", self.DECOY_LOG)
+        assert "aisbom.io/viewer" not in body
+        assert "View full SBOM in viewer" not in body
+
+    def test_findings_table_still_rendered_when_sharing_is_off(self, tmp_path):
+        """Suppressing the link must not suppress the comment's substance."""
+        body = self._run_main(tmp_path, "false", self.DECOY_LOG)
+        assert "evil.pt" in body
+        assert "CRITICAL" in body
+
+    def test_viewer_link_present_when_sharing_is_on(self, tmp_path):
+        log = "Share Link Created: https://aisbom.io/viewer?h=Kx9pQ2v3mLnB\n"
+        body = self._run_main(tmp_path, "true", log)
+        assert "https://aisbom.io/viewer?h=Kx9pQ2v3mLnB&ref=action" in body
+
+    def test_defaults_to_off_when_flag_omitted(self, tmp_path):
+        """A caller that forgets the flag must not start leaking links."""
+        sbom = tmp_path / "sbom.json"
+        sbom.write_text(json.dumps(SBOM_CRITICAL))
+        log = tmp_path / "scan.log"
+        log.write_text(self.DECOY_LOG)
+        args = parse_args(["--sbom", str(sbom), "--scan-log", str(log)])
+        assert args.share_enabled == "false"

@@ -316,6 +316,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help='"true" or "false" — post a comment when no findings')
     p.add_argument("--directory", default=".",
                    help="The scanned directory (shown in the comment footer)")
+    p.add_argument("--share-enabled", default="false",
+                   help='"true" or "false" — whether the user opted into '
+                        "sharing. When false, no viewer link is put in the "
+                        "comment, whatever the scan log happens to contain.")
     return p.parse_args(argv)
 
 
@@ -353,12 +357,19 @@ def main(argv: list[str] | None = None) -> int:
     total_components = len(sbom.get("components", []))
 
     # Parse share URL from scan log (best-effort; missing = no link in comment).
-    try:
-        with open(args.scan_log) as fh:
-            scan_log = fh.read()
-    except OSError:
-        scan_log = ""
-    share_url = parse_share_url(scan_log)
+    # Only when the user opted in: the log is scraped with a URL-shaped regex,
+    # and a scan target or filename can be URL-shaped too, so an ungated scrape
+    # could put a link in the comment on a run that shared nothing. Gate on the
+    # input, so `share: false` means no viewer link by construction rather than
+    # by the log happening not to match.
+    share_url = None
+    if args.share_enabled == "true":
+        try:
+            with open(args.scan_log) as fh:
+                scan_log = fh.read()
+        except OSError:
+            scan_log = ""
+        share_url = parse_share_url(scan_log)
 
     severity = max_severity(findings)
     is_clean = severity == "CLEAN"
