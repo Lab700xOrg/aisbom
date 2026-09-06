@@ -77,6 +77,69 @@ jobs:
       - name: Build binary
         run: ./scripts/build_binaries.sh
 
+      # This workflow is the only path these executables take to users, and it
+      # runs solely on `release: published` — no PR check ever exercises it.
+      # A successful build does not prove the binary runs: a PyInstaller
+      # bootloader change (e.g. how the frozen executable resolves its own
+      # path) or a dropped `--collect-all` hook yields an artifact that builds
+      # cleanly and then fails on the user's machine. Assert the documented
+      # exit-code contract here, ahead of the upload, so a bad build fails the
+      # release instead of shipping.
+      - name: Smoke test the frozen binary
+        shell: bash
+        env:
+          # Also suppresses the version-check HTTP call, so the gate makes no
+          # network requests and cannot fail on a flaky endpoint.
+          AISBOM_NO_TELEMETRY: "1"
+          NO_COLOR: "1"
+        run: |
+          set -euo pipefail
+          BIN="dist/aisbom"
+
+          # The bootloader has to locate and unpack itself before anything else
+          # can be true.
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+
+          "$BIN" generate-test-artifacts /tmp/fixtures
+          ls -l /tmp/fixtures
+
+          # Non-zero is the expected outcome for most of these, so capture the
+          # codes rather than letting `set -e` abort on the first CRITICAL.
+          set +e
+          "$BIN" scan /tmp/fixtures --output /tmp/sbom.json > /dev/null 2>&1
+          json_rc=$?
+          "$BIN" scan /tmp/fixtures --format spdx --output /tmp/sbom.spdx.json > /dev/null 2>&1
+          spdx_rc=$?
+          "$BIN" scan /tmp/fixtures --format markdown --no-fail-on-risk > /dev/null 2>&1
+          md_rc=$?
+          "$BIN" scan /tmp/fixtures --no-fail-on-risk > /dev/null 2>&1
+          nofail_rc=$?
+          "$BIN" scan /tmp/fixtures/does-not-exist > /dev/null 2>&1
+          missing_rc=$?
+          set -e
+
+          echo "json_rc=$json_rc spdx_rc=$spdx_rc md_rc=$md_rc nofail_rc=$nofail_rc missing_rc=$missing_rc"
+
+          # The exit codes downstream CI pipelines gate on: 2 = CRITICAL found,
+          # 1 = scan error, 0 = clean.
+          test "$json_rc"    -eq 2 || { echo "FAIL: CRITICAL CycloneDX scan exited $json_rc, expected 2"; exit 1; }
+          test "$spdx_rc"    -eq 2 || { echo "FAIL: CRITICAL SPDX scan exited $spdx_rc, expected 2"; exit 1; }
+          test "$md_rc"      -eq 0 || { echo "FAIL: markdown scan exited $md_rc, expected 0"; exit 1; }
+          test "$nofail_rc"  -eq 0 || { echo "FAIL: --no-fail-on-risk exited $nofail_rc, expected 0"; exit 1; }
+          test "$missing_rc" -eq 1 || { echo "FAIL: missing target exited $missing_rc, expected 1"; exit 1; }
+
+          # A bundling regression can still emit a syntactically valid but empty
+          # document, so assert the malicious component actually reached both
+          # serializers rather than just checking the files exist.
+          grep -q '"bomFormat": *"CycloneDX"' /tmp/sbom.json
+          grep -q '"specVersion"' /tmp/sbom.json
+          grep -q 'mock_malware.pt' /tmp/sbom.json
+          grep -q 'SPDX-2.3' /tmp/sbom.spdx.json
+          grep -q 'mock_malware.pt' /tmp/sbom.spdx.json
+
+          echo "OK: frozen ${{ matrix.asset_name }} passed the exit-code and SBOM contract"
+
       - name: Rename binary
         shell: bash
         run: |
