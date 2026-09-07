@@ -40,6 +40,10 @@ BASE_ARGS = [
 
 # Faithful to the CLI: the viewer URL is only ever printed when --share was
 # passed. Records its own argv so the test can assert on the real invocation.
+# `AISBOM_EXIT` lets a test drive the CLI's real exit codes — notably 2, which
+# `aisbom scan` returns when it finds a CRITICAL artifact. The scan still writes
+# its SBOM and VEX files in that case, so the entrypoint's ordering around the
+# exit code is observable rather than hypothetical.
 AISBOM_STUB = """#!/bin/bash
 printf '%s\\n' "$@" > "${AISBOM_ARGV_FILE}"
 echo "AIsbom scanning ${2:-.}"
@@ -48,26 +52,38 @@ for arg in "$@"; do
         echo "Shareable link: __VIEWER_URL__"
     fi
 done
-exit 0
+exit "${AISBOM_EXIT:-0}"
 """
 
-# Stands in for `python /aisbom-action/post_comment.py`, which only exists
-# inside the Docker image.
+# Stands in for `python /aisbom-action/post_comment.py` and
+# `python /aisbom-action/platform_upload.py`, neither of which exists outside
+# the Docker image. Two records are kept: PYTHON_ARGV_FILE holds the most
+# recent invocation (what the original tests assert on), while
+# PYTHON_INVOCATIONS_FILE appends one line per call so a test can assert that a
+# *particular* script ran even when another ran after it.
 PYTHON_STUB = """#!/bin/bash
 printf '%s\\n' "$@" > "${PYTHON_ARGV_FILE}"
-exit 0
+printf '%s ' "$@" >> "${PYTHON_INVOCATIONS_FILE}"
+printf '\\n' >> "${PYTHON_INVOCATIONS_FILE}"
+exit "${PYTHON_EXIT:-0}"
 """
 
 
 class EntrypointRun:
     """Captured result of one entrypoint.sh invocation."""
 
-    def __init__(self, proc, scan_argv, github_output, scan_log, python_argv):
+    def __init__(self, proc, scan_argv, github_output, scan_log, python_argv, python_invocations=()):
         self.proc = proc
         self.scan_argv = scan_argv
         self.github_output = github_output
         self.scan_log = scan_log
         self.python_argv = python_argv
+        # One entry per `python …` call, in order.
+        self.python_invocations = list(python_invocations)
+
+    def ran_script(self, name: str) -> bool:
+        """Whether a given helper script was invoked at all."""
+        return any(name in line for line in self.python_invocations)
 
     @property
     def outputs(self) -> dict[str, str]:
@@ -85,7 +101,14 @@ def _write_stub(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def run_entrypoint(tmp_path: Path, args: list[str], *, create_sbom: bool = False) -> EntrypointRun:
+def run_entrypoint(
+    tmp_path: Path,
+    args: list[str],
+    *,
+    create_sbom: bool = False,
+    scan_exit: int = 0,
+    python_exit: int = 0,
+) -> EntrypointRun:
     """Execute entrypoint.sh with stubbed `aisbom` and `python` on PATH."""
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
@@ -99,6 +122,7 @@ def run_entrypoint(tmp_path: Path, args: list[str], *, create_sbom: bool = False
 
     scan_argv = tmp_path / "scan-argv.txt"
     python_argv = tmp_path / "python-argv.txt"
+    python_invocations = tmp_path / "python-invocations.txt"
     github_output = tmp_path / "github-output.txt"
     scan_log = tmp_path / "scan.log"
     github_output.touch()
@@ -108,8 +132,11 @@ def run_entrypoint(tmp_path: Path, args: list[str], *, create_sbom: bool = False
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "AISBOM_ARGV_FILE": str(scan_argv),
         "PYTHON_ARGV_FILE": str(python_argv),
+        "PYTHON_INVOCATIONS_FILE": str(python_invocations),
         "GITHUB_OUTPUT": str(github_output),
         "AISBOM_SCAN_LOG": str(scan_log),
+        "AISBOM_EXIT": str(scan_exit),
+        "PYTHON_EXIT": str(python_exit),
     }
 
     proc = subprocess.run(
@@ -125,6 +152,9 @@ def run_entrypoint(tmp_path: Path, args: list[str], *, create_sbom: bool = False
         github_output=github_output.read_text(),
         scan_log=scan_log.read_text() if scan_log.exists() else "",
         python_argv=python_argv.read_text().splitlines() if python_argv.exists() else [],
+        python_invocations=(
+            python_invocations.read_text().splitlines() if python_invocations.exists() else []
+        ),
     )
 
 
@@ -275,3 +305,77 @@ class TestVexAccompaniesPlatformUpload:
         assert "." in run.scan_argv
         assert "--output" in run.scan_argv
         assert run.scan_argv[run.scan_argv.index("--output") + 1] == "sbom.json"
+
+
+class TestCriticalFindingsStillReachTheDashboard:
+    """A CRITICAL scan must upload before the risk gate fails the job.
+
+    `aisbom scan` exits 2 on a CRITICAL finding but still writes its SBOM and
+    VEX documents. The entrypoint used to honour `fail-on-risk` *before* the
+    platform upload, so with the default `fail-on-risk: true` a repo containing
+    a genuinely dangerous artifact never appeared in the hosted inventory at
+    all — the one case where the inventory matters most, and the only case that
+    produces `affected` VEX statements.
+    """
+
+    def test_critical_scan_still_uploads(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, [*TOKEN_ARGS, "false"], create_sbom=True, scan_exit=2
+        )
+        assert run.ran_script("platform_upload.py"), (
+            "the dashboard upload must run even when the scan found CRITICAL risks"
+        )
+
+    def test_critical_scan_still_fails_the_job(self, tmp_path):
+        """Uploading first must not weaken the branch-protection signal."""
+        run = run_entrypoint(
+            tmp_path, [*TOKEN_ARGS, "false"], create_sbom=True, scan_exit=2
+        )
+        assert run.proc.returncode == 2
+
+    def test_critical_scan_with_fail_on_risk_off_uploads_and_exits_zero(self, tmp_path):
+        args = [*TOKEN_ARGS, "false"]
+        args[5] = "false"  # fail-on-risk
+        run = run_entrypoint(tmp_path, args, create_sbom=True, scan_exit=2)
+        assert run.ran_script("platform_upload.py")
+        assert run.proc.returncode == 0
+
+    def test_pr_comment_still_precedes_the_upload(self, tmp_path):
+        """Ordering of the two helpers is unchanged; only the gate moved."""
+        run = run_entrypoint(
+            tmp_path, [*TOKEN_ARGS, "false"], create_sbom=True, scan_exit=2
+        )
+        joined = "\n".join(run.python_invocations)
+        assert joined.index("post_comment.py") < joined.index("platform_upload.py")
+
+    def test_risk_exit_wins_over_a_failed_upload(self, tmp_path):
+        """Both conditions at once: CRITICAL is the more important signal.
+
+        Exit 2 (CRITICAL) takes precedence over exit 3 (upload failed) so the
+        user's required-checks gate reports the finding, not the plumbing.
+        """
+        args = [*TOKEN_ARGS, "false"]
+        args[8] = "true"  # fail-on-platform-error
+        run = run_entrypoint(
+            tmp_path, args, create_sbom=True, scan_exit=2, python_exit=3
+        )
+        assert run.proc.returncode == 2
+
+    def test_failed_upload_alone_still_fails_when_asked(self, tmp_path):
+        """The pre-existing fail-on-platform-error contract is preserved."""
+        args = [*TOKEN_ARGS, "false"]
+        args[8] = "true"  # fail-on-platform-error
+        run = run_entrypoint(tmp_path, args, create_sbom=True, python_exit=3)
+        assert run.proc.returncode == 3
+
+    def test_failed_upload_is_tolerated_by_default(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, [*TOKEN_ARGS, "false"], create_sbom=True, python_exit=3
+        )
+        assert run.proc.returncode == 0
+        assert "tolerated" in run.proc.stdout
+
+    def test_clean_scan_without_token_is_unaffected(self, tmp_path):
+        run = run_entrypoint(tmp_path, [*BASE_ARGS, "false"], create_sbom=True)
+        assert run.proc.returncode == 0
+        assert not run.ran_script("platform_upload.py")
