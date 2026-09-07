@@ -380,3 +380,150 @@ def test_parse_args_rejects_dash_leading_token_with_space_form():
 def test_parse_args_empty_token_with_equals_form_is_allowed():
     ns = platform_upload.parse_args(["--sbom=x", "--token="])
     assert ns.token == ""
+
+
+# ---------------------------------------------------------------------------
+# VEX discovery and the request envelope
+# ---------------------------------------------------------------------------
+#
+# `aisbom scan --vex` writes its VEX documents next to the SBOM, and until now
+# the Action uploaded only the SBOM itself — so exploitability data never
+# reached the hosted inventory, and the frameworks that ask for it specifically
+# (the CRA, FDA §524B) could never be evidenced there.
+#
+# The upload body is now: the SBOM bytes verbatim when no VEX document is
+# present (byte-identical to what every previous release sent), or a
+# `{"sbom": …, "vex": [...]}` envelope when there is something to carry.
+
+
+@pytest.fixture
+def sbom_with_vex(tmp_path: Path) -> Path:
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.7", "components": []}))
+    (tmp_path / "sbom.openvex.json").write_text(json.dumps({"@context": "https://openvex.dev/ns/v0.2.0", "statements": []}))
+    (tmp_path / "sbom.vex.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX", "vulnerabilities": []}))
+    return sbom
+
+
+def test_vex_paths_for_mirrors_the_cli_naming(tmp_path: Path):
+    # Must match aisbom.cli._vex_paths, or a plain `scan --vex` writes files
+    # this helper never looks for.
+    paths = platform_upload.vex_paths_for(str(tmp_path / "sbom.json"))
+    assert [Path(p).name for p in paths] == ["sbom.openvex.json", "sbom.vex.cdx.json"]
+
+
+def test_vex_paths_for_handles_an_output_without_json_suffix(tmp_path: Path):
+    paths = platform_upload.vex_paths_for(str(tmp_path / "report"))
+    assert [Path(p).name for p in paths] == ["report.openvex.json", "report.vex.cdx.json"]
+
+
+def test_load_vex_documents_returns_both_siblings(sbom_with_vex: Path):
+    docs = platform_upload.load_vex_documents(str(sbom_with_vex))
+    assert len(docs) == 2
+
+
+def test_load_vex_documents_is_empty_when_none_were_written(sbom_file: Path):
+    assert platform_upload.load_vex_documents(str(sbom_file)) == []
+
+
+def test_load_vex_documents_skips_an_unparseable_sibling(tmp_path: Path):
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps({"bomFormat": "CycloneDX"}))
+    (tmp_path / "sbom.openvex.json").write_text("{ this is not json")
+    (tmp_path / "sbom.vex.cdx.json").write_text(json.dumps({"bomFormat": "CycloneDX"}))
+
+    # One good document still uploads. Failing the whole upload because a
+    # supplementary file is corrupt would cost the user their inventory entry.
+    docs = platform_upload.load_vex_documents(str(sbom))
+    assert len(docs) == 1
+
+
+def test_load_vex_documents_skips_a_non_object_sibling(tmp_path: Path):
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps({"bomFormat": "CycloneDX"}))
+    (tmp_path / "sbom.openvex.json").write_text(json.dumps(["not", "an", "object"]))
+    assert platform_upload.load_vex_documents(str(sbom)) == []
+
+
+def test_build_request_body_without_vex_is_the_sbom_verbatim(sbom_file: Path):
+    # Byte-for-byte: an upload from a repo not using --vex must be
+    # indistinguishable from what previous releases sent.
+    body = platform_upload.build_request_body(str(sbom_file))
+    assert body == sbom_file.read_bytes()
+
+
+def test_build_request_body_with_vex_is_an_envelope(sbom_with_vex: Path):
+    payload = json.loads(platform_upload.build_request_body(str(sbom_with_vex)))
+    assert set(payload) == {"sbom", "vex"}
+    assert payload["sbom"]["bomFormat"] == "CycloneDX"
+    assert len(payload["vex"]) == 2
+
+
+def test_build_request_body_falls_back_to_raw_bytes_on_unparseable_sbom(tmp_path: Path):
+    # The SBOM itself is the payload the receiver validates; if we cannot parse
+    # it we must not swallow the error by inventing an envelope. Send it as-is
+    # and let the receiver reject it with its own explicit reason.
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text("{ truncated")
+    (tmp_path / "sbom.openvex.json").write_text(json.dumps({"statements": []}))
+
+    body = platform_upload.build_request_body(str(sbom))
+    assert body == sbom.read_bytes()
+
+
+def test_upload_posts_the_envelope_when_vex_is_present(sbom_with_vex: Path):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return _mock_response(200, "ok")
+
+    with patch("requests.post", side_effect=fake_post):
+        rc = platform_upload.upload(
+            sbom_path=str(sbom_with_vex),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=False,
+            env={"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"},
+        )
+
+    assert rc == 0
+    payload = json.loads(captured["data"])
+    assert len(payload["vex"]) == 2
+
+
+def test_upload_posts_bare_sbom_when_no_vex_is_present(sbom_file: Path):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return _mock_response(200, "ok")
+
+    with patch("requests.post", side_effect=fake_post):
+        platform_upload.upload(
+            sbom_path=str(sbom_file),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=False,
+            env={},
+        )
+
+    assert captured["data"] == sbom_file.read_bytes()
+
+
+def test_upload_reports_the_vex_document_count(sbom_with_vex: Path, capsys):
+    # Opted-in users are told exactly what left their runner, matching the
+    # existing loud log group.
+    with patch("requests.post", return_value=_mock_response(200, "ok")):
+        platform_upload.upload(
+            sbom_path=str(sbom_with_vex),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=False,
+            env={},
+        )
+    out = capsys.readouterr().out
+    assert "vex-documents=2" in out

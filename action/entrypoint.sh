@@ -25,6 +25,10 @@
 #   2 — Scan reported CRITICAL findings AND fail-on-risk is true.
 #   3 — Platform upload failed AND fail-on-platform-error is true.
 #
+# 2 takes precedence over 3 when both apply: a dangerous model is the signal
+# the user's required check should report, not a failed upload. The upload is
+# attempted before either gate, so a CRITICAL repo still reaches the dashboard.
+#
 # Comment-posting failures NEVER fail the job (logged but tolerated so the
 # user fixes their `permissions:` block, not the scan).
 
@@ -56,6 +60,18 @@ SCAN_LOG="${AISBOM_SCAN_LOG:-/tmp/aisbom-scan.log}"
 # only passed when the user explicitly sets `share: true`. Everything else the
 # Action does — the SBOM artifact, the PR comment, fail-on-risk, the platform
 # upload — renders from the local SBOM and works identically with sharing off.
+# VEX is generated only when a platform token is set, i.e. when there is a
+# hosted inventory to send it to. Exploitability statements are what the CRA
+# and FDA §524B ask for most directly, and without them the inventory can show
+# what a repo contains but never whether a finding is actually exploitable.
+# Tying generation to the opt-in keeps the default run byte-identical: a user
+# who has not connected a repo gets no extra files in their workspace and no
+# extra work in their scan.
+VEX_ARGS=()
+if [ -n "${INPUT_TOKEN}" ]; then
+    VEX_ARGS=(--vex)
+fi
+
 SHARE_ARGS=()
 if [ "${INPUT_SHARE}" = "true" ]; then
     SHARE_ARGS=(--share --share-yes)
@@ -73,6 +89,7 @@ set -o pipefail
 # words at all when the array is empty.
 aisbom scan "${DIRECTORY}" \
   --output "${OUTPUT_FILE}" \
+  ${VEX_ARGS[@]+"${VEX_ARGS[@]}"} \
   ${SHARE_ARGS[@]+"${SHARE_ARGS[@]}"} \
   2>&1 | tee "${SCAN_LOG}"
 SCAN_EXIT=${PIPESTATUS[0]}
@@ -106,16 +123,18 @@ else
     echo "[aisbom-action] No SBOM file at ${OUTPUT_FILE}; skipping PR comment."
 fi
 
-# Step 3 — Honor fail-on-risk: re-raise the CLI's exit code so the user's
-# branch protection rules and required-checks gates behave correctly.
-if [ "${FAIL_ON_RISK}" = "true" ] && [ "${SCAN_EXIT}" -eq 2 ]; then
-    echo "[aisbom-action] CRITICAL risks detected; failing the job (fail-on-risk=true)."
-    exit 2
-fi
-
-# Step 4 — Optional platform upload. Silent skip when no token,
+# Step 3 — Optional platform upload. Silent skip when no token,
 # preserving CLI-only behavior for the broad user base. Opted-in users see
 # the loud log group emitted by platform_upload.py.
+#
+# This runs BEFORE the fail-on-risk gate below, and the order is load-bearing.
+# `aisbom scan` exits 2 on a CRITICAL finding but still writes its SBOM and VEX
+# documents; when the gate came first, a repo containing a genuinely dangerous
+# artifact exited here and never uploaded — so the hosted inventory silently
+# omitted exactly the repos that most needed to be in it, and the `affected`
+# VEX statements (which only exist when there IS a critical finding) could
+# never arrive. Uploading first costs nothing: the job's exit status is decided
+# below either way.
 PLATFORM_EXIT=0
 if [ -n "${INPUT_TOKEN}" ] && [ -f "${OUTPUT_FILE}" ]; then
     FAIL_FLAG=""
@@ -133,15 +152,27 @@ if [ -n "${INPUT_TOKEN}" ] && [ -f "${OUTPUT_FILE}" ]; then
       ${FAIL_FLAG} || PLATFORM_EXIT=$?
 fi
 
+if [ "${PLATFORM_EXIT}" -ne 0 ] && [ "${INPUT_FAIL_ON_PLATFORM_ERROR}" != "true" ]; then
+    echo "[aisbom-action] Platform upload exited ${PLATFORM_EXIT}; tolerated (fail-on-platform-error=false)."
+fi
+
+# Step 4 — Honor fail-on-risk: re-raise the CLI's exit code so the user's
+# branch protection rules and required-checks gates behave correctly.
+#
+# Deliberately ahead of the platform-error exit below: when a scan finds a
+# CRITICAL artifact AND the upload failed, exit 2 is the more useful signal.
+# The required check should report the dangerous model, not the plumbing.
+if [ "${FAIL_ON_RISK}" = "true" ] && [ "${SCAN_EXIT}" -eq 2 ]; then
+    echo "[aisbom-action] CRITICAL risks detected; failing the job (fail-on-risk=true)."
+    exit 2
+fi
+
 # Honour fail-on-platform-error even when the helper exited before its own
 # error-handling could fire (e.g. argparse usage error). Without this gate,
 # the default `fail-on-platform-error: false` silently degraded into "fail
 # the job on any helper crash", which contradicts the documented contract.
 if [ "${PLATFORM_EXIT}" -ne 0 ] && [ "${INPUT_FAIL_ON_PLATFORM_ERROR}" = "true" ]; then
     exit "${PLATFORM_EXIT}"
-fi
-if [ "${PLATFORM_EXIT}" -ne 0 ]; then
-    echo "[aisbom-action] Platform upload exited ${PLATFORM_EXIT}; tolerated (fail-on-platform-error=false)."
 fi
 
 exit 0

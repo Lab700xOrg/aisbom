@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""POST the generated SBOM to the platform webhook (opt-in via --token)."""
+"""POST the generated SBOM to the platform webhook (opt-in via --token).
+
+When the scan also produced VEX documents (`aisbom scan --vex`), they are
+uploaded alongside the SBOM in a single request. Exploitability statements
+previously stayed on the runner, which meant the hosted inventory could never
+show whether a finding was actually exploitable — the question the CRA and
+FDA §524B ask about most directly.
+"""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from typing import Mapping
+from pathlib import Path
+from typing import Any, Dict, List, Mapping
 
 import requests
 
@@ -37,6 +46,78 @@ def compute_ref(env: Mapping[str, str]) -> str | None:
     """
     ref = (env.get("GITHUB_REF_NAME") or "").strip()
     return ref or None
+
+
+def vex_paths_for(sbom_path: str) -> List[str]:
+    """The VEX filenames `aisbom scan --vex` would have written for this SBOM.
+
+    Mirrors ``aisbom.cli._vex_paths``. The two must agree exactly: if they
+    drift, a plain `scan --vex` writes documents this helper never looks for
+    and the exploitability data silently stops being uploaded — a failure with
+    no error message anywhere.
+    """
+    stem = sbom_path[: -len(".json")] if sbom_path.endswith(".json") else sbom_path
+    return [f"{stem}.openvex.json", f"{stem}.vex.cdx.json"]
+
+
+def load_vex_documents(sbom_path: str) -> List[Dict[str, Any]]:
+    """Read whichever VEX siblings exist next to the SBOM.
+
+    Missing files are the normal case (the scan ran without ``--vex``). An
+    unreadable or non-object file is skipped rather than raised on: the SBOM is
+    what the user actually needs in their inventory, and failing the whole
+    upload because a supplementary document is corrupt would cost them that
+    entry to save a file the receiver would have ignored anyway.
+    """
+    documents: List[Dict[str, Any]] = []
+    for path in vex_paths_for(sbom_path):
+        if not Path(path).is_file():
+            continue
+        try:
+            with open(path, "rb") as fh:
+                parsed = json.loads(fh.read())
+        except (OSError, ValueError):
+            print(f"[aisbom-action] skipping unreadable VEX document: {path}")
+            continue
+        if isinstance(parsed, dict):
+            documents.append(parsed)
+        else:
+            print(f"[aisbom-action] skipping VEX document that is not an object: {path}")
+    return documents
+
+
+def build_request_body(sbom_path: str, vex_documents: List[Dict[str, Any]] | None = None) -> bytes:
+    """The bytes to POST: the SBOM alone, or an {sbom, vex} envelope.
+
+    With no VEX documents the SBOM's own bytes are sent **verbatim**, so an
+    upload from a repo that does not use ``--vex`` is byte-identical to what
+    every previous release sent. Only when there is something extra to carry
+    does the body become an envelope.
+
+    If the SBOM cannot be parsed we send it raw as well. The SBOM is the
+    document the receiver validates, and inventing an envelope around bytes we
+    could not read would replace the receiver's specific rejection reason with
+    a confusing one.
+    """
+    with open(sbom_path, "rb") as fh:
+        raw = fh.read()
+
+    # Accepted as an argument so a caller that already loaded the documents
+    # (upload, which also logs the count) does not parse them a second time and
+    # emit every "skipping unreadable document" warning twice.
+    if vex_documents is None:
+        vex_documents = load_vex_documents(sbom_path)
+    if not vex_documents:
+        return raw
+
+    try:
+        sbom = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(sbom, dict):
+        return raw
+
+    return json.dumps({"sbom": sbom, "vex": vex_documents}).encode("utf-8")
 
 
 def summarize_response(status: int, body: str) -> str:
@@ -82,8 +163,12 @@ def upload(
         headers["X-Aisbom-Ref"] = ref
 
     try:
-        with open(sbom_path, "rb") as fh:
-            payload = fh.read()
+        vex_documents = load_vex_documents(sbom_path)
+        payload = build_request_body(sbom_path, vex_documents)
+        # Part of the same disclosure as the lines above: an opted-in user can
+        # see from the log exactly how many documents left their runner, not
+        # just that "an upload happened".
+        print(f"[aisbom-action] vex-documents={len(vex_documents)}")
         resp = requests.post(
             url,
             data=payload,
