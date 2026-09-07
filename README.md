@@ -449,7 +449,11 @@ Get a per-repo token at <https://app.aisbom.io/connect> (sign in with GitHub). L
 
 The model files themselves never leave the GitHub runner in any configuration — the scan, the SBOM and the PR comment are all produced on the runner. Three things can go over the wire, each with its own switch:
 
-**Dashboard upload — off by default, enabled by setting `token`.** The Action POSTs the generated CycloneDX SBOM JSON to `https://app.aisbom.io/v1/scan-result`, along with the branch/tag name (`GITHUB_REF_NAME`) so the dashboard can attribute results to the right ref. That's the entire payload. Data is stored in the EU (Cloudflare R2/D1, EU jurisdiction). Every upload is announced in a loud log group in your CI output. Remove the `token` input to stop.
+**Dashboard upload — off by default, enabled by setting `token`.** The Action POSTs the generated CycloneDX SBOM JSON to `https://app.aisbom.io/v1/scan-result`, along with the branch/tag name (`GITHUB_REF_NAME`) so the dashboard can attribute results to the right ref.
+
+Setting `token` also makes the Action run the scan with `--vex`, and the two generated VEX documents (OpenVEX and CycloneDX VEX) are uploaded in the same request as `{"sbom": …, "vex": [...]}`. They are derived entirely from findings already described in the SBOM — per finding, whether each scanned artifact is actually affected — and add no new information about your files; they let the dashboard show whether a finding is *exploitable* rather than merely present. The CI log reports how many were sent (`vex-documents=N`). That is the entire payload: SBOM, VEX documents, ref, and the trigger/run identifiers.
+
+Without a `token` the scan runs exactly as before — no `--vex`, no VEX files written to your workspace, no request. Data is stored in the EU (Cloudflare R2/D1, EU jurisdiction). Every upload is announced in a loud log group in your CI output. Remove the `token` input to stop.
 
 **Share upload — off by default, enabled by `share: true`.** The same SBOM is POSTed to `aisbom.io/api/sbom-share`, which mints a **publicly-readable** viewer link retained for 30 days and adds it to the PR comment and the `share-url` output. The unguessable URL token is the only access control, and on a public repository the Action prints that URL into the workflow log, which is itself public. With `share` unset, no request reaches `aisbom.io` and `share-url` is empty.
 
@@ -462,7 +466,7 @@ The model files themselves never leave the GitHub runner in any configuration �
 
 **Anonymous telemetry — on by default,** as described in [Telemetry & Privacy](#telemetry--privacy). `AISBOM_NO_TELEMETRY=1` disables telemetry only; it does not suppress either upload above.
 
-For the two upload paths the payload is the SBOM — names, hashes, licenses, risk levels — describing the *structure and findings* of your model files, never the weights or file contents. Telemetry carries none of that: no SBOM, no file names, no hashes, no repo identifier.
+For the two upload paths the payload is the SBOM — names, hashes, licenses, risk levels — plus, on the dashboard path only, the VEX documents derived from those same findings. All of it describes the *structure and findings* of your model files, never the weights or file contents. Telemetry carries none of that: no SBOM, no VEX, no file names, no hashes, no repo identifier.
 
 > **Changed in v1.4.0.** Sharing used to be unconditional: every Action run published its SBOM to a public 30-day link whether or not `token` was set, which contradicted the paragraph above. It is now opt-in and off by default. If you consume the `share-url` output or want the viewer link in your PR comments, set `share: true`.
 

@@ -56,6 +56,18 @@ SCAN_LOG="${AISBOM_SCAN_LOG:-/tmp/aisbom-scan.log}"
 # only passed when the user explicitly sets `share: true`. Everything else the
 # Action does — the SBOM artifact, the PR comment, fail-on-risk, the platform
 # upload — renders from the local SBOM and works identically with sharing off.
+# VEX is generated only when a platform token is set, i.e. when there is a
+# hosted inventory to send it to. Exploitability statements are what the CRA
+# and FDA §524B ask for most directly, and without them the inventory can show
+# what a repo contains but never whether a finding is actually exploitable.
+# Tying generation to the opt-in keeps the default run byte-identical: a user
+# who has not connected a repo gets no extra files in their workspace and no
+# extra work in their scan.
+VEX_ARGS=()
+if [ -n "${INPUT_TOKEN}" ]; then
+    VEX_ARGS=(--vex)
+fi
+
 SHARE_ARGS=()
 if [ "${INPUT_SHARE}" = "true" ]; then
     SHARE_ARGS=(--share --share-yes)
@@ -73,6 +85,7 @@ set -o pipefail
 # words at all when the array is empty.
 aisbom scan "${DIRECTORY}" \
   --output "${OUTPUT_FILE}" \
+  ${VEX_ARGS[@]+"${VEX_ARGS[@]}"} \
   ${SHARE_ARGS[@]+"${SHARE_ARGS[@]}"} \
   2>&1 | tee "${SCAN_LOG}"
 SCAN_EXIT=${PIPESTATUS[0]}

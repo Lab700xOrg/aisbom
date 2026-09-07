@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'true'
   token:
-    description: 'Optional. Per-repo API token for posting the generated SBOM to your hosted inventory dashboard at app.aisbom.io. Leave unset for purely local PR-comment behavior. Get a token at https://app.aisbom.io/connect.'
+    description: 'Optional. Per-repo API token for posting the generated SBOM to your hosted inventory dashboard at app.aisbom.io. Setting it also runs the scan with --vex and uploads the resulting VEX documents alongside the SBOM, so the dashboard can show whether a finding is exploitable. Leave unset for purely local PR-comment behavior. Get a token at https://app.aisbom.io/connect.'
     required: false
     default: ''
   platform-url:

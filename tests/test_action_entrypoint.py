@@ -220,3 +220,58 @@ class TestUnaffectedByShareSetting:
         run = run_entrypoint(tmp_path / share, [*BASE_ARGS, share], create_sbom=True)
         assert "--share-enabled" in run.python_argv
         assert run.python_argv[run.python_argv.index("--share-enabled") + 1] == expected
+
+
+# Argv with a platform token set — the opt-in that turns on hosted inventory.
+TOKEN_ARGS = [
+    ".",
+    "sbom.json",
+    "gh-token",
+    "10",
+    "true",
+    "true",
+    "plat-token",  # $7 token
+    "",            # $8 platform-url
+    "false",       # $9 fail-on-platform-error
+]
+
+
+class TestVexAccompaniesPlatformUpload:
+    """VEX is generated exactly when there is somewhere to send it.
+
+    Exploitability statements are what the CRA and FDA §524B ask for most
+    directly, and they used to stay on the runner — the hosted inventory could
+    never show whether a finding was actually exploitable. Generating them is
+    now tied to the platform opt-in: a user who has not connected a repo sees
+    no change at all, including no extra files in their workspace.
+    """
+
+    def test_platform_token_generates_vex(self, tmp_path):
+        run = run_entrypoint(tmp_path, [*TOKEN_ARGS, "false"])
+        assert run.proc.returncode == 0
+        assert run.scan_argv, "stub aisbom was never invoked"
+        assert "--vex" in run.scan_argv
+
+    def test_no_token_generates_no_vex(self, tmp_path):
+        """The broad user base is not opted in, and must be unaffected."""
+        run = run_entrypoint(tmp_path, [*BASE_ARGS, "false"])
+        assert run.proc.returncode == 0
+        assert "--vex" not in run.scan_argv
+
+    def test_vex_does_not_drag_in_sharing(self, tmp_path):
+        """--vex must not re-introduce the aisbom.io upload by another route."""
+        run = run_entrypoint(tmp_path, [*TOKEN_ARGS, "false"])
+        assert "--share" not in run.scan_argv
+        assert "--share-yes" not in run.scan_argv
+
+    def test_vex_and_sharing_can_coexist(self, tmp_path):
+        run = run_entrypoint(tmp_path, [*TOKEN_ARGS, "true"])
+        assert "--vex" in run.scan_argv
+        assert "--share" in run.scan_argv
+
+    def test_scan_target_and_output_survive_the_vex_conditional(self, tmp_path):
+        """The flag is appended, not substituted for the positional args."""
+        run = run_entrypoint(tmp_path, [*TOKEN_ARGS, "false"])
+        assert "." in run.scan_argv
+        assert "--output" in run.scan_argv
+        assert run.scan_argv[run.scan_argv.index("--output") + 1] == "sbom.json"
