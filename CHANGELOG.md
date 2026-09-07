@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.5.0 — 2026-09-07
+
+> **Behaviour change for GitHub Action users with `token` set.** Two of them: VEX documents are now generated and uploaded with the SBOM, and a scan that finds CRITICAL artifacts now reaches your dashboard where it previously did not.
+
+### New
+
+- **The hosted dashboard can show whether a finding is exploitable, not just that it exists.** `aisbom scan --vex` (added in 1.4.0) wrote its VEX documents to the runner and stopped there — the Action uploaded only the SBOM, so a connected repo's inventory could describe what the repo contained and never whether any of it was actually exploitable.
+
+  Setting the Action's `token` input now also runs the scan with `--vex`, and the resulting OpenVEX and CycloneDX VEX documents are uploaded with the SBOM in one request. The upload log group reports how many were sent (`vex-documents=N`).
+
+  Generation is tied to the platform opt-in. With no `token`, `--vex` is not passed, no VEX files are written into the workspace, and no request is made — the scan behaves exactly as in 1.4.0. The documents are derived entirely from findings already described in the SBOM and carry no new information about your files.
+
+### Fixed
+
+- **A scan with CRITICAL findings never reached the dashboard.** `aisbom scan` exits 2 on a CRITICAL finding but still writes its SBOM. The Action honoured `fail-on-risk` — true by default — before running the platform upload, so the job stopped and uploaded nothing. The hosted inventory was silently omitting the repos that most needed to be in it, and had done so since the dashboard upload first shipped.
+
+  The upload now runs before both exit gates. Exit codes are unchanged for every case that could previously occur; where a CRITICAL scan also has a failed upload, the job exits 2 rather than 3, so a required check reports the dangerous model rather than the plumbing. A repo whose scans always failed on CRITICAL may now appear in the inventory for the first time, showing findings that were always present.
+
+- **A corrupt VEX document no longer costs the upload.** An unreadable or non-object sibling file is skipped with a log line; the SBOM still reaches the inventory. An SBOM that cannot be parsed is posted as-is rather than wrapped, so the server returns its own rejection reason.
+
+### What's not changing
+
+Scanner behaviour, detection coverage, output formats and the meaning of each exit code are identical to 1.4.0. Sharing stays opt-in and off by default; `--vex` never triggers a share upload. `aisbom scan --vex` on the command line is unchanged.
+
+## 1.4.0 — 2026-09-07
+
+> **Behaviour change for GitHub Action users.** SBOM sharing is now opt-in and off by default. Until this release the Action ran the scan with `--share --share-yes` hardcoded, uploading the full SBOM to aisbom.io on every run and minting a publicly-readable 30-day link.
+>
+> **New default SBOM spec version.** `--format json` now emits CycloneDX 1.7 rather than 1.6.
+
+### New
+
+- **CycloneDX 1.7 is the default, with an ML-BOM `modelCard` block.** Model components carry a typed `modelParameters` section — task, architecture family, and training datasets — read from the Hugging Face model card on `hf://` scans. `modelCard` is emitted for 1.7 only; asking for an older schema version keeps the document shape older consumers expect.
+
+- **`aisbom score` grades an AIBOM for completeness.** A new subcommand that answers a different question from `scan`: not "is this model dangerous" but "is this document good enough to be the compliance artifact you are about to hand someone". Seven weighted dimensions — component identity, integrity hashes, licenses, model-card coverage, dataset provenance, VEX presence, and document provenance — with a letter grade, a per-dimension breakdown, and the specific gaps behind each. `--fail-under` gates CI on the result; JSON output is available for programmatic use. CycloneDX input only.
+
+- **`aisbom scan --vex` emits VEX documents.** OpenVEX 0.2.0 and CycloneDX VEX written alongside the SBOM, stating per finding whether each scanned artifact is actually affected. `--vex-format openvex|cyclonedx|both` selects the flavour and `--vex-baseline <old-sbom.json>` unlocks the `fixed` status. Statements are keyed on AIsbom finding classes rather than CVEs: what AIsbom detects lives inside a model file, which will not have a CVE because the file is the payload rather than a component with a patchable defect. Requires `--format json`.
+
+- **`--spdx-version 3.0` emits SPDX 3.0 JSON-LD with the AI Profile.** 2.3 remains the default, so existing `--format spdx` output is unchanged.
+
+### Changed
+
+- **Action SBOM sharing is opt-in.** Controlled by a new `share` input, defaulting to `false`. With it unset, no request reaches aisbom.io and the `share-url` output is empty. If you consume that output or want the hosted viewer link in PR comments, you now have to ask for it with `share: true`.
+
+- **The PR comment link is gated on the same input.** The comment previously recovered the viewer URL by scraping the scan log with a URL-shaped regex, independently of the share setting — so a URL-shaped scan target could have put a link in a comment on a run that shared nothing.
+
+- **Two documentation claims corrected.** `AISBOM_NO_TELEMETRY=1` was documented as disabling the share upload; it does not — it withholds the `cli_share_created` event only, and dropping `--share` is what stops the upload. The privacy sections now state which network call each input enables, and describe the telemetry payload separately from the SBOM upload paths.
+
+### Fixed
+
+- **Standalone binaries are smoke-tested before release assets are uploaded**, so a frozen build that cannot start is caught at build time rather than by whoever downloads it.
+
 ## 1.3.3 — 2026-08-29
 
 ### Security
