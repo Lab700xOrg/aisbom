@@ -1,9 +1,55 @@
 [tool.poetry]
 name = "aisbom-cli"
 version = "1.5.0"
-description = "An AI Supply Chain security tool that that detects Pickle bombs and generates CycloneDX SBOMs for Machine Learning models."
+description = "Static security scanner for ML model files — detects pickle bombs, Keras Lambda RCE and GGUF template injection, and generates CycloneDX / SPDX AI-BOMs (AIBOM) as EU AI Act, CRA and FDA §524B evidence."
 authors = ["Ajoy L <lab700xdev@gmail.com>"]
 readme = "README.md"
+license = "Apache-2.0"
+# Discovery metadata: PyPI renders keywords as facets and classifiers as
+# sidebar filters, so the high-intent terms buyers actually search for
+# ("aibom", "eu-ai-act", "mlsecops") have to appear here, not only in the
+# README. Additive only — none of this affects resolution or runtime.
+keywords = [
+    "sbom",
+    "aibom",
+    "ai-bom",
+    "mlbom",
+    "ml-bom",
+    "cyclonedx",
+    "spdx",
+    "vex",
+    "ai-security",
+    "machine-learning-security",
+    "mlsecops",
+    "model-scanning",
+    "malware-detection",
+    "pickle",
+    "supply-chain-security",
+    "eu-ai-act",
+    "cra",
+    "huggingface",
+    "pytorch",
+    "onnx",
+    "gguf",
+    "safetensors",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: System :: Software Distribution",
+]
 packages = [{include = "aisbom"}]
 repository = "https://github.com/Lab700xOrg/aisbom"
 urls = { "Homepage" = "https://www.aisbom.io/" }
