@@ -1,6 +1,7 @@
 # AIsbom: The Supply Chain for Artificial Intelligence
 
 [![PyPI version](https://img.shields.io/pypi/v/aisbom-cli.svg)](https://pypi.org/project/aisbom-cli/)
+[![Downloads](https://img.shields.io/pypi/dm/aisbom-cli.svg)](https://pypistats.org/packages/aisbom-cli)
 [![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-2088FF?logo=github)](https://github.com/marketplace/actions/aisbom-security-scanner)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -534,6 +535,7 @@ AI models aren't just text files — they're executable programs and IP assets.
 
 - **The security risk.** PyTorch (`.pt`) files are Zip archives containing Pickle bytecode. A malicious model executes arbitrary code (RCE) the moment it's loaded.
 - **The legal risk.** A developer might download a "non-commercial" model (e.g., CC-BY-NC) and ship it to production. The license is embedded in the binary header — standard SBOM tools miss it entirely.
+- **The regulatory risk.** What ships inside a model is increasingly something you have to document. The **EU AI Act** puts general-purpose AI models under **Article 53**, with technical documentation described in **Annex XI**. The **EU Cyber Resilience Act** phases in vulnerability reporting from 11 September 2026 and an SBOM requirement in December 2027. **FDA §524B** treats a missing SBOM as a refuse-to-accept criterion for cyber devices, and has required VEX alongside it since March 2026. AIsbom produces the artifacts those filings are assembled from — an AIBOM (ML-BOM) in CycloneDX or SPDX form, plus VEX statements — the evidence MLSecOps and product-security teams get asked for. It surfaces that evidence; it doesn't assess or certify compliance, and that assessment stays with you as the provider.
 - **The solution.** AIsbom looks *inside*. We decompile bytecode and parse binary metadata headers without loading the heavy weights into memory.
 
 ---
