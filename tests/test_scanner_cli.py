@@ -170,10 +170,38 @@ def test_scan_footer_nudges_share_when_flag_not_used(tmp_path, monkeypatch):
 
 
 def _write_malicious_pt(path: Path):
-    """Create a PyTorch-style archive with a known dangerous pickle payload."""
+    """Create a PyTorch-style archive with a known dangerous pickle payload.
+
+    Entry timestamps are pinned. `writestr` with a plain name stamps each entry
+    with the current local time at the DOS format's 2-second granularity, so
+    writing this fixture twice produced different bytes — and therefore a
+    different SHA-256 — whenever the two writes straddled a 2-second boundary.
+    Any test that regenerates the artifact and compares hashes across two scans
+    was a coin flip on how long the first scan took.
+    """
+    entries = (("archive/data.pkl", STACK_GLOBAL_SYSTEM), ("archive/version", "3"))
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("archive/data.pkl", STACK_GLOBAL_SYSTEM)
-        zf.writestr("archive/version", "3")
+        for name, payload in entries:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, payload)
+
+
+def test_malicious_pt_fixture_is_reproducible(tmp_path):
+    """Regression: the fixture embedded wall-clock timestamps.
+
+    `test_default_scan_preserves_every_1_6_component_field` regenerates this
+    artifact before each of its two scans and then asserts the component
+    hashes match, so a time-dependent fixture made that test fail roughly
+    whenever the first scan crossed a 2-second boundary.
+    """
+    first, second = tmp_path / "first.pt", tmp_path / "second.pt"
+    _write_malicious_pt(first)
+    _write_malicious_pt(second)
+
+    assert first.read_bytes() == second.read_bytes()
+    with zipfile.ZipFile(first) as zf:
+        assert {i.date_time for i in zf.infolist()} == {(1980, 1, 1, 0, 0, 0)}
 
 
 def test_scan_pickle_stream_detects_dangerous_opcode():
