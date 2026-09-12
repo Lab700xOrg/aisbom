@@ -55,7 +55,7 @@ repository = "https://github.com/Lab700xOrg/aisbom"
 urls = { "Homepage" = "https://www.aisbom.io/" }
 [tool.poetry.dependencies]
 python = "^3.11"
-typer = {extras = ["all"], version = ">=0.12.5,<0.28.0"}
+typer = {extras = ["all"], version = ">=0.27.2,<0.28.0"}
 rich = ">=13.7.1,<16.0.0"
 # Floor is 11.4, the first release exporting JsonV1Dot7 / SchemaVersion.V1_7
 # (upstream PR #902). cli.py imports the 1.7 serializer unconditionally, so a
