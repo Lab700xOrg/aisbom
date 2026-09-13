@@ -65,6 +65,17 @@ NPZ_MAX_MEMBERS = 512
 
 REQUIREMENTS_FILENAME = 'requirements.txt'
 
+# Why a local scan target was unusable (#126). A closed set, chosen at the call
+# site and never derived from the path, extension, or message: it rides into
+# `cli_error` telemetry and the loop_state fingerprint, where anything
+# path-derived would be unbounded cardinality and would leak the path by
+# inference.
+TARGET_ERROR_TYPES = frozenset({
+    "MissingTarget",
+    "UnsupportedFileType",
+    "NotAFileOrDirectory",
+})
+
 # --- ONNX protobuf field numbers ---
 # ONNX has no magic bytes — a .onnx file is a bare serialized ModelProto — so
 # these field numbers are the schema. Confirmed against models serialized by the
@@ -309,17 +320,22 @@ class DeepScanner:
                     self._record_target_error(
                         str(root),
                         f"Unsupported file type '{root.suffix or root.name}' — no scanner claimed this file",
+                        "UnsupportedFileType",
                     )
             else:
                 # Missing, a broken symlink, or not a regular file (fifo,
                 # socket, device). is_dir()/is_file() both follow symlinks,
                 # so a dangling link lands here and reads as missing.
-                self._record_target_error(
-                    str(root),
-                    "No such file or directory"
-                    if not root.exists()
-                    else "Not a regular file or directory",
-                )
+                if not root.exists():
+                    self._record_target_error(
+                        str(root), "No such file or directory", "MissingTarget"
+                    )
+                else:
+                    self._record_target_error(
+                        str(root),
+                        "Not a regular file or directory",
+                        "NotAFileOrDirectory",
+                    )
 
         return {
             "artifacts": self.artifacts,
@@ -419,7 +435,7 @@ class DeepScanner:
                 return False
             budget *= 8
 
-    def _record_target_error(self, target: str, message: str) -> None:
+    def _record_target_error(self, target: str, message: str, error_type: str) -> None:
         """Record an unusable scan target as a structured, non-fatal error.
 
         Lands in results['errors'] so the CLI's `errors → exit 1` path fires.
@@ -427,11 +443,17 @@ class DeepScanner:
         rendering (which expects a live exception) and the "Could not parse"
         list — the target was never readable enough to parse. An empty
         directory is *not* this: that is a legitimate clean scan.
+
+        `error_type` must be a member of TARGET_ERROR_TYPES; it is the only
+        part of the error that reaches telemetry (#126).
         """
+        if error_type not in TARGET_ERROR_TYPES:
+            raise ValueError(f"unknown target error type: {error_type!r}")
         self.errors.append({
             "file": target,
             "error": message,
             "target_error": True,
+            "target_error_type": error_type,
         })
 
     def _record_fetch_error(self, target: str, exc: Exception) -> None:

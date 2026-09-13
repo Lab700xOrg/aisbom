@@ -71,7 +71,10 @@ def _save_state(state: dict) -> None:
 
 
 def record_failure(error_type: str, http_status: str, target_type: str) -> int:
-    """Record one scan-path fetch failure; return the consecutive count.
+    """Record one failing scan; return the consecutive count.
+
+    Fed by fetch failures, crashes, and unusable local targets (#126, which
+    pass `http_status="none"`).
 
     Increments when the fingerprint matches the stored one, resets to 1 when
     it changed or no state exists. When the config dir is unwritable the
