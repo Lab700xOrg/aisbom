@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.6.0 — 2026-09-13
+
+> **`--vex` now contacts a third-party service.** When a `--vex` scan finds exact `requirements.txt` pins, it sends each pinned package name and version to the public OSV API at `api.osv.dev`. Nothing else is sent. Pass `--no-osv` or set `AISBOM_NO_OSV=1` to turn this off. The GitHub Action runs `--vex` whenever its `token` input is set, so those runs make the lookup too.
+>
+> **Dependency `bom-ref`s are now stable.** `requirements.txt` components in CycloneDX output are given `dependency-<n>-<name>` instead of a new random value on every run, so scanning the same input twice produces the same references.
+
+### New
+
+- **CVE statements for pinned Python dependencies.** `aisbom scan --vex` looks up each exact `requirements.txt` pin in OSV and adds one statement per advisory to the same OpenVEX and CycloneDX VEX documents that carry the model findings. Statements are keyed on the CVE, or on the GHSA/PYSEC id when an advisory has none. A statement is `affected` only when OSV and AIsbom's own check of the advisory's version ranges agree; otherwise it is `under_investigation`. Range specifiers such as `torch>=2.0` are skipped and counted in the scan summary. Results are cached for 24 hours in `~/.aisbom/osv_cache.json`.
+
+  If OSV can't be reached or returns something unexpected, the scan prints a warning and the documents carry no CVE statements. Exit codes and model findings are unaffected. A scan without `--vex` never contacts OSV.
+
+### Changed
+
+- **Telemetry reports unusable scan targets.** A missing path, a broken symlink or a file no scanner recognises now sends a `cli_error` event with one of three fixed reasons (`MissingTarget`, `UnsupportedFileType`, `NotAFileOrDirectory`), and `cli_scan` gains a `target_error_count` field. The path is never sent. These runs now count toward the repeated-failure hint instead of resetting it. `AISBOM_NO_TELEMETRY=1` still turns telemetry off.
+
+- **Large Action uploads fall back to the SBOM alone.** If the SBOM and its VEX documents together would exceed 1 MiB, the Action uploads only the SBOM and logs that it did, rather than having the whole request rejected.
+
+### Fixed
+
+- **The macOS Intel binary is built for Intel.** Every `aisbom-macos-amd64` asset published before this release, v0.7.0 through v1.5.0, is an arm64 executable and does not run on an Intel Mac. The build ran on an Apple Silicon runner. It now runs on an Intel runner, and a release fails if any binary's architecture doesn't match its asset name. The PyPI package was not affected. Intel Mac users on an earlier release can download the 1.6.0 asset or `pip install aisbom-cli`.
+
+### What's not changing
+
+Model scanning, detection coverage, output formats and the meaning of each exit code are identical to 1.5.0.
+
 ## 1.5.0 — 2026-09-07
 
 > **Behaviour change for GitHub Action users with `token` set.** Two of them: VEX documents are now generated and uploaded with the SBOM, and a scan that finds CRITICAL artifacts now reaches your dashboard where it previously did not.
