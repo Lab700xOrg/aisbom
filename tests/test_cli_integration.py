@@ -471,3 +471,143 @@ def test_vex_baseline_turns_a_removed_finding_into_fixed(tmp_path):
     assert len(fixed) == 1
     assert fixed[0]["vulnerability"]["name"] == "AISBOM-PICKLE-RCE"
     assert "fixed since baseline" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #128 — CVE-keyed statements for requirements.txt pins, via OSV.
+# ---------------------------------------------------------------------------
+
+
+def _osv_tree(tmp_path, requirements="requests==2.19.0\ntorch>=2.0\n"):
+    _write_malicious_pt(tmp_path / "mock_malware.pt")
+    create_mock_gguf(tmp_path)
+    (tmp_path / "requirements.txt").write_text(requirements)
+    return tmp_path / "sbom.json"
+
+
+def _fake_osv(monkeypatch):
+    from tests.test_osv import FakeOSV, _requests_advisory
+
+    fake = FakeOSV(
+        [_requests_advisory()],
+        matches={("requests", "2.19.0"): ["GHSA-x84v-xcm2-53pg"]},
+    )
+    monkeypatch.setattr("aisbom.osv._default_session", lambda: fake)
+    return fake
+
+
+def _finding_class_statements(openvex):
+    return sorted(
+        (s["vulnerability"]["name"], s["products"][0]["@id"].partition("#")[2],
+         s["status"])
+        for s in openvex["statements"]
+        if s["vulnerability"]["name"].startswith("AISBOM-")
+    )
+
+
+def test_vex_carries_cve_statements_for_pinned_dependencies(tmp_path, monkeypatch):
+    output_path = _osv_tree(tmp_path)
+    fake = _fake_osv(monkeypatch)
+
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path), "--vex"])
+    assert result.exit_code == 2, result.output
+    output = " ".join(result.output.split())  # Rich wraps long lines
+    assert "1 CVE statement(s) across 1 pinned dependency" in output
+    assert "1 unpinned dependency skipped" in output
+
+    sbom = json.loads(output_path.read_text())
+    refs = {c["bom-ref"] for c in sbom["components"]}
+    openvex = json.loads((tmp_path / "sbom.openvex.json").read_text())
+    cdx = json.loads((tmp_path / "sbom.vex.cdx.json").read_text())
+
+    [cve] = [s for s in openvex["statements"]
+             if s["vulnerability"]["name"] == "CVE-2018-18074"]
+    assert cve["status"] == "affected"
+    assert cve["products"][0]["@id"].partition("#")[2] in refs
+    # The model findings are still in the same document.
+    assert any(s["vulnerability"]["name"] == "AISBOM-PICKLE-RCE"
+               and s["status"] == "affected" for s in openvex["statements"])
+
+    [entry] = [v for v in cdx["vulnerabilities"] if v["id"] == "CVE-2018-18074"]
+    assert all(a["ref"] in refs for a in entry["affects"])
+    # Only the exact pin was sent to OSV.
+    assert [q["package"]["name"] for q in fake.posts[0]["queries"]] == ["requests"]
+
+
+def test_no_osv_flag_makes_no_request(tmp_path, monkeypatch):
+    output_path = _osv_tree(tmp_path)
+    fake = _fake_osv(monkeypatch)
+    result = runner.invoke(
+        app, ["scan", str(tmp_path), "--output", str(output_path), "--vex", "--no-osv"]
+    )
+    assert result.exit_code == 2, result.output
+    assert fake.calls == 0
+    openvex = json.loads((tmp_path / "sbom.openvex.json").read_text())
+    assert not any(s["vulnerability"]["name"].startswith("CVE-")
+                   for s in openvex["statements"])
+
+
+def test_no_osv_env_var_makes_no_request(tmp_path, monkeypatch):
+    output_path = _osv_tree(tmp_path)
+    fake = _fake_osv(monkeypatch)
+    monkeypatch.setenv("AISBOM_NO_OSV", "1")
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path), "--vex"])
+    assert result.exit_code == 2, result.output
+    assert fake.calls == 0
+
+
+def test_a_scan_without_vex_never_contacts_osv(tmp_path, monkeypatch):
+    output_path = _osv_tree(tmp_path)
+    fake = _fake_osv(monkeypatch)
+    result = runner.invoke(app, ["scan", str(tmp_path), "--output", str(output_path)])
+    assert result.exit_code == 2, result.output
+    assert fake.calls == 0
+
+
+def test_air_gapped_scan_still_succeeds_with_every_model_finding(tmp_path, monkeypatch):
+    """Verified, not assumed: the real HTTP client, with the network cut.
+
+    The conftest stub is undone so `requests` genuinely tries to connect, and
+    the socket layer refuses. The run must exit exactly as a --no-osv run of
+    the same tree does, carrying the identical finding-class statements.
+    """
+    import socket
+
+    import requests as real_requests
+
+    offline_dir = tmp_path / "offline"
+    disabled_dir = tmp_path / "disabled"
+    offline_dir.mkdir()
+    disabled_dir.mkdir()
+
+    disabled_out = _osv_tree(disabled_dir)
+    baseline = runner.invoke(
+        app, ["scan", str(disabled_dir), "--output", str(disabled_out), "--vex", "--no-osv"]
+    )
+
+    attempts = []
+
+    def refuse(*args, **kwargs):
+        attempts.append(args)
+        raise OSError("network is unreachable (air-gapped test)")
+
+    monkeypatch.setattr("aisbom.osv._default_session", lambda: real_requests)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+    offline_out = _osv_tree(offline_dir)
+    offline = runner.invoke(
+        app, ["scan", str(offline_dir), "--output", str(offline_out), "--vex"]
+    )
+
+    assert attempts, "the lookup never tried the network, so nothing was proven"
+    assert offline.exit_code == baseline.exit_code == 2, offline.output
+    assert "VEX carries no CVE statements" in " ".join(offline.output.split())
+
+    offline_vex = json.loads((offline_dir / "sbom.openvex.json").read_text())
+    disabled_vex = json.loads((disabled_dir / "sbom.openvex.json").read_text())
+    assert _finding_class_statements(offline_vex) == _finding_class_statements(disabled_vex)
+    assert _finding_class_statements(offline_vex), "expected model findings"
+    assert not any(s["vulnerability"]["name"].startswith("CVE-")
+                   for s in offline_vex["statements"])
+    assert json.loads((offline_dir / "sbom.vex.cdx.json").read_text())["vulnerabilities"]

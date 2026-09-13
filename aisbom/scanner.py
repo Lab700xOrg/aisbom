@@ -1928,10 +1928,20 @@ class DeepScanner:
                     specs = list(req.specifier) if req.specifier else []
                     if specs:
                         version = specs[0].version
+                    # Only a single `==`/`===` without a wildcard names the
+                    # version actually installed. `version` above is also set
+                    # for `>=2.0`, so the OSV lookup (#128) keys on this flag
+                    # rather than on whether a version string exists.
+                    pinned = (
+                        len(specs) == 1
+                        and specs[0].operator in ("==", "===")
+                        and "*" not in specs[0].version
+                    )
                     self.dependencies.append({
                         "name": req.name,
                         "version": version,
-                        "type": "library"
+                        "type": "library",
+                        "pinned": pinned,
                     })
         except Exception as e:
             self.errors.append({"file": str(path), "error": str(e)})

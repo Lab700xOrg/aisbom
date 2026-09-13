@@ -10,9 +10,10 @@ rather than a published component with a patchable defect.
 They appear as the `vulnerability.name` of an OpenVEX statement and
 the `id` of a CycloneDX VEX entry, and resolve under `https://aisbom.io/vex/`.
 
-CVE-keyed statements about a project's Python dependencies are a
-separate, additive concern and arrive with OSV mapping; they will join
-the same document without changing anything below.
+CVE-keyed statements about a project's pinned Python dependencies are
+a separate, additive concern: they come from OSV, carry the advisory's
+CVE (or GHSA/PYSEC id) and resolve under `https://osv.dev/vulnerability/`.
+They join the same document without changing anything below.
 
 ## Compatibility policy
 

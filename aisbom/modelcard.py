@@ -212,6 +212,18 @@ def bom_ref_for(index: int, art: Dict[str, Any]) -> str:
     return f"artifact-{index}-{art.get('name', 'unknown')}"
 
 
+def dependency_bom_ref(index: int, dep: Dict[str, Any]) -> str:
+    """Stable `bom-ref` for a requirements.txt dependency component.
+
+    Left to the library this is a fresh random string on every run, which is
+    what `bom_ref_for` exists to avoid for models. Dependencies need the same
+    once a VEX statement addresses one (#128): the CVE statement and the SBOM
+    component are written separately and must join on this value. The index
+    keeps the same package listed in two requirements files distinct.
+    """
+    return f"dependency-{index}-{dep.get('name', 'unknown')}"
+
+
 def inject_model_cards(
     bom_json: str,
     artifacts: List[Dict[str, Any]],

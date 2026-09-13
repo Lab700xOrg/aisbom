@@ -57,10 +57,12 @@ broken**:
    by its successor. That makes the policy mechanically enforced rather than a
    comment someone has to remember.
 
-When OSV/CVE mapping for the dependency components lands, those statements join
-the same ``statements`` list with no change visible to a consumer — the
-emitters take a list of :class:`VexStatement` and do not care where one came
-from.
+OSV-sourced CVE statements for the pinned dependency components
+(:mod:`aisbom.osv`) join the same ``statements`` list with no change visible to
+a consumer of these classes — the emitters take a list of :class:`VexStatement`
+and do not care where one came from. Such a statement's class carries its own
+``reference_url`` and ``source_name``, so it resolves to OSV rather than under
+:data:`VEX_NAMESPACE`.
 
 Scoping of negative statements
 ------------------------------
@@ -159,10 +161,16 @@ class FindingClass:
     #: Real CVE/GHSA identifiers for the same issue. Empty for every class
     #: today — see the module docstring for why.
     aliases: tuple = ()
+    #: Where the identifier resolves, for a statement AIsbom did not define
+    #: (an OSV-sourced CVE, see :mod:`aisbom.osv`). Unset for every class in
+    #: this module, which resolve under :data:`VEX_NAMESPACE`.
+    reference_url: Optional[str] = None
+    #: Who published the identifier — the CycloneDX `source.name`.
+    source_name: str = VEX_AUTHOR
 
     @property
     def iri(self) -> str:
-        return f"{VEX_NAMESPACE}{self.id}"
+        return self.reference_url or f"{VEX_NAMESPACE}{self.id}"
 
 
 VEX_FINDING_CLASSES: tuple = (
@@ -810,6 +818,26 @@ def _timestamp(value: Optional[datetime] = None) -> str:
     return (value or datetime.now(timezone.utc)).isoformat(timespec="seconds")
 
 
+# Who publishes an alias, by identifier prefix — the CycloneDX
+# `references[].source.name`. Every alias was previously attributed to NVD,
+# which was only ever true of a CVE: a retired AIsbom class aliased through a
+# rename is AIsbom's, and OSV-sourced dependency advisories carry GHSA and
+# PYSEC ids alongside their CVE.
+_ALIAS_SOURCES = (
+    ("AISBOM-", VEX_AUTHOR),
+    ("CVE-", "NVD"),
+    ("GHSA-", "GitHub Advisory Database"),
+    ("PYSEC-", "PyPA Advisory Database"),
+)
+
+
+def _alias_source(identifier: str) -> str:
+    for prefix, name in _ALIAS_SOURCES:
+        if identifier.startswith(prefix):
+            return name
+    return "OSV"
+
+
 def _product_id(sbom_serial: str, ref: str) -> str:
     """Address a component inside the SBOM this scan produced.
 
@@ -922,7 +950,7 @@ def generate_cyclonedx_vex(
         entry: Dict[str, Any] = {
             "bom-ref": f"vex-{class_id}-{status}",
             "id": class_id,
-            "source": {"name": VEX_AUTHOR, "url": cls.iri},
+            "source": {"name": cls.source_name, "url": cls.iri},
             "description": cls.description,
             "detail": cls.title,
             "analysis": analysis,
@@ -930,7 +958,8 @@ def generate_cyclonedx_vex(
         }
         if cls.aliases:
             entry["references"] = [
-                {"id": alias, "source": {"name": "NVD"}} for alias in cls.aliases
+                {"id": alias, "source": {"name": _alias_source(alias)}}
+                for alias in cls.aliases
             ]
         if status == STATUS_AFFECTED:
             entry["recommendation"] = cls.action
@@ -987,9 +1016,10 @@ def finding_classes_markdown() -> str:
         "the `id` of a CycloneDX VEX entry, and resolve under "
         f"`{VEX_NAMESPACE}`.",
         "",
-        "CVE-keyed statements about a project's Python dependencies are a",
-        "separate, additive concern and arrive with OSV mapping; they will join",
-        "the same document without changing anything below.",
+        "CVE-keyed statements about a project's pinned Python dependencies are",
+        "a separate, additive concern: they come from OSV, carry the advisory's",
+        "CVE (or GHSA/PYSEC id) and resolve under `https://osv.dev/vulnerability/`.",
+        "They join the same document without changing anything below.",
         "",
         "## Compatibility policy",
         "",

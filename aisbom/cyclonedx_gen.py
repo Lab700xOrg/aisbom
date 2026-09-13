@@ -22,7 +22,7 @@ from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6, JsonV1Dot7
 
-from .modelcard import bom_ref_for, inject_model_cards
+from .modelcard import bom_ref_for, dependency_bom_ref, inject_model_cards
 from .properties import build_component_properties
 from .spdx_gen import _sha256_or_none
 
@@ -101,7 +101,7 @@ def build_bom(results: Dict[str, Any]) -> Bom:
 
         bom.components.add(c)
 
-    for dep in results.get("dependencies", []):
+    for dep_index, dep in enumerate(results.get("dependencies", [])):
         version = dep.get("version")
         # `version: "unknown"` was a placeholder carrying no more information
         # than an absent field, and it cost the completeness grade real points
@@ -112,6 +112,9 @@ def build_bom(results: Dict[str, Any]) -> Bom:
             name=dep["name"],
             version=None if version == "unknown" else version,
             type=ComponentType.LIBRARY,
+            # Stable for the same reason as the model components: a CVE-keyed
+            # VEX statement (#128) addresses this component by bom-ref.
+            bom_ref=dependency_bom_ref(dep_index, dep),
         ))
 
     return bom
