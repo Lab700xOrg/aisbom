@@ -185,6 +185,29 @@ def _scan_error_payload(exc: BaseException, target: str) -> dict:
     }
 
 
+# `http_status` stand-in for failures that never touched the network (#126).
+# A distinct token rather than an HTTP code or "other", so the loop fingerprint
+# and the GA4 dimension can never confuse it with a real fetch bucket.
+NO_HTTP_STATUS = "none"
+
+
+def _target_error_payload(err: dict, target: str) -> dict:
+    """Build the `cli_error` payload for an unusable local scan target (#126).
+
+    A target error has no exception, so `_scan_error_payload` doesn't fit.
+    `error_type` is the scanner's closed-set reason code; the error's `file`
+    and `error` message — which carry the path and extension — are never read
+    here.
+    """
+    return {
+        "command": "scan",
+        "error_type": err["target_error_type"],
+        "http_status": NO_HTTP_STATUS,
+        "token_present": _token_present(),
+        "target_type": _classify_target(target),
+    }
+
+
 def _maybe_print_loop_warning(count: int, http_status: str) -> None:
     """Stale-loop nudge (#99): warn once the same failure repeats N runs.
 
@@ -203,7 +226,12 @@ def _maybe_print_loop_warning(count: int, http_status: str) -> None:
         f"[bold yellow]⚠ Your scans have hit the same error "
         f"{count} times in a row.[/bold yellow]"
     ]
-    if http_status in ("401", "403"):
+    if http_status == NO_HTTP_STATUS:
+        lines.append(
+            "• The scan target is missing or unsupported — check the path "
+            "your job passes to `aisbom scan`."
+        )
+    elif http_status in ("401", "403"):
         if _token_present() == "true":
             lines.append(
                 "• A token is set but authentication keeps failing — verify "
@@ -648,11 +676,17 @@ def scan(
     # failed scan emits both a cli_error (the failure) and the normal cli_scan
     # (context) below. Intentional; see the slice notes.
     fetch_failures = [e for e in results['errors'] if e.get('fetch_failure')]
+    target_errors = [e for e in results['errors'] if e.get('target_error')]
     # Loop detection (#99) works at scan granularity ("N runs in a row"): the
-    # first fetch failure's fingerprint represents the invocation. A scan with
-    # no fetch failures breaks any recorded loop for this target class.
+    # first failure's fingerprint represents the invocation — a fetch failure
+    # if there is one, else a target error (#126: a cron job on a typo'd path
+    # is the textbook stale loop, and used to *reset* the counter every run).
+    # A scan with neither breaks any recorded loop for this target class.
     if fetch_failures:
         first_payload = _scan_error_payload(fetch_failures[0].get('exception'), target)
+    elif target_errors:
+        first_payload = _target_error_payload(target_errors[0], target)
+    if fetch_failures or target_errors:
         loop_count = loop_state.record_failure(
             first_payload["error_type"],
             first_payload["http_status"],
@@ -682,6 +716,12 @@ def scan(
         telemetry_threads.append(
             telemetry.post_event("cli_error", payload, scan_id=scan_id)
         )
+    for err in target_errors:
+        payload = _target_error_payload(err, target)
+        payload["consecutive_failures"] = loop_state.bucket_count(loop_count)
+        telemetry_threads.append(
+            telemetry.post_event("cli_error", payload, scan_id=scan_id)
+        )
     if fetch_failures:
         _maybe_print_loop_warning(loop_count, first_payload["http_status"])
 
@@ -695,7 +735,11 @@ def scan(
         "risk_level_max": _risk_label,
         "scan_duration_ms": str(scan_duration_ms),
         "file_count": str(len(results.get("artifacts", []))),
+        # Counts every error, target errors included — kept as-is so existing
+        # GA4 history stays comparable. `target_error_count` (#126) is the
+        # split that tells "scanned nothing" from "scanned a corrupt model".
         "parse_error_count": str(len(results.get("errors", []))),
+        "target_error_count": str(len(target_errors)),
         "strict_mode": "true" if strict else "false",
     }
     telemetry_threads.append(
@@ -774,10 +818,14 @@ def scan(
     # Unusable targets (#125): the path was missing or nothing could scan it,
     # so nothing was examined. Printed to stderr like fetch failures — it is a
     # failed instruction, not a finding about the model.
-    for err in [e for e in results['errors'] if e.get('target_error')]:
+    for err in target_errors:
         err_console.print(
             f"[bold red]✖[/bold red] Cannot scan [yellow]{err['file']}[/yellow]: {err['error']}"
         )
+    # The nudge follows the failure it is about (#126); a fetch failure, when
+    # present, owns the fingerprint and already printed its nudge above.
+    if target_errors and not fetch_failures:
+        _maybe_print_loop_warning(loop_count, first_payload["http_status"])
 
     # Parse errors only — fetch failures and target errors already printed
     # their own message to stderr and don't fit the "Could not parse" framing.
