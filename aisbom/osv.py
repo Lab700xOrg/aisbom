@@ -127,13 +127,31 @@ def _parse(version: str) -> Version:
     return Version(version)
 
 
-def _event_version(event: Mapping[str, Any]) -> Tuple[str, Version]:
-    for kind in ("introduced", "fixed", "last_affected"):
-        if kind in event:
-            raw = str(event[kind])
-            # "0" is OSV's spelling of "every version before the next event".
-            return kind, Version("0") if raw == "0" else _parse(raw)
-    raise InvalidVersion(f"unrecognised event {event!r}")  # pragma: no cover - callers filter
+_EVENT_KINDS = ("introduced", "fixed", "last_affected")
+
+
+def _ordered_events(
+    events: Sequence[Mapping[str, Any]],
+) -> List[Tuple[str, Optional[Version]]]:
+    """``(kind, boundary)`` pairs in version order.
+
+    OSV's ``introduced: "0"`` is a sentinel for "from the very first version",
+    represented as a ``None`` boundary that sorts first and precedes every pin.
+    It must not become ``Version("0")``: PEP 440 orders pre-releases such as
+    ``0.dev0`` and ``0rc1`` *below* release 0, so those pins would fall outside
+    an advisory that covers every version. Raises :class:`InvalidVersion` for
+    any other boundary that does not parse.
+    """
+    ordered = []
+    for event in events:
+        kind = next((k for k in _EVENT_KINDS if k in event), None)
+        if kind is None:
+            continue  # `limit` only bounds git ranges
+        raw = str(event[kind])
+        boundary = None if kind == "introduced" and raw == "0" else _parse(raw)
+        ordered.append((kind, boundary))
+    ordered.sort(key=lambda kv: (kv[1] is not None, kv[1] or Version("0")))
+    return ordered
 
 
 def _in_ecosystem_range(events: Sequence[Mapping[str, Any]], version: Version) -> bool:
@@ -144,20 +162,36 @@ def _in_ecosystem_range(events: Sequence[Mapping[str, Any]], version: Version) -
     is ignored. Raises :class:`InvalidVersion` for an event that does not parse,
     which the caller reports as undetermined rather than as unaffected.
     """
-    parsed = sorted(
-        (_event_version(e) for e in events
-         if any(k in e for k in ("introduced", "fixed", "last_affected"))),
-        key=lambda kv: kv[1],
-    )
     vulnerable = False
-    for kind, boundary in parsed:
-        if kind == "introduced" and version >= boundary:
+    for kind, boundary in _ordered_events(events):
+        if kind == "introduced" and (boundary is None or version >= boundary):
             vulnerable = True
         elif kind == "fixed" and version >= boundary:
             vulnerable = False
         elif kind == "last_affected" and version > boundary:
             vulnerable = False
     return vulnerable
+
+
+def _closing_fix(events: Sequence[Mapping[str, Any]], version: Version) -> Optional[str]:
+    """The ``fixed`` boundary that ends the affected interval holding ``version``.
+
+    ``None`` when the pin is not inside this range, or its interval has no fix
+    (open-ended, or closed by ``last_affected``). An advisory with disjoint
+    intervals lists older fixes too, and those are not upgrade targets for a
+    pin in a later interval.
+    """
+    try:
+        if not _in_ecosystem_range(events, version):
+            return None
+        ordered = _ordered_events(events)
+    except InvalidVersion:
+        return None
+    for kind, boundary in ordered:
+        if boundary is None or boundary <= version or kind == "introduced":
+            continue
+        return str(boundary) if kind == "fixed" else None
+    return None
 
 
 def version_affected(record: Mapping[str, Any], name: str, version: str) -> Optional[bool]:
@@ -213,18 +247,27 @@ def vulnerability_ids(record: Mapping[str, Any]) -> Tuple[str, Tuple[str, ...]]:
     return primary, aliases
 
 
-def _fixed_versions(record: Mapping[str, Any], name: str) -> List[str]:
+def _fixed_versions(record: Mapping[str, Any], name: str, version: str) -> List[Version]:
+    """Fixes that close the pinned version's affected interval, one per range."""
     wanted = canonicalize_name(name)
+    try:
+        pin = _parse(version)
+    except InvalidVersion:
+        return []
     fixed = []
     for entry in record.get("affected") or []:
         package = entry.get("package") or {}
+        if package.get("ecosystem") != ECOSYSTEM:
+            continue
         if canonicalize_name(str(package.get("name", ""))) != wanted:
             continue
         for rng in entry.get("ranges") or []:
-            for event in rng.get("events") or []:
-                if "fixed" in event and rng.get("type") == "ECOSYSTEM":
-                    fixed.append(str(event["fixed"]))
-    return list(dict.fromkeys(fixed))
+            if rng.get("type") != "ECOSYSTEM":
+                continue
+            closing = _closing_fix(rng.get("events") or [], pin)
+            if closing is not None:
+                fixed.append(_parse(closing))
+    return fixed
 
 
 # --------------------------------------------------------------------------
@@ -477,10 +520,11 @@ def _statement(
 
     summary = str(source_record.get("summary") or "").strip()
     details = str(source_record.get("details") or "").strip()
-    fixed = sorted(
-        {v for r in records for v in _fixed_versions(r, name)},
-        key=lambda v: (Version(v) if _is_version(v) else Version("0"), v),
-    )
+    # Deduplicated as versions, not strings: twin records may spell one fix
+    # as "2.20" and "2.20.0".
+    fixed = [str(v) for v in sorted(
+        {v for r in records for v in _fixed_versions(r, name, version)}
+    )]
 
     if fixed:
         action = (
@@ -525,14 +569,6 @@ def _statement(
         status_notes=notes,
         action_statement=action if status == STATUS_AFFECTED else None,
     )
-
-
-def _is_version(value: str) -> bool:
-    try:
-        Version(value)
-    except InvalidVersion:
-        return False
-    return True
 
 
 def lookup_dependency_statements(

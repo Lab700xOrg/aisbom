@@ -205,6 +205,13 @@ def test_events_are_evaluated_in_version_order_not_listed_order():
     assert osv.version_affected(record, "demo-pkg", "1.5") is False
 
 
+@pytest.mark.parametrize("version", ["0.dev0", "0rc1", "0a1", "0"])
+def test_introduced_zero_covers_prereleases_below_release_zero(version):
+    """OSV's "0" means "from the first version", not PEP 440's release 0."""
+    record = _range_record([{"introduced": "0"}, {"fixed": "2.0"}])
+    assert osv.version_affected(record, "demo-pkg", version) is True
+
+
 def test_introduced_zero_with_no_fix_affects_every_version():
     record = _range_record([{"introduced": "0"}])
     assert osv.version_affected(record, "demo-pkg", "99.0") is True
@@ -368,6 +375,64 @@ def test_withdrawn_advisories_are_skipped():
     fake = FakeOSV([record],
                    matches={("requests", "2.19.0"): ["GHSA-x84v-xcm2-53pg"]})
     assert _lookup([_dep("requests", "2.19.0")], fake).statements == []
+
+
+def test_action_names_only_the_fix_that_closes_the_pinned_interval():
+    """An older interval's fix is not an upgrade target (disjoint ranges)."""
+    record = _requests_advisory()
+    record["affected"][0]["ranges"][0]["events"] = [
+        {"introduced": "1.0"}, {"fixed": "1.5"},
+        {"introduced": "2.0"}, {"fixed": "2.2"},
+    ]
+    fake = FakeOSV([record],
+                   matches={("requests", "2.1"): ["GHSA-x84v-xcm2-53pg"]})
+    [stmt] = _lookup([_dep("requests", "2.1")], fake).statements
+    assert stmt.status == "affected"
+    assert "fixed in: 2.2)" in stmt.action_statement
+    assert "1.5" not in stmt.action_statement
+
+
+def test_action_offers_no_fix_when_the_pinned_interval_is_unfixed():
+    record = _requests_advisory()
+    record["affected"][0]["ranges"][0]["events"] = [
+        {"introduced": "1.0"}, {"fixed": "1.5"}, {"introduced": "2.0"},
+    ]
+    fake = FakeOSV([record],
+                   matches={("requests", "2.1"): ["GHSA-x84v-xcm2-53pg"]})
+    [stmt] = _lookup([_dep("requests", "2.1")], fake).statements
+    assert "No fixed version" in stmt.action_statement
+
+
+def test_a_fix_spelled_two_ways_is_listed_once():
+    twin = _pysec_twin()
+    twin["affected"][0]["ranges"][0]["events"][1] = {"fixed": "2.20"}
+    fake = FakeOSV(
+        [_requests_advisory(), twin],
+        matches={("requests", "2.19.0"): ["GHSA-x84v-xcm2-53pg", "PYSEC-2018-28"]},
+    )
+    [stmt] = _lookup([_dep("requests", "2.19.0")], fake).statements
+    assert "(fixed in: 2.20.0)" in stmt.action_statement
+
+
+def test_a_fix_after_last_affected_is_not_the_pinned_intervals_fix():
+    record = _range_record([
+        {"introduced": "0"}, {"last_affected": "1.4"},
+        {"introduced": "2.0"}, {"fixed": "2.5"},
+    ])
+    events = record["affected"][0]["ranges"][0]["events"]
+    assert osv._closing_fix(events, osv.Version("1.2")) is None
+    assert osv._closing_fix(events, osv.Version("2.1")) == "2.5"
+    assert osv._closing_fix(events, osv.Version("1.8")) is None
+
+
+def test_twin_records_contribute_one_fix_per_interval():
+    twin = _pysec_twin()
+    fake = FakeOSV(
+        [_requests_advisory(), twin],
+        matches={("requests", "2.19.0"): ["GHSA-x84v-xcm2-53pg", "PYSEC-2018-28"]},
+    )
+    [stmt] = _lookup([_dep("requests", "2.19.0")], fake).statements
+    assert "(fixed in: 2.20.0)" in stmt.action_statement
 
 
 def test_no_fixed_version_gets_an_honest_action():
