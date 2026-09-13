@@ -40,6 +40,27 @@ def _stub_telemetry(request, monkeypatch):
     monkeypatch.setattr("aisbom.telemetry.is_ci", lambda: False)
 
 
+class _OfflineOSV:
+    """Stands in for `requests` inside aisbom.osv: every call is a failure."""
+
+    def post(self, *args, **kwargs):
+        raise ConnectionError("OSV is not reachable from the test suite")
+
+    get = post
+
+
+@pytest.fixture(autouse=True)
+def _stub_osv_network(monkeypatch):
+    """Keep `scan --vex` from ever reaching api.osv.dev during tests.
+
+    Only the *default* session is replaced, so tests that inject a fake OSV
+    (tests/test_osv.py, the CLI integration tests) are unaffected, and a test
+    that forgets to inject one sees the documented degraded behaviour rather
+    than a live request. The air-gap test restores the real client on purpose.
+    """
+    monkeypatch.setattr("aisbom.osv._default_session", lambda: _OfflineOSV())
+
+
 @pytest.fixture(autouse=True)
 def _stub_version_check(monkeypatch):
     """Auto-stub the background update check for every test.

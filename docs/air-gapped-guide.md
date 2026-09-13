@@ -77,6 +77,8 @@ The tool produces two outputs:
 2.  **SBOM Report (`sbom.json`):** A CycloneDX JSON file generated in the working directory.
     *   This file is **static plain text**. It is safe to egress back to "Zone A" for ingestion into your central vulnerability dashboard.
 
+> **VEX in Zone B:** `scan --vex` normally looks up `requirements.txt` pins in the public OSV database. On an air-gapped host that lookup fails and the scan carries on without it — you get a warning, and the VEX documents contain the model finding statements but no dependency CVE statements. To skip the attempt entirely, pass `--no-osv` (or set `AISBOM_NO_OSV=1`).
+
 ---
 
 ## 3. Why this matters

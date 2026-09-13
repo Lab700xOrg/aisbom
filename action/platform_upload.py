@@ -22,6 +22,11 @@ DEFAULT_PLATFORM_URL = "https://app.aisbom.io"
 WEBHOOK_PATH = "/v1/scan-result"
 REQUEST_TIMEOUT_SEC = 15.0
 
+# The receiver rejects bodies over 1 MiB with a 413. VEX documents grow with
+# dependency CVE statements (one per advisory per pinned package), so an
+# envelope can cross that line where the SBOM alone never would.
+MAX_BODY_BYTES = 1024 * 1024
+
 EXIT_OK = 0
 EXIT_UPLOAD_FAILED = 3
 
@@ -117,7 +122,18 @@ def build_request_body(sbom_path: str, vex_documents: List[Dict[str, Any]] | Non
     if not isinstance(sbom, dict):
         return raw
 
-    return json.dumps({"sbom": sbom, "vex": vex_documents}).encode("utf-8")
+    envelope = json.dumps({"sbom": sbom, "vex": vex_documents}).encode("utf-8")
+    # Over the receiver's cap the whole request would be rejected, costing the
+    # inventory entry to carry supplementary documents — the same trade the
+    # unreadable-VEX branch above already refuses. Send the SBOM on its own.
+    if len(envelope) > MAX_BODY_BYTES:
+        print(
+            f"[aisbom-action] VEX documents omitted: the upload would be "
+            f"{len(envelope)} bytes, over the {MAX_BODY_BYTES}-byte limit. "
+            "The SBOM is uploaded alone; the VEX files remain on the runner."
+        )
+        return raw
+    return envelope
 
 
 def summarize_response(status: int, body: str) -> str:
@@ -167,8 +183,10 @@ def upload(
         payload = build_request_body(sbom_path, vex_documents)
         # Part of the same disclosure as the lines above: an opted-in user can
         # see from the log exactly how many documents left their runner, not
-        # just that "an upload happened".
-        print(f"[aisbom-action] vex-documents={len(vex_documents)}")
+        # just that "an upload happened". Counted from what is actually sent,
+        # since an oversized envelope falls back to the SBOM alone.
+        sent = len(vex_documents) if vex_documents and payload.startswith(b'{"sbom"') else 0
+        print(f"[aisbom-action] vex-documents={sent}")
         resp = requests.post(
             url,
             data=payload,

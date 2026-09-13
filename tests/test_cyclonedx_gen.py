@@ -192,3 +192,22 @@ def test_an_empty_scan_still_produces_a_valid_document():
     doc = json.loads(build_cyclonedx_json({"artifacts": [], "dependencies": []}))
     assert doc["bomFormat"] == "CycloneDX"
     assert doc["metadata"]["tools"]
+
+
+def test_dependency_bom_refs_are_stable_across_runs():
+    """CVE-keyed VEX statements (#128) join on these, so they cannot be random."""
+    first = _doc()
+    second = _doc()
+    assert _by_name(first, "torch")["bom-ref"] == "dependency-0-torch"
+    assert _by_name(first, "numpy")["bom-ref"] == "dependency-1-numpy"
+    assert [c["bom-ref"] for c in first["components"]] == \
+           [c["bom-ref"] for c in second["components"]]
+
+
+def test_the_same_package_in_two_requirements_files_keeps_distinct_refs():
+    doc = _doc(dependencies=[
+        {"name": "torch", "version": "2.1.0"},
+        {"name": "torch", "version": "2.1.0"},
+    ])
+    refs = [c["bom-ref"] for c in doc["components"] if c["name"] == "torch"]
+    assert sorted(refs) == ["dependency-0-torch", "dependency-1-torch"]

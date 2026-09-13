@@ -293,9 +293,33 @@ importing `os.system`, a Keras Lambda layer, a Jinja chat template with a
 sandbox escape. None of those have a CVE, because the file itself is the
 payload rather than a published component with a patchable defect. The full
 registry is at [`docs/vex-finding-classes.md`](docs/vex-finding-classes.md)
-and each identifier resolves under `https://aisbom.io/vex/`. CVE-keyed
-statements about your `requirements.txt` pins are a separate, additive
-concern and arrive with OSV mapping.
+and each identifier resolves under `https://aisbom.io/vex/`.
+
+#### CVEs in `requirements.txt` pins
+
+The same documents also carry CVE-keyed statements for your Python
+dependencies. With `--vex`, each exact pin (`requests==2.19.0`) is looked up in
+[OSV](https://osv.dev), and every advisory covering that version becomes a
+statement keyed on its CVE — or on its GHSA/PYSEC id when it has no CVE, with
+the other ids listed as `aliases`.
+
+- **Exact pins only.** `torch>=2.0` doesn't say which version is installed, so
+  ranges are skipped and counted in the scan summary rather than guessed at.
+- **`affected` means both OSV and AIsbom agree.** OSV names the candidate
+  advisories; AIsbom re-checks the pinned version against each advisory's
+  published ranges. When the two disagree, or the ranges can't be evaluated,
+  the statement is `under_investigation`.
+- **No `not_affected` for dependencies.** AIsbom can't see whether your code
+  reaches the vulnerable function, and "no advisory found" isn't evidence the
+  vulnerable code is absent, so dependencies never get a negative statement.
+- **Cached for 24 hours** in `~/.aisbom/osv_cache.json`, so repeat CI scans of
+  the same pins make no requests.
+- **Never breaks a scan.** If OSV is unreachable, slow or returns something
+  unexpected, the run prints a warning and the VEX documents simply carry no
+  CVE statements. Exit codes and model findings are unchanged.
+
+A plain `aisbom scan` without `--vex` never contacts OSV. To keep `--vex` fully
+offline, pass `--no-osv` or set `AISBOM_NO_OSV=1`.
 
 #### Remediation evidence (`fixed`)
 
@@ -615,6 +639,10 @@ When the scan target itself is unusable (a path that doesn't exist, a file no sc
 To detect failure loops (see [Authentication](#authentication-private--gated-hugging-face-models)), AIsbom keeps `~/.aisbom/loop_state.json`: the failure *shape* of the last failing scan (exception class name or unusable-target reason, HTTP status bucket or `none`, target-type bucket — never a URL, repo id, or path), a consecutive-run counter, and a timestamp. This file is purely local UX state and involves no network, so it is written **even when `AISBOM_NO_TELEMETRY` is set**; it is cleared automatically when a scan of the same target class succeeds, and deleting it is always safe.
 
 Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC address plus an app salt, truncated to 16 hex chars. Stored in `~/.aisbom/config.json`. Lets us see returning users without identifying anyone.
+
+### OSV lookups (`--vex` only)
+
+When you pass `--vex` and the scan finds exact `requirements.txt` pins, AIsbom sends each pinned **package name and version** to the public OSV API at `https://api.osv.dev`, and fetches the advisories it names. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-osv` or `AISBOM_NO_OSV=1` does. Responses are cached locally in `~/.aisbom/osv_cache.json` for 24 hours, and deleting that file is always safe.
 
 ### What's never collected
 

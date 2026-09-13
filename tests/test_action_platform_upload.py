@@ -527,3 +527,48 @@ def test_upload_reports_the_vex_document_count(sbom_with_vex: Path, capsys):
         )
     out = capsys.readouterr().out
     assert "vex-documents=2" in out
+
+
+def _oversized_vex(tmp_path: Path) -> Path:
+    """VEX siblings whose envelope exceeds the receiver's 1 MiB cap.
+
+    Realistic, not contrived: dependency CVE statements run ~2 KB each across
+    the two flavors, so a few hundred advisories on old pins crosses the line.
+    """
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps({"bomFormat": "CycloneDX", "components": []}))
+    filler = "x" * 2048
+    statements = [{"status": "affected", "status_notes": filler} for _ in range(300)]
+    (tmp_path / "sbom.openvex.json").write_text(json.dumps({"statements": statements}))
+    (tmp_path / "sbom.vex.cdx.json").write_text(json.dumps({"vulnerabilities": statements}))
+    return sbom
+
+
+def test_an_oversized_envelope_falls_back_to_the_bare_sbom(tmp_path: Path, capsys):
+    """A 413 would lose the inventory entry to carry supplementary documents."""
+    sbom = _oversized_vex(tmp_path)
+    body = platform_upload.build_request_body(str(sbom))
+    assert body == sbom.read_bytes()
+    assert "VEX documents omitted" in capsys.readouterr().out
+
+
+def test_upload_reports_zero_vex_documents_when_they_were_omitted(tmp_path: Path, capsys):
+    sbom = _oversized_vex(tmp_path)
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["data"] = kwargs.get("data")
+        return _mock_response(200, "ok")
+
+    with patch("requests.post", side_effect=fake_post):
+        rc = platform_upload.upload(
+            sbom_path=str(sbom),
+            token="tok",
+            platform_url="https://app.aisbom.io",
+            trigger="push",
+            fail_on_error=True,
+            env={},
+        )
+    assert rc == 0
+    assert len(captured["data"]) <= platform_upload.MAX_BODY_BYTES
+    assert "vex-documents=0" in capsys.readouterr().out

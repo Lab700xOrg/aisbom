@@ -28,6 +28,7 @@ import time
 import uuid
 from .version_check import check_latest_version
 from . import loop_state
+from . import osv
 from . import telemetry
 import requests
 
@@ -63,6 +64,9 @@ def main(
 
       AISBOM_NO_TELEMETRY=1   Disable all anonymous usage telemetry. Honored on
                               every code path; never overridden.
+
+      AISBOM_NO_OSV=1         Same as `scan --no-osv`: never query OSV for
+                              requirements.txt CVEs when emitting VEX.
     """
     # Order matters: --version wins over the no-args panel so that
     # `aisbom --version` is short and scriptable.
@@ -434,6 +438,8 @@ def _emit_vex(
     vex_format: "VexFormat",
     baseline_path: str | None,
     schema_version: str,
+    dependencies: list[dict] | None = None,
+    osv_enabled: bool = False,
 ) -> None:
     """Write the VEX document(s) that accompany a just-written SBOM.
 
@@ -458,6 +464,20 @@ def _emit_vex(
             raise typer.Exit(code=1)
 
     statements = derive_statements(artifacts, baseline)
+
+    # CVE-keyed statements for exact requirements.txt pins join the same
+    # document (#128). Best-effort by contract: a failed lookup costs these
+    # statements and prints why, and nothing else about the run changes.
+    osv_result = None
+    if osv_enabled and dependencies:
+        osv_result = osv.lookup_dependency_statements(dependencies)
+        statements = statements + osv_result.statements
+        if osv_result.error:
+            err_console.print(
+                f"[yellow]⚠ {osv_result.error}; VEX carries no CVE statements "
+                "for requirements.txt pins this run.[/yellow]"
+            )
+
     openvex_path, cyclonedx_path = _vex_paths(output)
 
     if vex_format in (VexFormat.OPENVEX, VexFormat.BOTH):
@@ -483,6 +503,20 @@ def _emit_vex(
     if fixed:
         summary += f", {fixed} fixed since baseline"
     console.print(summary + ".[/dim]")
+
+    if osv_result is not None and osv_result.error is None:
+        line = (
+            f"[dim]OSV: {len(osv_result.statements)} CVE statement(s) across "
+            f"{osv_result.queried} pinned dependenc"
+            f"{'y' if osv_result.queried == 1 else 'ies'}"
+        )
+        if osv_result.skipped_unpinned:
+            line += (
+                f"; {osv_result.skipped_unpinned} unpinned dependenc"
+                f"{'y' if osv_result.skipped_unpinned == 1 else 'ies'} skipped "
+                "(only exact == pins are looked up)"
+            )
+        console.print(line + ".[/dim]")
 
 
 def _generate_markdown(results: dict) -> str:
@@ -570,6 +604,16 @@ def scan(
         help=(
             "A previous CycloneDX SBOM. Findings present there and absent now "
             "are reported with VEX status `fixed`."
+        ),
+        rich_help_panel="Advanced Options",
+    ),
+    no_osv: bool = typer.Option(
+        False,
+        "--no-osv",
+        help=(
+            "With --vex, do not query OSV (api.osv.dev) for CVEs affecting "
+            "exact requirements.txt pins. Use in air-gapped environments; "
+            "AISBOM_NO_OSV=1 does the same."
         ),
         rich_help_panel="Advanced Options",
     ),
@@ -859,10 +903,12 @@ def scan(
             _emit_vex(
                 sbom_json=sbom_json,
                 artifacts=results['artifacts'],
+                dependencies=results.get('dependencies', []),
                 output=output,
                 vex_format=vex_format,
                 baseline_path=vex_baseline,
                 schema_version=schema_version,
+                osv_enabled=not (no_osv or osv.disabled_by_env()),
             )
 
         has_content = bool(results.get('artifacts') or results.get('dependencies'))
