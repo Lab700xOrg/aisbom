@@ -40,7 +40,9 @@ jobs:
     # Build CLI binaries for v1.x.x releases (aligned CLI + Action).
     if: startsWith(github.event.release.tag_name, 'v1.')
     needs: gate
-    name: Build binary on ${{ matrix.os }}
+    # Named by asset, not runner: two legs used to share a runner label, which
+    # made their logs indistinguishable in `gh run view`.
+    name: Build ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -48,12 +50,19 @@ jobs:
           - os: ubuntu-latest
             asset_name: aisbom-linux-amd64
             python_arch: x64
-          - os: macos-14 # Run Intel build on M1 via Rosetta 2
+            expected_arch: x86_64
+          # PyInstaller builds for the architecture of the interpreter running
+          # it. Requesting an x64 Python on an ARM runner does not reliably
+          # yield one, and past Intel assets silently came out arm64. Build
+          # Intel on an Intel runner so the smoke test also executes it there.
+          - os: macos-15-intel
             asset_name: aisbom-macos-amd64
-            python_arch: x64 
-          - os: macos-14 # Run Silicon build natively
+            python_arch: x64
+            expected_arch: x86_64
+          - os: macos-14
             asset_name: aisbom-macos-arm64
             python_arch: arm64
+            expected_arch: arm64
 
     steps:
       - name: Checkout code
@@ -62,8 +71,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12" 
-          architecture: ${{ matrix.python_arch }} 
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -76,6 +85,38 @@ jobs:
 
       - name: Build binary
         run: ./scripts/build_binaries.sh
+
+      # The smoke test below executes the binary on the runner that built it,
+      # so it cannot tell a wrong-architecture build from a correct one when
+      # the runner can run both. Read the architecture out of the executable
+      # itself and refuse to publish it under a name that says otherwise.
+      - name: Assert binary architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          set -euo pipefail
+          BIN="dist/aisbom"
+          echo "runner: $(uname -s) $(uname -m)"
+          file "$BIN"
+
+          if [ "$(uname -s)" = "Darwin" ]; then
+            # Exact match: a universal binary would list both architectures
+            # and is not what these per-arch assets promise.
+            actual="$(lipo -archs "$BIN")"
+          else
+            case "$(file -b "$BIN")" in
+              *x86-64*)  actual="x86_64" ;;
+              *aarch64*) actual="arm64" ;;
+              *)         actual="unknown" ;;
+            esac
+          fi
+
+          if [ "$actual" != "$EXPECTED_ARCH" ]; then
+            echo "FAIL: ${{ matrix.asset_name }} is '$actual', expected '$EXPECTED_ARCH'"
+            exit 1
+          fi
+          echo "OK: ${{ matrix.asset_name }} is $actual"
 
       # This workflow is the only path these executables take to users, and it
       # runs solely on `release: published` — no PR check ever exercises it.
