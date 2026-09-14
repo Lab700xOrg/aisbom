@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0 — 2026-09-13
+## 1.6.0 — 2026-09-14
 
 > **`--vex` now contacts a third-party service.** When a `--vex` scan finds exact `requirements.txt` pins, it sends each pinned package name and version to the public OSV API at `api.osv.dev`. Nothing else is sent. Pass `--no-osv` or set `AISBOM_NO_OSV=1` to turn this off. The GitHub Action runs `--vex` whenever its `token` input is set, so those runs make the lookup too.
 >
