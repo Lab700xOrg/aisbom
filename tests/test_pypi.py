@@ -186,6 +186,27 @@ def test_ambiguous_classifiers_resolve_nothing(classifier):
     assert pypi.normalize_license(info) is None
 
 
+@pytest.mark.parametrize("other", [
+    "License :: OSI Approved :: BSD License",
+    "License :: Other/Proprietary License",
+])
+def test_a_mapped_classifier_beside_an_unmapped_one_resolves_nothing(other):
+    # MIT alongside a generic BSD classifier may mean dual licensing; dropping
+    # the one we cannot map and reporting "MIT" would assert a single license.
+    info = {"license": None, "classifiers": [
+        "License :: OSI Approved :: MIT License", other,
+    ]}
+    assert pypi.normalize_license(info) is None
+
+
+def test_the_bare_osi_approved_category_is_not_a_second_license():
+    info = {"license": None, "classifiers": [
+        "License :: OSI Approved",
+        "License :: OSI Approved :: MIT License",
+    ]}
+    assert pypi.normalize_license(info) == pypi.ResolvedLicense("MIT", is_spdx=True)
+
+
 def test_two_different_classifiers_are_not_guessed_into_an_expression():
     info = {"license": None, "classifiers": [
         "License :: OSI Approved :: MIT License",

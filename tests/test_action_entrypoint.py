@@ -108,6 +108,7 @@ def run_entrypoint(
     create_sbom: bool = False,
     scan_exit: int = 0,
     python_exit: int = 0,
+    extra_env: dict[str, str] | None = None,
 ) -> EntrypointRun:
     """Execute entrypoint.sh with stubbed `aisbom` and `python` on PATH."""
     bindir = tmp_path / "bin"
@@ -137,6 +138,7 @@ def run_entrypoint(
         "AISBOM_SCAN_LOG": str(scan_log),
         "AISBOM_EXIT": str(scan_exit),
         "PYTHON_EXIT": str(python_exit),
+        **(extra_env or {}),
     }
 
     proc = subprocess.run(
@@ -379,3 +381,30 @@ class TestCriticalFindingsStillReachTheDashboard:
         run = run_entrypoint(tmp_path, [*BASE_ARGS, "false"], create_sbom=True)
         assert run.proc.returncode == 0
         assert not run.ran_script("platform_upload.py")
+
+
+class TestOfflineMode:
+    """`AISBOM_OFFLINE=1` in the step env forbids the network; `share: true`
+    requires it. The CLI refuses that pair with exit 1, which this wrapper does
+    not propagate — so the job would pass, and a `sbom.json` already in the
+    workspace would be commented on and uploaded as if freshly scanned. The
+    contradiction is caught here, before the scan runs."""
+
+    OFFLINE = {"AISBOM_OFFLINE": "1"}
+
+    def test_offline_with_share_fails_before_scanning(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, [*TOKEN_ARGS, "true"], create_sbom=True, extra_env=self.OFFLINE
+        )
+        assert run.proc.returncode == 1
+        assert run.scan_argv == [], "the scan must not run"
+        assert run.python_invocations == [], "a stale SBOM must not be commented or uploaded"
+        assert "AISBOM_OFFLINE" in run.proc.stdout and "share" in run.proc.stdout
+
+    def test_offline_without_share_scans_normally(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, [*BASE_ARGS, "false"], create_sbom=True, extra_env=self.OFFLINE
+        )
+        assert run.proc.returncode == 0
+        assert run.scan_argv[0] == "scan"
+        assert run.ran_script("post_comment.py")

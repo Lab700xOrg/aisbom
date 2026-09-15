@@ -165,6 +165,14 @@ _CLASSIFIERS: Dict[str, str] = {
     "License :: CC0 1.0 Universal (CC0 1.0) Public Domain Dedication": "CC0-1.0",
 }
 
+# Parent nodes of the trove hierarchy. Packages often list one beside the leaf
+# (`License :: OSI Approved` and `License :: OSI Approved :: MIT License`); it
+# names no license, so it is not a second declaration.
+_CATEGORY_CLASSIFIERS = frozenset({
+    "License :: OSI Approved",
+    "License :: DFSG approved",
+})
+
 _PLACEHOLDERS = frozenset({
     "unknown", "none", "null", "n/a", "na", "other", "license", "licence",
 })
@@ -231,11 +239,20 @@ def normalize_license(info: Any) -> Optional[ResolvedLicense]:
 
     classifiers = info.get("classifiers")
     if isinstance(classifiers, list):
-        mapped = {_CLASSIFIERS[c] for c in classifiers if c in _CLASSIFIERS}
+        # Every license classifier counts, including ones this table cannot
+        # map: MIT beside a generic "BSD License" may be dual licensing, and
+        # dropping the unmapped one before counting would report plain MIT.
         # Two license classifiers could mean a choice, a combination or a stale
-        # leftover. Joining them into an expression would assert one of those.
-        if len(mapped) == 1:
-            return ResolvedLicense(mapped.pop(), is_spdx=True)
+        # leftover, so any more than one resolves nothing.
+        declared = {
+            c for c in classifiers
+            if isinstance(c, str) and c.startswith("License ::")
+            and c not in _CATEGORY_CLASSIFIERS
+        }
+        if len(declared) == 1:
+            (only,) = declared
+            if only in _CLASSIFIERS:
+                return ResolvedLicense(_CLASSIFIERS[only], is_spdx=True)
 
     if name:
         return ResolvedLicense(name, is_spdx=False)
