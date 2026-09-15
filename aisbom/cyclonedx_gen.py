@@ -150,6 +150,9 @@ def build_cyclonedx_json(results: Dict[str, Any], schema_version: str = "1.7") -
 
     if schema_version == "1.7":
         sbom_json = inject_model_cards(
-            sbom_json, results.get("artifacts", []), results.get("hf_model_card")
+            sbom_json,
+            results.get("artifacts", []),
+            results.get("hf_model_card"),
+            results.get("hf_local_matches"),
         )
     return sbom_json

@@ -81,6 +81,19 @@ def _stub_pypi_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_hf_file_index(monkeypatch):
+    """Keep local-file HF matching from ever reaching huggingface.co.
+
+    Local scans of a tree that looks like an HF cache ask the Hub for the
+    repo's file listing. Without a listing nothing can be proven, so no card
+    is fetched either — the documented degraded behaviour. Tests that exercise
+    matching inject their own fake; tests/test_remote.py imports the real
+    function by name and is unaffected.
+    """
+    monkeypatch.setattr("aisbom.remote.fetch_huggingface_file_index", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_offline(monkeypatch):
     """`--offline` is process state; a CliRunner invocation must not hand it
     to the next test."""

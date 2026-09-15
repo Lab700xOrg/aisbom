@@ -77,7 +77,7 @@ The tool produces two outputs:
 2.  **SBOM Report (`sbom.json`):** A CycloneDX JSON file generated in the working directory.
     *   This file is **static plain text**. It is safe to egress back to "Zone A" for ingestion into your central vulnerability dashboard.
 
-> **Use `--offline` in Zone B.** A normal scan makes a few network requests: it looks up exact `requirements.txt` pins on PyPI to fill in dependency licenses, `--vex` looks them up in the public OSV database, and the CLI sends anonymous telemetry and checks for updates. On an air-gapped host each of those fails and the scan carries on without it, but the attempts still happen. Pass `--offline` (or set `AISBOM_OFFLINE=1`) and none of them is attempted:
+> **Use `--offline` in Zone B.** A normal scan makes a few network requests: it looks up exact `requirements.txt` pins on PyPI to fill in dependency licenses, `--vex` looks them up in the public OSV database, a model file in the Hugging Face cache layout triggers a model-card lookup on huggingface.co, and the CLI sends anonymous telemetry and checks for updates. On an air-gapped host each of those fails and the scan carries on without it, but the attempts still happen. Pass `--offline` (or set `AISBOM_OFFLINE=1`) and none of them is attempted:
 >
 > ```bash
 > ./aisbom-linux-amd64 scan /path/to/model_directory --offline

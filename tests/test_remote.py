@@ -431,3 +431,140 @@ def test_model_card_fetch_failure_does_not_fail_the_scan(monkeypatch):
     assert results["hf_model_card"] is None
     # No error recorded for the metadata call itself.
     assert not [e for e in results["errors"] if "api/models" in str(e.get("file", ""))]
+
+
+# ---------------------------------------------------------------------------
+# Local-file matching: the repo file listing used as proof, and the card at a
+# pinned revision. Same best-effort contract as the card fetch above.
+# ---------------------------------------------------------------------------
+
+from aisbom.remote import fetch_huggingface_file_index
+
+_COMMIT = "c" * 40
+
+
+def _paged(content, next_url=None):
+    resp = _mock_response(json.dumps(content).encode(), status=200)
+    resp.links = {"next": {"url": next_url}} if next_url else {}
+    return resp
+
+
+def test_fetch_model_card_at_a_revision_uses_the_revision_endpoint(monkeypatch):
+    seen_urls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen_urls.append(url)
+        return _mock_response(b"{}", status=200)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_model_card("org/model", _COMMIT)
+    assert seen_urls == [f"https://huggingface.co/api/models/org/model/revision/{_COMMIT}"]
+
+
+def test_file_index_lists_the_whole_tree_recursively(monkeypatch):
+    entries = [{"type": "file", "path": "m.safetensors", "oid": "1", "lfs": {"oid": "2"}}]
+    seen = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen.append((url, timeout))
+        return _paged(entries)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+
+    assert fetch_huggingface_file_index("org/model", _COMMIT) == entries
+    url, timeout = seen[0]
+    assert url == f"https://huggingface.co/api/models/org/model/tree/{_COMMIT}?recursive=true"
+    assert isinstance(timeout, (int, float)) and timeout > 0
+
+
+def test_file_index_defaults_to_main(monkeypatch):
+    seen = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen.append(url)
+        return _paged([])
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_file_index("org/model")
+    assert seen == ["https://huggingface.co/api/models/org/model/tree/main?recursive=true"]
+
+
+def test_file_index_follows_pagination(monkeypatch):
+    """Large repos page the listing; a shard on page two must still verify."""
+    page2 = "https://huggingface.co/api/models/org/model/tree/main?recursive=true&cursor=x"
+
+    def fake_get(url, headers=None, timeout=None):
+        if url == page2:
+            return _paged([{"oid": "b"}])
+        return _paged([{"oid": "a"}], next_url=page2)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_file_index("org/model") == [{"oid": "a"}, {"oid": "b"}]
+
+
+def test_file_index_never_follows_pagination_off_huggingface(monkeypatch):
+    seen = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen.append(url)
+        return _paged([{"oid": "a"}], next_url="https://evil.example/next")
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_file_index("org/model") is None
+    assert len(seen) == 1
+
+
+def test_file_index_sends_bearer_to_huggingface(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "secret-tok")
+    seen_headers = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen_headers.append(headers or {})
+        return _paged([])
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    fetch_huggingface_file_index("org/private")
+    assert seen_headers[0].get("Authorization") == "Bearer secret-tok"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+def test_file_index_swallows_every_http_failure(monkeypatch, status):
+    def fake_get(url, headers=None, timeout=None):
+        raise _http_error(status)
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    assert fetch_huggingface_file_index("org/model") is None
+
+
+def test_file_index_swallows_network_errors_and_non_list_bodies(monkeypatch):
+    def timeout(url, headers=None, timeout=None):
+        raise _requests.exceptions.ConnectTimeout("no route")
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", timeout)
+    assert fetch_huggingface_file_index("org/model") is None
+
+    monkeypatch.setattr(remote.requests, "get", lambda url, headers=None, timeout=None: _paged({"error": "x"}))
+    assert fetch_huggingface_file_index("org/model") is None
+
+
+@pytest.mark.parametrize("repo_id,revision", [
+    ("../../etc", None),
+    ("org/model?x=1", None),
+    ("org/model", "main/../../x"),
+])
+def test_file_index_and_card_refuse_malformed_ids_without_a_request(monkeypatch, repo_id, revision):
+    def explode(*a, **kw):
+        raise AssertionError("a malformed id must never become a URL")
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", explode)
+    assert fetch_huggingface_file_index(repo_id, revision) is None
+    assert fetch_huggingface_model_card(repo_id, revision) is None
