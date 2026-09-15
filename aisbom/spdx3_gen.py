@@ -96,6 +96,28 @@ def _card_datasets(hf_meta: Optional[Dict[str, Any]]) -> List[str]:
     return names
 
 
+def _card_for(results: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+    """The card metadata describing one artifact.
+
+    A local file matched to its own repo carries that repo's card; otherwise
+    the scan-wide ``hf://`` card applies, as for the CycloneDX ``modelCard``.
+    """
+    match = (results.get("hf_local_matches") or {}).get(index)
+    if match is not None:
+        return match.card
+    return results.get("hf_model_card")
+
+
+def _all_card_datasets(results: Dict[str, Any]) -> List[str]:
+    """Every declared training dataset across the scan, first-seen order."""
+    names: List[str] = []
+    for index in range(max(len(results.get("artifacts", [])), 1)):
+        for name in _card_datasets(_card_for(results, index)):
+            if name not in names:
+                names.append(name)
+    return names
+
+
 class SPDX3Generator:
     """Build an SPDX 3.0.1 JSON-LD document from AIsbom scan results."""
 
@@ -143,7 +165,7 @@ class SPDX3Generator:
                 [dep.get("name"), dep.get("version")]
                 for dep in results.get("dependencies", [])
             ],
-            "datasets": _card_datasets(results.get("hf_model_card")),
+            "datasets": _all_card_datasets(results),
         }
         digest = hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True).encode("utf-8")
@@ -291,7 +313,6 @@ class SPDX3Generator:
     # -- assembly ---------------------------------------------------------
 
     def generate(self, results: Dict[str, Any]) -> str:
-        hf_meta = results.get("hf_model_card")
         if self.namespace is None:
             self.namespace = self._content_namespace(results)
         tool_id = self._iri("Agent-aisbom-cli")
@@ -301,19 +322,21 @@ class SPDX3Generator:
             self._tool_agent(tool_id),
         ]
 
+        artifacts = results.get("artifacts", [])
         ai_packages = [
-            self._ai_package(art, index, hf_meta)
-            for index, art in enumerate(results.get("artifacts", []))
+            self._ai_package(art, index, _card_for(results, index))
+            for index, art in enumerate(artifacts)
         ]
         graph.extend(ai_packages)
 
-        # Dataset elements are shared across models: the card metadata is
-        # per-scan, not per-file, so emitting one element per model would
-        # duplicate the same dataset under distinct ids.
+        # Dataset elements are shared across models: two files from one repo
+        # (or every file of an `hf://` scan) name the same datasets, and one
+        # element per model would duplicate each under distinct ids.
         dataset_packages = [
-            self._dataset_package(name) for name in _card_datasets(hf_meta)
+            self._dataset_package(name) for name in _all_card_datasets(results)
         ]
         graph.extend(dataset_packages)
+        dataset_ids = {d["name"]: d["spdxId"] for d in dataset_packages}
 
         software_packages = [
             self._software_package(dep)
@@ -321,13 +344,15 @@ class SPDX3Generator:
         ]
         graph.extend(software_packages)
 
+        # Each model is trainedOn only the datasets its own card declares, so
+        # a local tree mixing repos never links a model to another's data.
         relationships: List[Dict[str, Any]] = []
-        if dataset_packages:
-            dataset_ids = [d["spdxId"] for d in dataset_packages]
-            for pkg in ai_packages:
+        for index, pkg in enumerate(ai_packages):
+            own = [dataset_ids[name] for name in _card_datasets(_card_for(results, index))]
+            if own:
                 relationships.append(self._relationship(
                     f"Relationship-trainedOn-{len(relationships)}",
-                    pkg["spdxId"], "trainedOn", dataset_ids,
+                    pkg["spdxId"], "trainedOn", own,
                 ))
         graph.extend(relationships)
 
