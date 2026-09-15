@@ -33,6 +33,8 @@ from pathlib import Path
 
 import requests
 
+from . import offline
+
 TELEMETRY_ENDPOINT = "https://api.aisbom.io/v1/telemetry"
 POST_TIMEOUT_SEC = 3.0
 CONFIG_SCHEMA_VERSION = 1
@@ -53,6 +55,9 @@ def is_ci() -> bool:
 def _telemetry_disabled() -> bool:
     """All-paths short-circuit. Opt-out always wins; default state is enabled."""
     if os.getenv("AISBOM_NO_TELEMETRY"):
+        return True
+    # `--offline` / AISBOM_OFFLINE promises no network at all (#129).
+    if offline.is_offline():
         return True
     return False
 

@@ -28,7 +28,9 @@ import time
 import uuid
 from .version_check import check_latest_version
 from . import loop_state
+from . import offline
 from . import osv
+from . import pypi
 from . import telemetry
 import requests
 
@@ -67,6 +69,9 @@ def main(
 
       AISBOM_NO_OSV=1         Same as `scan --no-osv`: never query OSV for
                               requirements.txt CVEs when emitting VEX.
+
+      AISBOM_OFFLINE=1        Same as `--offline`: no network access of any
+                              kind (PyPI, OSV, telemetry, update check).
     """
     # Order matters: --version wins over the no-args panel so that
     # `aisbom --version` is short and scriptable.
@@ -138,6 +143,50 @@ def _classify_target(target: str) -> str:
     if target.startswith("http://"):
         return "http"
     return "local"
+
+
+def _refuse_remote_target_offline(target: str) -> None:
+    """A remote target has to be downloaded, which --offline forbids (#129).
+
+    Refused before scanning rather than left to fail as a fetch error: the
+    user asked for no network, and a fetch attempt would be exactly that.
+    """
+    if offline.is_offline() and _classify_target(target) != "local":
+        console.print(
+            f"[bold red]✖ Cannot scan {target} with --offline[/bold red] — a "
+            "remote target has to be downloaded. Scan a local copy instead, or "
+            "drop --offline (and unset AISBOM_OFFLINE)."
+        )
+        raise typer.Exit(code=1)
+
+
+def _resolve_dependency_licenses(results: dict, out: Console) -> None:
+    """Fill in PyPI-declared licenses for exact requirements.txt pins (#129).
+
+    Default-on, best-effort by contract: a failure costs those dependencies
+    their license and prints why, and nothing else about the run changes.
+    """
+    dependencies = results.get("dependencies") or []
+    if offline.is_offline() or not any(d.get("pinned") for d in dependencies):
+        return
+    with out.status("[cyan]Resolving dependency licenses from PyPI...[/cyan]"):
+        lookup = pypi.resolve_dependency_licenses(dependencies)
+    if lookup.error:
+        err_console.print(
+            f"[yellow]⚠ {lookup.error}; those dependencies carry no license "
+            "this run.[/yellow]"
+        )
+    line = (
+        f"[dim]PyPI: resolved licenses for {lookup.resolved} of "
+        f"{lookup.queried} pinned dependenc{'y' if lookup.queried == 1 else 'ies'}"
+    )
+    if lookup.skipped_unpinned:
+        line += (
+            f"; {lookup.skipped_unpinned} unpinned dependenc"
+            f"{'y' if lookup.skipped_unpinned == 1 else 'ies'} skipped "
+            "(only exact == pins are looked up)"
+        )
+    out.print(line + ".[/dim]")
 
 
 def _classify_http_status(exc: BaseException) -> str:
@@ -617,15 +666,35 @@ def scan(
         ),
         rich_help_panel="Advanced Options",
     ),
+    offline_mode: bool = typer.Option(
+        False,
+        "--offline",
+        help=(
+            "Make no network access of any kind: no PyPI license lookup, no "
+            "OSV lookup, no telemetry, no update check. Remote targets and "
+            "--share are refused. AISBOM_OFFLINE=1 does the same."
+        ),
+    ),
 ):
     """
     Deep Introspection Scan: Analyzes binary headers and dependency manifests.
     """
+    offline.enable(offline_mode)
+
     # Start background check
-    t = threading.Thread(target=run_version_check_wrapper, daemon=True)
-    t.start()
+    if not offline.is_offline():
+        t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+        t.start()
 
     console.print(Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]"))
+
+    _refuse_remote_target_offline(target)
+    if share and offline.is_offline():
+        console.print(
+            "[bold red]✖ --share cannot be combined with --offline[/bold red] — "
+            "it uploads the SBOM to aisbom.io."
+        )
+        raise typer.Exit(code=1)
 
     # Rejected up front rather than after the scan: the option is only read at
     # emission time, so an unrecognised value used to fall through to 2.3 and
@@ -858,6 +927,12 @@ def scan(
 
     if results['dependencies']:
         console.print(f"\n📦 Found [bold]{len(results['dependencies'])}[/bold] Python libraries.")
+        # Only the outputs that carry a dependency license pay for the lookup:
+        # Markdown has no dependency table and SPDX 3.0 has no license model yet.
+        if format == OutputFormat.JSON or (
+            format == OutputFormat.SPDX and spdx_version == "2.3"
+        ):
+            _resolve_dependency_licenses(results, console)
 
     # Unusable targets (#125): the path was missing or nothing could scan it,
     # so nothing was examined. Printed to stderr like fetch failures — it is a
@@ -908,7 +983,9 @@ def scan(
                 vex_format=vex_format,
                 baseline_path=vex_baseline,
                 schema_version=schema_version,
-                osv_enabled=not (no_osv or osv.disabled_by_env()),
+                osv_enabled=not (
+                    no_osv or osv.disabled_by_env() or offline.is_offline()
+                ),
             )
 
         has_content = bool(results.get('artifacts') or results.get('dependencies'))
@@ -1009,11 +1086,12 @@ def info():
 
     # Phase 4 help-pass: surface telemetry state in `info` so users have one
     # canonical place to confirm whether events are firing on their machine.
-    telemetry_state = (
-        "opted out via AISBOM_NO_TELEMETRY"
-        if os.getenv("AISBOM_NO_TELEMETRY")
-        else "enabled (set AISBOM_NO_TELEMETRY=1 to disable)"
-    )
+    if os.getenv("AISBOM_NO_TELEMETRY"):
+        telemetry_state = "opted out via AISBOM_NO_TELEMETRY"
+    elif offline.is_offline():
+        telemetry_state = "disabled by AISBOM_OFFLINE (no network access)"
+    else:
+        telemetry_state = "enabled (set AISBOM_NO_TELEMETRY=1 to disable)"
 
     console.print(Panel(
         f"[bold cyan]AI SBOM[/bold cyan]: AI Software Bill of Materials - The Supply Chain for Artificial Intelligence\n"
@@ -1255,6 +1333,15 @@ def score(
     strict: bool = typer.Option(
         False, help="Use strict allowlisting mode when TARGET is a scan target."
     ),
+    offline_mode: bool = typer.Option(
+        False,
+        "--offline",
+        help=(
+            "Make no network access of any kind (no PyPI license lookup, no "
+            "telemetry, no update check); remote targets are refused. "
+            "AISBOM_OFFLINE=1 does the same."
+        ),
+    ),
 ):
     """
     Grade an AIBOM for completeness and quality.
@@ -1264,8 +1351,11 @@ def score(
     and document provenance — and names the specific gaps behind each one.
     Use --fail-under to gate CI on the result.
     """
-    t = threading.Thread(target=run_version_check_wrapper, daemon=True)
-    t.start()
+    offline.enable(offline_mode)
+    if not offline.is_offline():
+        t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+        t.start()
+    _refuse_remote_target_offline(target)
 
     scan_id = uuid.uuid4().hex
     telemetry_threads: list[threading.Thread | None] = [_maybe_emit_install_event()]
@@ -1326,6 +1416,9 @@ def score(
             _flush_telemetry_threads(telemetry_threads)
             raise typer.Exit(code=1)
 
+        # The same enrichment `scan` applies, so the grade still describes the
+        # file a scan would have written (#129).
+        _resolve_dependency_licenses(results, progress)
         doc = json.loads(build_cyclonedx_json(results, "1.7"))
     else:
         console.print(

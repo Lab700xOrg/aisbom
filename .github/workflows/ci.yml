@@ -84,3 +84,13 @@ jobs:
           if poetry run aisbom score sbom.json --fail-under 101; then
             echo "::error::--fail-under did not gate on a failing score"; exit 1
           fi
+
+      # --offline must still produce an SBOM, and must refuse a target that
+      # can only be reached over the network rather than quietly fetching it.
+      - name: Smoke Test #13 - Offline Mode
+        run: |
+          poetry run aisbom scan demo_data --offline --output offline-sbom.json --no-fail-on-risk
+          test -s offline-sbom.json
+          if poetry run aisbom scan hf://google-bert/bert-base-uncased --offline --no-fail-on-risk; then
+            echo "::error::--offline scanned a remote target"; exit 1
+          fi

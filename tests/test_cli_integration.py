@@ -19,6 +19,11 @@ def _aisbom_executable() -> str:
 
 def _run_cli(args, cwd: Path, env=None):
     env_vars = os.environ.copy()
+    # A subprocess is out of reach of every conftest monkeypatch, so without
+    # this a real `scan` here would query pypi.org for its requirements pins,
+    # post telemetry and run the update check, and write ~/.aisbom on the
+    # machine running the suite. Callers that need the network can override.
+    env_vars["AISBOM_OFFLINE"] = "1"
     if env:
         env_vars.update(env)
     result = subprocess.run(

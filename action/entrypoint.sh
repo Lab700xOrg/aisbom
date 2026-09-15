@@ -22,6 +22,7 @@
 #
 # Exit codes:
 #   0 — Scan succeeded OR scan reported risks but fail-on-risk is false.
+#   1 — share: true was combined with AISBOM_OFFLINE (refused before scanning).
 #   2 — Scan reported CRITICAL findings AND fail-on-risk is true.
 #   3 — Platform upload failed AND fail-on-platform-error is true.
 #
@@ -70,6 +71,15 @@ SCAN_LOG="${AISBOM_SCAN_LOG:-/tmp/aisbom-scan.log}"
 VEX_ARGS=()
 if [ -n "${INPUT_TOKEN}" ]; then
     VEX_ARGS=(--vex)
+fi
+
+# `AISBOM_OFFLINE=1` in the step env forbids network access and `share: true`
+# requires it, so the CLI refuses the pair with exit 1. Step 4 only re-raises
+# exit 2, so without this the job would pass — and an `sbom.json` already in
+# the workspace would be commented on and uploaded as if freshly scanned.
+if [ -n "${AISBOM_OFFLINE:-}" ] && [ "${INPUT_SHARE}" = "true" ]; then
+    echo "[aisbom-action] share: true cannot be combined with AISBOM_OFFLINE: sharing uploads the SBOM to aisbom.io. Remove one of them."
+    exit 1
 fi
 
 SHARE_ARGS=()

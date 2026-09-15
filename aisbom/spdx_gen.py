@@ -35,6 +35,24 @@ _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _SPDX_ID_SAFE_RE = re.compile(r"[^a-zA-Z0-9.\-]")
 
 
+def _declared_license(dep: Dict[str, Any]):
+    """The PyPI-declared license of a dependency (#129), or NOASSERTION.
+
+    Declared, never concluded: the value is what the package's metadata says,
+    and nobody has reviewed it. Only SPDX expressions are carried — SPDX 2.3
+    has no field for a free-text name, and minting a ``LicenseRef-`` for one
+    would assert an identity the package author never gave it.
+    """
+    if not (dep.get("license") and dep.get("license_is_spdx")):
+        return SpdxNoAssertion()
+    from spdx_tools.common.spdx_licensing import spdx_licensing
+
+    try:
+        return spdx_licensing.parse(dep["license"], validate=True, strict=True)
+    except Exception:  # noqa: BLE001 - a bad value costs the field, not the document
+        return SpdxNoAssertion()
+
+
 def _tool_version() -> str:
     """Version of the running CLI, for the document's ``creators`` field.
 
@@ -197,7 +215,7 @@ class SPDX2Generator:
             download_location=SpdxNoAssertion(),
             files_analyzed=False,
             license_concluded=SpdxNoAssertion(),
-            license_declared=SpdxNoAssertion(),
+            license_declared=_declared_license(dep),
             copyright_text=SpdxNoAssertion()
         )
 
