@@ -492,8 +492,9 @@ def _score_licenses(comps: List[Dict[str, Any]]) -> DimensionScore:
     return DimensionScore(
         "licenses", label, 15, _pct(licensed, len(comps)), gaps,
         remediation=(
-            "Declare a license on each component listed under --verbose — "
-            "dependency licenses are not yet resolved automatically"
+            "Declare a license on each component listed under --verbose. "
+            "Dependency licenses are resolved from PyPI for exact == pins only; "
+            "pin a requirement to have its license filled in"
         ) if missing else None,
         summary=(f"{missing} of {len(comps)} component(s) declare no license"
                  if missing else None),

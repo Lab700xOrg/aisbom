@@ -61,6 +61,33 @@ def _stub_osv_network(monkeypatch):
     monkeypatch.setattr("aisbom.osv._default_session", lambda: _OfflineOSV())
 
 
+class _OfflinePyPI:
+    """Stands in for the HTTP session inside aisbom.pypi: every call fails."""
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("PyPI is not reachable from the test suite")
+
+
+@pytest.fixture(autouse=True)
+def _stub_pypi_network(monkeypatch):
+    """Keep the default-on license lookup (#129) from ever reaching pypi.org.
+
+    Same shape as `_stub_osv_network`: only the default session is replaced,
+    so tests that inject a fake PyPI are unaffected, and a scan that forgets
+    to see the documented degraded behaviour (no license) instead of a live
+    request.
+    """
+    monkeypatch.setattr("aisbom.pypi._default_session", lambda: _OfflinePyPI())
+
+
+@pytest.fixture(autouse=True)
+def _reset_offline(monkeypatch):
+    """`--offline` is process state; a CliRunner invocation must not hand it
+    to the next test."""
+    monkeypatch.setattr("aisbom.offline._forced", False)
+    monkeypatch.delenv("AISBOM_OFFLINE", raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _stub_version_check(monkeypatch):
     """Auto-stub the background update check for every test.

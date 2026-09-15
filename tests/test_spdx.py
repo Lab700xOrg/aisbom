@@ -272,6 +272,45 @@ def test_dependency_spdxids_unique_for_repeated_pins():
     assert len(set(ids)) == 2
 
 
+def _lib_package(data, name):
+    return next(p for p in data["packages"] if p["name"] == name)
+
+
+def test_a_pypi_resolved_spdx_license_is_declared():
+    """#129: the license PyPI declares is the package's *declared* license. The
+    concluded license stays NOASSERTION — nobody reviewed it."""
+    data = _generate(dependencies=[{
+        "name": "torch", "version": "2.13.0", "license": "BSD-3-Clause AND MIT",
+        "license_is_spdx": True, "license_source": "pypi",
+    }])
+    pkg = _lib_package(data, "torch")
+    assert pkg["licenseDeclared"] == "BSD-3-Clause AND MIT"
+    assert pkg["licenseConcluded"] == "NOASSERTION"
+
+
+def test_a_non_spdx_license_name_is_not_declared():
+    """SPDX 2.3 can only carry SPDX expressions; inventing a LicenseRef for a
+    free-text name would put words in the package author's mouth."""
+    data = _generate(dependencies=[{
+        "name": "vendorlib", "version": "1.0", "license": "Proprietary",
+        "license_is_spdx": False, "license_source": "pypi",
+    }])
+    assert _lib_package(data, "vendorlib")["licenseDeclared"] == "NOASSERTION"
+
+
+def test_a_value_wrongly_flagged_spdx_costs_the_field_not_the_document():
+    data = _generate(dependencies=[{
+        "name": "oddlib", "version": "1.0", "license": "MIT OR",
+        "license_is_spdx": True, "license_source": "pypi",
+    }])
+    assert _lib_package(data, "oddlib")["licenseDeclared"] == "NOASSERTION"
+
+
+def test_an_unresolved_dependency_still_declares_noassertion():
+    data = _generate(dependencies=[{"name": "requests", "version": "2.28.1"}])
+    assert _lib_package(data, "requests")["licenseDeclared"] == "NOASSERTION"
+
+
 # --- Whole-document validity ----------------------------------------------
 
 def test_empty_scan_emits_a_valid_document():
@@ -301,6 +340,11 @@ def test_document_validates_as_spdx_2_3():
         [
             {"name": "requests", "version": "2.28.1"},
             {"name": "torch", "version": "2.0.*"},
+            {"name": "torch", "version": "2.13.0", "license_is_spdx": True,
+             "license": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND MIT",
+             "license_source": "pypi"},
+            {"name": "vendorlib", "version": "1.0", "license": "Proprietary",
+             "license_is_spdx": False, "license_source": "pypi"},
         ],
     )
     document = JsonLikeDictParser().parse(data)

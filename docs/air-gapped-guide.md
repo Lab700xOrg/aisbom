@@ -77,7 +77,13 @@ The tool produces two outputs:
 2.  **SBOM Report (`sbom.json`):** A CycloneDX JSON file generated in the working directory.
     *   This file is **static plain text**. It is safe to egress back to "Zone A" for ingestion into your central vulnerability dashboard.
 
-> **VEX in Zone B:** `scan --vex` normally looks up `requirements.txt` pins in the public OSV database. On an air-gapped host that lookup fails and the scan carries on without it — you get a warning, and the VEX documents contain the model finding statements but no dependency CVE statements. To skip the attempt entirely, pass `--no-osv` (or set `AISBOM_NO_OSV=1`).
+> **Use `--offline` in Zone B.** A normal scan makes a few network requests: it looks up exact `requirements.txt` pins on PyPI to fill in dependency licenses, `--vex` looks them up in the public OSV database, and the CLI sends anonymous telemetry and checks for updates. On an air-gapped host each of those fails and the scan carries on without it, but the attempts still happen. Pass `--offline` (or set `AISBOM_OFFLINE=1`) and none of them is attempted:
+>
+> ```bash
+> ./aisbom-linux-amd64 scan /path/to/model_directory --offline
+> ```
+>
+> The SBOM carries every model finding as usual. Dependency components have no licenses, and `--vex` documents contain the model finding statements but no dependency CVE statements. `hf://` and `https://` targets are refused, since they can only be scanned by downloading them.
 
 ---
 

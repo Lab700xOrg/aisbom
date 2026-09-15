@@ -211,3 +211,92 @@ def test_the_same_package_in_two_requirements_files_keeps_distinct_refs():
     ])
     refs = [c["bom-ref"] for c in doc["components"] if c["name"] == "torch"]
     assert sorted(refs) == ["dependency-0-torch", "dependency-1-torch"]
+
+
+# ---------------------------------------------------------------------------
+# PyPI-resolved dependency licenses (#129).
+# ---------------------------------------------------------------------------
+
+_TORCH_EXPRESSION = (
+    "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause "
+    "AND BSD-3-Clause AND BSL-1.0 AND MIT"
+)
+
+
+def _resolved(name, version, license, is_spdx=True):
+    return {"name": name, "version": version, "pinned": True,
+            "license": license, "license_is_spdx": is_spdx,
+            "license_source": "pypi"}
+
+
+def test_a_resolved_spdx_id_lands_in_licenses():
+    doc = _doc(dependencies=[_resolved("transformers", "5.13.1", "Apache-2.0")])
+    comp = _by_name(doc, "transformers")
+    assert comp["licenses"] == [{"license": {"id": "Apache-2.0"}}]
+
+
+def test_a_resolved_expression_lands_in_licenses():
+    doc = _doc(dependencies=[_resolved("torch", "2.13.0", _TORCH_EXPRESSION)])
+    assert _by_name(doc, "torch")["licenses"] == [{"expression": _TORCH_EXPRESSION}]
+
+
+def test_a_non_spdx_declaration_is_emitted_as_a_license_name():
+    doc = _doc(dependencies=[_resolved("vendorlib", "1.0", "Proprietary", False)])
+    assert _by_name(doc, "vendorlib")["licenses"] == [{"license": {"name": "Proprietary"}}]
+
+
+def test_the_license_source_is_recorded_as_a_property():
+    doc = _doc(dependencies=[_resolved("transformers", "5.13.1", "Apache-2.0")])
+    assert _by_name(doc, "transformers")["properties"] == [
+        {"name": "aisbom:license:source", "value": "pypi"}
+    ]
+
+
+def test_an_unresolved_dependency_is_byte_identical_to_before():
+    doc = _doc()
+    assert set(_by_name(doc, "torch")) == {"bom-ref", "name", "type", "version"}
+
+
+@pytest.mark.parametrize("version", ["1.5", "1.6", "1.7"])
+def test_dependency_licenses_validate_strictly(version):
+    from cyclonedx.schema import SchemaVersion
+    from cyclonedx.validation.json import JsonStrictValidator
+
+    sbom = build_cyclonedx_json(_results(dependencies=[
+        _resolved("torch", "2.13.0", _TORCH_EXPRESSION),
+        _resolved("transformers", "5.13.1", "Apache-2.0"),
+        _resolved("vendorlib", "1.0", "Proprietary", False),
+        {"name": "numpy", "version": "unknown"},
+    ]), version)
+    validator = JsonStrictValidator(SchemaVersion.from_version(version))
+    assert validator.validate_str(sbom) is None
+
+
+def test_resolved_dependency_licenses_raise_the_license_grade():
+    from aisbom import score
+
+    before = score.score_sbom(_doc(dependencies=[
+        {"name": "torch", "version": "2.13.0"},
+    ]))
+    after = score.score_sbom(_doc(dependencies=[
+        _resolved("torch", "2.13.0", _TORCH_EXPRESSION),
+    ]))
+    lic = {d.key: d.score for d in before.dimensions}["licenses"]
+    lic_after = {d.key: d.score for d in after.dimensions}["licenses"]
+    assert lic_after > lic
+
+
+def test_dependency_licenses_cause_no_diff_drift(tmp_path):
+    """`aisbom diff` reads license from the description, which libraries lack,
+    so upgrading the CLI must not report every dependency as changed."""
+    from aisbom.diff import SBOMDiff
+
+    old = tmp_path / "old.json"
+    new = tmp_path / "new.json"
+    old.write_text(build_cyclonedx_json(_results()))
+    new.write_text(build_cyclonedx_json(_results(dependencies=[
+        _resolved("torch", "2.10.0", "BSD-3-Clause"),
+        {"name": "numpy", "version": "unknown"},
+    ])))
+    result = SBOMDiff(str(old), str(new)).compare()
+    assert (result.added, result.removed, result.changed) == ([], [], [])

@@ -4,6 +4,8 @@ import importlib.metadata
 import requests
 from packaging.version import parse as parse_version
 
+from . import offline
+
 API_URL = "https://api.aisbom.io/v1/version?utm_source=cli&utm_medium=terminal"
 
 def check_latest_version() -> str | None:
@@ -13,7 +15,7 @@ def check_latest_version() -> str | None:
     Respects AISBOM_NO_TELEMETRY env var.
     """
     # 1. Privacy Check
-    if os.getenv("AISBOM_NO_TELEMETRY"):
+    if os.getenv("AISBOM_NO_TELEMETRY") or offline.is_offline():
         return None
 
     try:

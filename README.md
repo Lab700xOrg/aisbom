@@ -318,8 +318,9 @@ the other ids listed as `aliases`.
   unexpected, the run prints a warning and the VEX documents simply carry no
   CVE statements. Exit codes and model findings are unchanged.
 
-A plain `aisbom scan` without `--vex` never contacts OSV. To keep `--vex` fully
-offline, pass `--no-osv` or set `AISBOM_NO_OSV=1`.
+A plain `aisbom scan` without `--vex` never contacts OSV. To skip only the OSV
+lookup, pass `--no-osv` or set `AISBOM_NO_OSV=1`; to make no network access at
+all, use [`--offline`](#offline-and-air-gapped-scans).
 
 #### Remediation evidence (`fixed`)
 
@@ -333,6 +334,49 @@ aisbom scan . --vex --vex-baseline last-release-sbom.json --output sbom.json
 
 Baselines predating structured findings still work: the finding is recovered
 from the component description rather than reported as a spurious `fixed`.
+
+### Dependency licenses from PyPI
+
+Library components parsed from `requirements.txt` carry the license their
+package declares on PyPI. For each exact pin (`transformers==5.13.1`) the scan
+reads that release's metadata from `https://pypi.org/pypi/<name>/<version>/json`
+and writes the result into the component's standard `licenses[]` field, with an
+`aisbom:license:source` property of `pypi` so you can tell a registry
+declaration from something read out of the file itself.
+
+- **Exact pins only.** `torch>=2.0` doesn't say which release is installed, and
+  licenses occasionally change between releases, so ranges are skipped and
+  counted in the scan summary.
+- **Nothing is guessed.** The PEP 639 `License-Expression` is used when present,
+  then a valid SPDX identifier or expression in the `license` field, then a
+  classifier that names exactly one license. A license *text* pasted into the
+  field, or a classifier such as `BSD License` that doesn't say which BSD,
+  produces no license rather than a wrong one. Other short declarations
+  (`Proprietary`) are kept as a license name.
+- **A declaration, not a verdict.** The license never feeds the legal-risk
+  status shown for model files.
+- **SPDX 2.3** output carries SPDX-valid values as `licenseDeclared`;
+  `licenseConcluded` stays `NOASSERTION`.
+- **Cached** in `~/.aisbom/pypi_license_cache.json` — 30 days for a resolved
+  license, 24 hours for a package that declares none — so repeat CI scans of the
+  same pins make no requests.
+- **Never breaks a scan.** If PyPI is unreachable or rate-limits the lookup, the
+  affected dependencies carry no license, the run prints a warning, and exit
+  codes are unchanged.
+
+### Offline and air-gapped scans
+
+```bash
+aisbom scan ./models --offline
+```
+
+`--offline` (or `AISBOM_OFFLINE=1`) makes no network access of any kind: no
+PyPI license lookup, no OSV lookup, no telemetry and no update check. A remote
+target (`hf://`, `https://`) or `--share` is refused with exit `1` rather than
+fetched, since each needs the network. The SBOM is otherwise the same, minus
+the dependency licenses and CVE statements those lookups would have added.
+`aisbom score <target> --offline` works the same way. See the
+[air-gapped guide](docs/air-gapped-guide.md).
 
 ### Completeness score (`aisbom score`)
 
@@ -491,6 +535,8 @@ Without a `token` the scan runs exactly as before — no `--vex`, no VEX files w
 
 **Anonymous telemetry — on by default,** as described in [Telemetry & Privacy](#telemetry--privacy). `AISBOM_NO_TELEMETRY=1` disables telemetry only; it does not suppress either upload above.
 
+**Package registry lookups — on by default.** Exact `requirements.txt` pins (package name and version only) are looked up on `pypi.org` from the runner to fill in [dependency licenses](#dependency-licenses-from-pypi), and — when `token` is set, which turns on `--vex` — in the OSV database. No SBOM content is sent. Set `AISBOM_OFFLINE=1` in the step's `env:` to skip both; it also disables the CLI's telemetry, and it cannot be combined with `share: true`, which needs the network.
+
 For the two upload paths the payload is the SBOM — names, hashes, licenses, risk levels — plus, on the dashboard path only, the VEX documents derived from those same findings. All of it describes the *structure and findings* of your model files, never the weights or file contents. Telemetry carries none of that: no SBOM, no VEX, no file names, no hashes, no repo identifier.
 
 > **Changed in v1.4.0.** Sharing used to be unconditional: every Action run published its SBOM to a public 30-day link whether or not `token` was set, which contradicted the paragraph above. It is now opt-in and off by default. If you consume the `share-url` output or want the viewer link in your PR comments, set `share: true`.
@@ -642,7 +688,11 @@ Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC ad
 
 ### OSV lookups (`--vex` only)
 
-When you pass `--vex` and the scan finds exact `requirements.txt` pins, AIsbom sends each pinned **package name and version** to the public OSV API at `https://api.osv.dev`, and fetches the advisories it names. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-osv` or `AISBOM_NO_OSV=1` does. Responses are cached locally in `~/.aisbom/osv_cache.json` for 24 hours, and deleting that file is always safe.
+When you pass `--vex` and the scan finds exact `requirements.txt` pins, AIsbom sends each pinned **package name and version** to the public OSV API at `https://api.osv.dev`, and fetches the advisories it names. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-osv`, `AISBOM_NO_OSV=1` or `--offline` does. Responses are cached locally in `~/.aisbom/osv_cache.json` for 24 hours, and deleting that file is always safe.
+
+### PyPI license lookups (on by default)
+
+When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output, AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
 
 ### What's never collected
 
@@ -659,6 +709,8 @@ export AISBOM_NO_TELEMETRY=1
 # Single invocation
 AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
 ```
+
+`AISBOM_OFFLINE=1` (or `--offline` on `scan` and `score`) goes further: it disables telemetry and also every other network request — the update check and the PyPI and OSV lookups.
 
 ### Where the data goes
 

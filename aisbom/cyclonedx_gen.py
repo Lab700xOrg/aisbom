@@ -22,6 +22,7 @@ from cyclonedx.model.bom import Bom
 from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6, JsonV1Dot7
 
+from . import pypi
 from .modelcard import bom_ref_for, dependency_bom_ref, inject_model_cards
 from .properties import build_component_properties
 from .spdx_gen import _sha256_or_none
@@ -108,14 +109,30 @@ def build_bom(results: Dict[str, Any]) -> Bom:
         # for nothing (#114). Omitting it is safe: `diff.SBOMDiff` already
         # reads `component.get("version", "unknown")`, so an absent field and
         # the literal string compare equal and no drift is reported.
-        bom.components.add(Component(
+        lib = Component(
             name=dep["name"],
             version=None if version == "unknown" else version,
             type=ComponentType.LIBRARY,
             # Stable for the same reason as the model components: a CVE-keyed
             # VEX statement (#128) addresses this component by bom-ref.
             bom_ref=dependency_bom_ref(dep_index, dep),
-        ))
+        )
+        # The license PyPI declares for this exact pin (#129). It goes straight
+        # into `licenses[]`: for a library nothing downstream turns that field
+        # into a verdict (the platform's risk and drift counts read models
+        # only, and `aisbom diff` reads the description), so third-party tools
+        # get the standard field. The source property says it is a registry
+        # declaration rather than something read out of the artifact.
+        if dep.get("license"):
+            lib.licenses.add(
+                lf.make_from_string(dep["license"]) if dep.get("license_is_spdx")
+                else lf.make_with_name(dep["license"])
+            )
+            lib.properties.add(Property(
+                name=pypi.LICENSE_SOURCE_PROPERTY,
+                value=dep.get("license_source") or pypi.LICENSE_SOURCE,
+            ))
+        bom.components.add(lib)
 
     return bom
 

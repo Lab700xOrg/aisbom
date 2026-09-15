@@ -9,7 +9,7 @@ branding:
 
 inputs:
   directory:
-    description: 'Directory to scan for AI model artifacts.'
+    description: 'Directory to scan for AI model artifacts. Exact requirements.txt pins found in it (package name and version only) are looked up on pypi.org from the runner to fill in their declared licenses; set AISBOM_OFFLINE=1 in the step env to skip network lookups.'
     required: true
     default: '.'
   output-file:
