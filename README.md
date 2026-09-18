@@ -69,7 +69,9 @@ A typical scan against a project with mixed artifacts:
 
 A compliant `sbom.json` (CycloneDX v1.7 / ECMA-424) including SHA256 hashes and license data is generated in your working directory. SPDX export is one flag away (`--format spdx`) — 2.3 by default, or 3.0 with the AI Profile via `--spdx-version 3.0`.
 
-For `hf://` scans, each model component also carries a CycloneDX ML-BOM `modelCard` block — task, architecture family, model architecture, and training datasets, read from the model's Hugging Face metadata. Local scans get whatever the file itself declares (a GGUF header's architecture, for example) and make no extra network calls. The block is simply omitted when nothing is known.
+For `hf://` scans, each model component also carries a CycloneDX ML-BOM `modelCard` block — task, architecture family, model architecture, and training datasets, read from the model's Hugging Face metadata. Local scans get whatever the file itself declares (a GGUF header's architecture, for example). The block is simply omitted when nothing is known.
+
+A local model file downloaded from Hugging Face can get the same block. When the file sits in the Hugging Face cache (`models--<org>--<name>/snapshots/<commit>/`) or next to a `config.json` whose `_name_or_path` is a repo id, AIsbom fetches that repo's file list and checks that the file's hash is in it. Only then does it add the repo's model card, with an `aisbom:hf:match` property saying which evidence was used. A file whose bytes are not in the repo (a fine-tune that still names its base model, say) gets no card, and so does a file that matches more than one repo. See [Hugging Face model-card lookups](#hugging-face-model-card-lookups-local-scans) for what is sent and how to turn it off.
 
 Need the older schema for a downstream tool? `--schema-version 1.6` (or `1.5`) still works, without the `modelCard` block. One thing changed for those versions too: each model component's `bom-ref` is now a stable `artifact-<n>-<filename>` instead of a value regenerated on every run, so the same file keeps the same identifier between scans.
 
@@ -371,10 +373,11 @@ aisbom scan ./models --offline
 ```
 
 `--offline` (or `AISBOM_OFFLINE=1`) makes no network access of any kind: no
-PyPI license lookup, no OSV lookup, no telemetry and no update check. A remote
-target (`hf://`, `https://`) or `--share` is refused with exit `1` rather than
-fetched, since each needs the network. The SBOM is otherwise the same, minus
-the dependency licenses and CVE statements those lookups would have added.
+PyPI license lookup, no OSV lookup, no Hugging Face model-card lookup, no
+telemetry and no update check. A remote target (`hf://`, `https://`) or
+`--share` is refused with exit `1` rather than fetched, since each needs the
+network. The SBOM is otherwise the same, minus the dependency licenses, CVE
+statements and model cards those lookups would have added.
 `aisbom score <target> --offline` works the same way. See the
 [air-gapped guide](docs/air-gapped-guide.md).
 
@@ -535,7 +538,7 @@ Without a `token` the scan runs exactly as before — no `--vex`, no VEX files w
 
 **Anonymous telemetry — on by default,** as described in [Telemetry & Privacy](#telemetry--privacy). `AISBOM_NO_TELEMETRY=1` disables telemetry only; it does not suppress either upload above.
 
-**Package registry lookups — on by default.** Exact `requirements.txt` pins (package name and version only) are looked up on `pypi.org` from the runner to fill in [dependency licenses](#dependency-licenses-from-pypi), and — when `token` is set, which turns on `--vex` — in the OSV database. No SBOM content is sent. Set `AISBOM_OFFLINE=1` in the step's `env:` to skip both; it also disables the CLI's telemetry, and it cannot be combined with `share: true`, which needs the network.
+**Package registry lookups — on by default.** Exact `requirements.txt` pins (package name and version only) are looked up on `pypi.org` from the runner to fill in [dependency licenses](#dependency-licenses-from-pypi), and — when `token` is set, which turns on `--vex` — in the OSV database. A model file in the scanned directory that sits in the Hugging Face cache layout or next to a `config.json` naming its repo also triggers a [model-card lookup](#hugging-face-model-card-lookups-local-scans) on `huggingface.co` (repo id and commit only). No SBOM content is sent. Set `AISBOM_OFFLINE=1` in the step's `env:` to skip all of these; it also disables the CLI's telemetry, and it cannot be combined with `share: true`, which needs the network.
 
 For the two upload paths the payload is the SBOM — names, hashes, licenses, risk levels — plus, on the dashboard path only, the VEX documents derived from those same findings. All of it describes the *structure and findings* of your model files, never the weights or file contents. Telemetry carries none of that: no SBOM, no VEX, no file names, no hashes, no repo identifier.
 
@@ -672,7 +675,7 @@ AIsbom collects a small amount of anonymous usage telemetry — what model forma
 
 Per `aisbom scan`: `target_type` (the **bucket**: `local` / `huggingface` / `http` / `https` — never the actual path or URL), `model_format` (the file-type bucket), `risk_level_max`, `scan_duration_ms`, `file_count`, `parse_error_count` (all scan errors), `target_error_count` (how many of those were an unusable scan target — a missing path or an unsupported file), `strict_mode`. A `cli_scan_critical_found` event with a count is added when at least one CRITICAL is found.
 
-If you explicitly use `--share`: the generated `sbom.json` document is uploaded to our servers and retained for 30 days to generate the shareable viewer link. That document is the **full CycloneDX SBOM** — for each scanned model it carries the file name, SHA-256 hash, detected license, and structured `aisbom:*` properties describing the file's format and scan findings (such as dangerous pickle opcodes, tensor/header metadata, model architecture details, and the assessed risk and legal status) so the hosted viewer can render per-format detail. For `hf://` scans it additionally carries the `modelCard` block described above — task, architecture, training datasets and the repo's licence/revision, all of which are already public metadata published on the model's Hugging Face page. These describe the *structure and findings* of your model files, never their weights or data. Nothing leaves your machine unless you pass `--share` and confirm the prompt (or pass `--share-yes`). Note that `AISBOM_NO_TELEMETRY=1` does **not** suppress this upload — it withholds the `cli_share_created` event only; dropping `--share` is what stops the upload. If you use the GitHub Action rather than the CLI directly, the Action passes `--share --share-yes` on your behalf when you set its `share: true` input, and passes neither otherwise. A `cli_share_created` event is fired tracking whether `has_share_yes=true|false`.
+If you explicitly use `--share`: the generated `sbom.json` document is uploaded to our servers and retained for 30 days to generate the shareable viewer link. That document is the **full CycloneDX SBOM** — for each scanned model it carries the file name, SHA-256 hash, detected license, and structured `aisbom:*` properties describing the file's format and scan findings (such as dangerous pickle opcodes, tensor/header metadata, model architecture details, and the assessed risk and legal status) so the hosted viewer can render per-format detail. For `hf://` scans, and for local files matched to their Hugging Face repo, it additionally carries the `modelCard` block described above — task, architecture, training datasets and the repo's licence/revision, all of which are already public metadata published on the model's Hugging Face page. These describe the *structure and findings* of your model files, never their weights or data. Nothing leaves your machine unless you pass `--share` and confirm the prompt (or pass `--share-yes`). Note that `AISBOM_NO_TELEMETRY=1` does **not** suppress this upload — it withholds the `cli_share_created` event only; dropping `--share` is what stops the upload. If you use the GitHub Action rather than the CLI directly, the Action passes `--share --share-yes` on your behalf when you set its `share: true` input, and passes neither otherwise. A `cli_share_created` event is fired tracking whether `has_share_yes=true|false`.
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 
@@ -694,6 +697,10 @@ When you pass `--vex` and the scan finds exact `requirements.txt` pins, AIsbom s
 
 When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output, AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
 
+### Hugging Face model-card lookups (local scans)
+
+When a local scan writes CycloneDX 1.7 or SPDX 3.0 output (or `aisbom score` grades a directory) and a model file is in the Hugging Face cache layout, or sits next to a `config.json` whose `_name_or_path` looks like `org/name`, AIsbom asks `https://huggingface.co` for that repo's file list (`/api/models/<repo>/tree/<revision>`, one request per page) and, if the file's hash is in that list, its model card (`/api/models/<repo>` or `/revision/<commit>`). Each repo is asked once per scan however many of its files are present. What is sent is the **repo id** and, for cached files, the **commit** from the cache path. The hash comparison happens on your machine, so no file paths, file names, hashes or findings are sent. A `_name_or_path` that is a single name, looks like a path, or names a directory that exists next to the file is never sent. A tree with none of this evidence makes no request. If `HF_TOKEN` is set it is sent to `huggingface.co` as for `hf://` scans, so matches in private repos you can access work too. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-hf-lookup`, `AISBOM_NO_HF_LOOKUP=1` or `--offline` does. Nothing is cached.
+
 ### What's never collected
 
 File paths, directory contents, model names, target URLs, file hashes from your SBOMs, exception messages, tracebacks, or anything that could identify you, your project, or your organization.
@@ -710,7 +717,7 @@ export AISBOM_NO_TELEMETRY=1
 AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
 ```
 
-`AISBOM_OFFLINE=1` (or `--offline` on `scan` and `score`) goes further: it disables telemetry and also every other network request — the update check and the PyPI and OSV lookups.
+`AISBOM_OFFLINE=1` (or `--offline` on `scan` and `score`) goes further: it disables telemetry and also every other network request — the update check and the PyPI, OSV and Hugging Face model-card lookups.
 
 ### Where the data goes
 

@@ -524,7 +524,8 @@ def _score_modelcard(models: List[Dict[str, Any]]) -> DimensionScore:
         "modelcard", label, 15, _pct(described, len(models)), gaps,
         remediation=(
             "aisbom scan hf://<org>/<model>  — task and architecture are read "
-            "from the Hugging Face model card"
+            "from the Hugging Face model card (a local copy in the HF cache "
+            "also works)"
         ) if missing else None,
         summary=(f"{missing} of {len(models)} model(s) declare no task or "
                  f"architecture" if missing else None),
@@ -554,7 +555,8 @@ def _score_datasets(models: List[Dict[str, Any]]) -> DimensionScore:
         "datasets", label, 10, _pct(traced, len(models)), gaps,
         remediation=(
             "aisbom scan hf://<org>/<model>  — training datasets come from the "
-            "model card's `datasets` field"
+            "model card's `datasets` field (a local copy in the HF cache also "
+            "works)"
         ) if missing else None,
         summary=(f"{missing} of {len(models)} model(s) name no training data"
                  if missing else None),

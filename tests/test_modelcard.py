@@ -408,3 +408,63 @@ def test_only_the_spec_version_changes_at_the_top_level():
     assert bom_1_6["specVersion"] == "1.6"
     assert bom_1_7["specVersion"] == "1.7"
     assert set(bom_1_6) - _VOLATILE_TOP_LEVEL == set(bom_1_7) - _VOLATILE_TOP_LEVEL
+
+
+# --- local files matched to an HF repo ---------------------------------------
+
+from aisbom.hf_match import MATCH_PROPERTY, SOURCE_CACHE, SOURCE_CONFIG, Match
+
+
+def _card_of(doc_json, bom_ref):
+    doc = json.loads(doc_json)
+    return next(c for c in doc["components"] if c["bom-ref"] == bom_ref).get("modelCard")
+
+
+def test_a_matched_local_file_gets_the_hf_card_plus_the_match_source():
+    arts = [artifact()]
+    out = inject_model_cards(build_sbom(arts), arts, None, {0: Match(FULL_HF_META, SOURCE_CACHE)})
+
+    card = _card_of(out, bom_ref_for(0, arts[0]))
+    hf_card = build_model_card(arts[0], FULL_HF_META)
+    assert card["modelParameters"] == hf_card["modelParameters"]
+    assert card["properties"] == hf_card["properties"] + [
+        {"name": MATCH_PROPERTY, "value": SOURCE_CACHE}
+    ]
+    validate_1_7(out)
+
+
+def test_matches_attach_per_file_not_per_scan():
+    """Two local files from two repos each carry their own repo's card."""
+    other = dict(FULL_HF_META, id="org/other", pipeline_tag="text-generation",
+                 config={"model_type": "llama"}, cardData={})
+    arts = [artifact(name="a.safetensors"), artifact(name="b.safetensors"), artifact(name="c.safetensors")]
+    out = inject_model_cards(build_sbom(arts), arts, None, {
+        0: Match(FULL_HF_META, SOURCE_CACHE),
+        2: Match(other, SOURCE_CONFIG),
+    })
+
+    assert _card_of(out, bom_ref_for(0, arts[0]))["modelParameters"]["task"] == "fill-mask"
+    assert _card_of(out, bom_ref_for(1, arts[1])) is None
+    third = _card_of(out, bom_ref_for(2, arts[2]))
+    assert third["modelParameters"] == {"task": "text-generation", "architectureFamily": "llama"}
+    assert {"name": MATCH_PROPERTY, "value": SOURCE_CONFIG} in third["properties"]
+    validate_1_7(out)
+
+
+def test_an_unmatched_gguf_keeps_its_header_only_card():
+    arts = [artifact(name="m.gguf", framework="GGUF", architecture="llama")]
+    out = inject_model_cards(build_sbom(arts), arts, None, {})
+    assert _card_of(out, bom_ref_for(0, arts[0])) == {"modelParameters": {"architectureFamily": "llama"}}
+
+
+def test_hf_scans_never_carry_the_match_property():
+    arts = [artifact()]
+    out = inject_model_cards(build_sbom(arts), arts, FULL_HF_META)
+    assert MATCH_PROPERTY not in out
+
+
+def test_no_local_matches_is_byte_identical_to_before():
+    arts = [artifact()]
+    sbom = build_sbom(arts)
+    assert inject_model_cards(sbom, arts, None, {}) == sbom
+    assert inject_model_cards(sbom, arts, None, None) == sbom

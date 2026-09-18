@@ -19,8 +19,9 @@ key fails the suite rather than shipping).
 
 Sources, in order of preference:
 
-* Hugging Face model-card metadata (``hf://`` scans only) — task, architecture,
-  training datasets, license, library.
+* Hugging Face model-card metadata — task, architecture, training datasets,
+  license, library. For an ``hf://`` scan, and for a local file proven to come
+  from an HF repo (:mod:`aisbom.hf_match`).
 * What the scanner already parsed out of the file itself — currently the GGUF
   header's architecture. This is why a purely local scan still gets a
   ``modelCard`` without any network call at all.
@@ -29,7 +30,9 @@ Sources, in order of preference:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from .hf_match import MATCH_PROPERTY
 
 _ML_COMPONENT_TYPE = "machine-learning-model"
 
@@ -170,7 +173,9 @@ def _properties(art: Dict[str, Any], hf_meta: Optional[Dict[str, Any]]) -> List[
 
 
 def build_model_card(
-    art: Dict[str, Any], hf_meta: Optional[Dict[str, Any]] = None
+    art: Dict[str, Any],
+    hf_meta: Optional[Dict[str, Any]] = None,
+    match_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a CycloneDX 1.7 ``modelCard`` dict for one artifact, or None.
 
@@ -178,6 +183,10 @@ def build_model_card(
     `modelCard: {}` would validate, but it is noise in a compliance artifact
     and would make every local non-GGUF scan's SBOM look like it tried and
     failed to describe the model.
+
+    ``match_source`` is set when ``hf_meta`` belongs to a repo a *local* file
+    was matched to (see :mod:`aisbom.hf_match`). It is recorded on the card so
+    an inferred link is never indistinguishable from an ``hf://`` scan.
     """
     card: Dict[str, Any] = {}
 
@@ -186,6 +195,10 @@ def build_model_card(
         card["modelParameters"] = params
 
     props = _properties(art, hf_meta)
+    # Only alongside something the match actually contributed: a card holding
+    # nothing but "this was matched" would describe nothing.
+    if match_source and (params or props):
+        props.append({"name": MATCH_PROPERTY, "value": match_source})
     if props:
         card["properties"] = props
 
@@ -228,11 +241,17 @@ def inject_model_cards(
     bom_json: str,
     artifacts: List[Dict[str, Any]],
     hf_meta: Optional[Dict[str, Any]] = None,
+    local_matches: Optional[Mapping[int, Any]] = None,
 ) -> str:
     """Splice ``modelCard`` blocks into a serialized CycloneDX document.
 
     Joined on the `bom-ref` that ``cli.py`` stamped on each model component —
     see :func:`bom_ref_for` for why a name-based join is not sufficient.
+
+    ``hf_meta`` describes every artifact of an ``hf://`` scan. ``local_matches``
+    maps an artifact index to the :class:`aisbom.hf_match.Match` found for that
+    one local file, and takes precedence for it: in a local tree each file can
+    come from a different repo, or from none.
 
     Returns the input unchanged if it does not parse or has no components, so a
     serializer change upstream degrades to 1.6-equivalent output rather than
@@ -246,8 +265,13 @@ def inject_model_cards(
         return bom_json
 
     cards_by_ref: Dict[str, Dict[str, Any]] = {}
+    local_matches = local_matches or {}
     for index, art in enumerate(artifacts):
-        card = build_model_card(art, hf_meta)
+        match = local_matches.get(index)
+        if match is not None:
+            card = build_model_card(art, match.card, match.source)
+        else:
+            card = build_model_card(art, hf_meta)
         if card is not None:
             cards_by_ref[bom_ref_for(index, art)] = card
 

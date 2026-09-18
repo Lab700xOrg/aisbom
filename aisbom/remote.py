@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Optional, Any, Dict
 from urllib.parse import urlparse
 
@@ -182,7 +183,78 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
 _MODEL_CARD_TIMEOUT_SECONDS = 10
 
 
-def fetch_huggingface_model_card(repo_id: str) -> Optional[Dict[str, Any]]:
+_REPO_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# Enough for any real repo's listing (the API pages at 1,000 entries) while
+# bounding how long a pathological repo can hold up a best-effort lookup.
+_FILE_INDEX_MAX_PAGES = 20
+
+
+def _api_repo_path(repo_id: str, revision: Optional[str]) -> Optional[str]:
+    """Validated ``<repo_id>`` for an API URL, or None if either part is malformed.
+
+    The metadata calls build URLs from ids that local-file matching reads out
+    of files on disk, so anything that is not plainly a repo id and a commit
+    is refused before it can become part of a request.
+    """
+    if repo_id.startswith("hf://"):
+        repo_id = repo_id[len("hf://") :]
+    repo_id = repo_id.strip("/")
+    segments = repo_id.split("/")
+    if not 1 <= len(segments) <= 2:
+        return None
+    if not all(_REPO_SEGMENT_RE.match(s) and ".." not in s for s in segments):
+        return None
+    if revision is not None and not _COMMIT_RE.match(revision):
+        return None
+    return repo_id
+
+
+def fetch_huggingface_file_index(
+    repo_id: str, revision: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
+    """Every file entry in a repo at a revision, from the HF tree API. Best-effort.
+
+    Used to prove a local file came from a repo: entries carry the git blob
+    ``oid`` and, for LFS files, ``lfs.oid`` (the file's SHA-256). Failures of
+    any kind return None, under the same contract as
+    :func:`fetch_huggingface_model_card` — this call only decides whether a
+    local component gets a ``modelCard``.
+    """
+    repo_path = _api_repo_path(repo_id, revision)
+    if repo_path is None:
+        return None
+
+    url: Optional[str] = (
+        f"https://huggingface.co/api/models/{repo_path}/tree/{revision or 'main'}?recursive=true"
+    )
+    entries: List[Dict[str, Any]] = []
+    try:
+        for _ in range(_FILE_INDEX_MAX_PAGES):
+            resp = requests.get(url, headers=_auth_headers(url), timeout=_MODEL_CARD_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            page = resp.json()
+            if not isinstance(page, list):
+                return None
+            entries.extend(page)
+            url = ((getattr(resp, "links", None) or {}).get("next") or {}).get("url")
+            if not url:
+                return entries
+            # The token rides on every request to huggingface.co, so a next
+            # link pointing anywhere else is not followed.
+            if urlparse(url).hostname != _HF_HOST:
+                return None
+    except Exception:
+        return None
+    # Page cap reached: a partial listing could fail to prove a real match but
+    # can never prove a false one, so it is still usable.
+    return entries
+
+
+def fetch_huggingface_model_card(
+    repo_id: str, revision: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Fetch a repo's model-card metadata from the HF API. Best-effort.
 
     Unlike :func:`resolve_huggingface_repo`, every failure here is swallowed and
@@ -196,11 +268,17 @@ def fetch_huggingface_model_card(repo_id: str) -> Optional[Dict[str, Any]]:
 
     Returns the raw API payload (``cardData``, ``config``, ``pipeline_tag``,
     ``tags``, ``sha`` …) so mapping stays in :mod:`aisbom.modelcard`.
-    """
-    if repo_id.startswith("hf://"):
-        repo_id = repo_id[len("hf://") :]
 
-    api_url = f"https://huggingface.co/api/models/{repo_id}"
+    ``revision`` pins the card to a commit, for a local file matched at the
+    revision its HF cache snapshot names; without it the card is ``main``'s.
+    """
+    repo_path = _api_repo_path(repo_id, revision)
+    if repo_path is None:
+        return None
+
+    api_url = f"https://huggingface.co/api/models/{repo_path}"
+    if revision:
+        api_url += f"/revision/{revision}"
     try:
         resp = requests.get(
             api_url,

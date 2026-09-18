@@ -243,6 +243,9 @@ class DeepScanner:
         # every other target shape, which is what guarantees a local scan makes
         # no network call.
         self.hf_model_card = None
+        # Where each local artifact was read from, by artifact index. Used only
+        # to match a local file back to its HF repo; never serialized.
+        self._local_paths: Dict[int, Path] = {}
         self.is_remote = isinstance(root_path, str) and (
             root_path.startswith("http://")
             or root_path.startswith("https://")
@@ -342,6 +345,7 @@ class DeepScanner:
             "dependencies": self.dependencies,
             "errors": self.errors,
             "hf_model_card": self.hf_model_card,
+            "artifact_paths": [self._local_paths.get(i) for i in range(len(self.artifacts))],
         }
 
     def _resolve_remote_targets(self, target: str):
@@ -358,6 +362,13 @@ class DeepScanner:
         two cannot drift apart (#125). Returns True if an inspector claimed
         the file; callers decide whether declining it is noteworthy.
         """
+        before = len(self.artifacts)
+        claimed = self._inspect_local_file(full_path)
+        for index in range(before, len(self.artifacts)):
+            self._local_paths[index] = full_path
+        return claimed
+
+    def _inspect_local_file(self, full_path: Path) -> bool:
         ext = full_path.suffix.lower()
 
         if ext in PYTORCH_EXTENSIONS:

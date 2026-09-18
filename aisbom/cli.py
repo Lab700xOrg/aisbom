@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from .version_check import check_latest_version
+from . import hf_match
 from . import loop_state
 from . import offline
 from . import osv
@@ -186,6 +187,37 @@ def _resolve_dependency_licenses(results: dict, out: Console) -> None:
             f"{'y' if lookup.skipped_unpinned == 1 else 'ies'} skipped "
             "(only exact == pins are looked up)"
         )
+    out.print(line + ".[/dim]")
+
+
+def _match_local_model_cards(results: dict, target: str, no_hf_lookup: bool, out: Console) -> None:
+    """Give local model files the modelCard of the HF repo they came from.
+
+    Default-on and best-effort, like the PyPI license lookup: a file is matched
+    only on local evidence proven by hash (see `hf_match`), and any failure
+    costs that file its card and nothing else. A tree with no HF evidence makes
+    no request and prints nothing, so its output is exactly as before.
+    """
+    if (
+        _classify_target(target) != "local"
+        or no_hf_lookup
+        or hf_match.disabled_by_env()
+        or offline.is_offline()
+    ):
+        return
+    paths = results.get("artifact_paths") or []
+    if not any(hf_match.candidates_for(p) for p in paths if p is not None):
+        return
+    with out.status("[cyan]Matching model files to Hugging Face repos...[/cyan]"):
+        outcome = hf_match.match_local_artifacts(results.get("artifacts", []), paths)
+    results["hf_local_matches"] = outcome.matches
+
+    line = (
+        f"[dim]Hugging Face: matched {outcome.matched} of {outcome.considered} "
+        f"local model file{'' if outcome.considered == 1 else 's'} to their repo"
+    )
+    if outcome.ambiguous:
+        line += f"; {outcome.ambiguous} matched more than one repo and got no card"
     out.print(line + ".[/dim]")
 
 
@@ -666,13 +698,24 @@ def scan(
         ),
         rich_help_panel="Advanced Options",
     ),
+    no_hf_lookup: bool = typer.Option(
+        False,
+        "--no-hf-lookup",
+        help=(
+            "Do not ask huggingface.co for the model card of a local model file "
+            "whose HF cache path or config.json names its repo. "
+            "AISBOM_NO_HF_LOOKUP=1 does the same."
+        ),
+        rich_help_panel="Advanced Options",
+    ),
     offline_mode: bool = typer.Option(
         False,
         "--offline",
         help=(
             "Make no network access of any kind: no PyPI license lookup, no "
-            "OSV lookup, no telemetry, no update check. Remote targets and "
-            "--share are refused. AISBOM_OFFLINE=1 does the same."
+            "OSV lookup, no Hugging Face model-card lookup, no telemetry, no "
+            "update check. Remote targets and --share are refused. "
+            "AISBOM_OFFLINE=1 does the same."
         ),
     ),
 ):
@@ -933,6 +976,14 @@ def scan(
             format == OutputFormat.SPDX and spdx_version == "2.3"
         ):
             _resolve_dependency_licenses(results, console)
+
+    # Only the outputs that carry model-card data pay for the lookup: the
+    # CycloneDX 1.7 modelCard and SPDX 3.0 training datasets. 1.5/1.6, SPDX 2.3
+    # and Markdown have nowhere to put it.
+    if (format == OutputFormat.JSON and schema_version == "1.7") or (
+        format == OutputFormat.SPDX and spdx_version == "3.0"
+    ):
+        _match_local_model_cards(results, target, no_hf_lookup, console)
 
     # Unusable targets (#125): the path was missing or nothing could scan it,
     # so nothing was examined. Printed to stderr like fetch failures — it is a
@@ -1333,13 +1384,22 @@ def score(
     strict: bool = typer.Option(
         False, help="Use strict allowlisting mode when TARGET is a scan target."
     ),
+    no_hf_lookup: bool = typer.Option(
+        False,
+        "--no-hf-lookup",
+        help=(
+            "When TARGET is a directory, do not ask huggingface.co for the model "
+            "card of local model files matched to their repo. "
+            "AISBOM_NO_HF_LOOKUP=1 does the same."
+        ),
+    ),
     offline_mode: bool = typer.Option(
         False,
         "--offline",
         help=(
             "Make no network access of any kind (no PyPI license lookup, no "
-            "telemetry, no update check); remote targets are refused. "
-            "AISBOM_OFFLINE=1 does the same."
+            "Hugging Face model-card lookup, no telemetry, no update check); "
+            "remote targets are refused. AISBOM_OFFLINE=1 does the same."
         ),
     ),
 ):
@@ -1419,6 +1479,7 @@ def score(
         # The same enrichment `scan` applies, so the grade still describes the
         # file a scan would have written (#129).
         _resolve_dependency_licenses(results, progress)
+        _match_local_model_cards(results, target, no_hf_lookup, progress)
         doc = json.loads(build_cyclonedx_json(results, "1.7"))
     else:
         console.print(
