@@ -134,6 +134,12 @@ def test_lfs_pointer_error_names_the_remedy(tmp_path):
         "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var)",
         "# a comment\n/opt/some/path\n",
         "/first/path\n/second/path\n",
+        # Interior spaces are legal: `site.addpackage` only rstrips the line
+        # before joining it (Codex review, PR #115). The 141-file corpus this
+        # validator was built against happened to contain no spaced path, so
+        # the real-tree probe could not have caught this.
+        "/opt/My Models/site-packages",
+        "C:\\Program Files\\Python311\\Lib\\site-packages",
     ],
 )
 def test_real_pth_path_config_still_scans_clean(tmp_path, content):
@@ -156,9 +162,13 @@ def test_real_pth_path_config_still_scans_clean(tmp_path, content):
 @pytest.mark.parametrize(
     "content",
     [
+        # Prose: spaced, but with no path separator to make it addressed. This
+        # is the case that stops the whitespace allowance above from swallowing
+        # the whole fix.
         "totally not a model at all",
         "<!DOCTYPE html><html><body>404 Not Found</body></html>",
         "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n",
+        "Traceback (most recent call last): OSError, no such file",
     ],
 )
 def test_text_that_is_not_a_path_config_is_unreadable(tmp_path, content):
@@ -180,6 +190,118 @@ def test_path_config_classification_is_pth_only(tmp_path, ext):
 
     assert results["errors"]
     assert _artifact(results, f"model{ext}")["framework"] != "Python Path Config"
+
+
+# --- remote artifacts get the same treatment ------------------------------
+#
+# The first cut of this slice guarded every unreadable recording on
+# `local_path is not None`, which meant `hf://` and HTTPS scans — the flagship
+# "verify before you `git clone`" path — kept the old clean verdict entirely.
+# Caught by the Codex review on PR #115.
+
+def _serve(monkeypatch, content: bytes, url: str):
+    """Serve ``content`` over the Range-request path the remote scanner uses."""
+    import aisbom.remote as remote
+
+    class _Resp:
+        status_code = 206
+
+        def __init__(self, body, hdrs):
+            self.content = body
+            self.headers = hdrs
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(request_url, headers=None):
+        rng = (headers or {}).get("Range", "bytes=0-0")
+        start, _, end = rng.split("=")[1].partition("-")
+        start = int(start)
+        end = int(end) if end else len(content) - 1
+        body = content[start : end + 1]
+        return _Resp(body, {
+            "Content-Range": f"bytes {start}-{end}/{len(content)}",
+            "Content-Length": str(len(body)),
+        })
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    monkeypatch.setattr(
+        "aisbom.scanner.DeepScanner._resolve_remote_targets", lambda self, t: [url]
+    )
+    return DeepScanner(url).scan()
+
+
+def test_remote_random_bytes_are_not_reported_clean(monkeypatch):
+    """A remote `.safetensors` of noise used to come back LOW / SafeTensors."""
+    url = "http://example.com/random.safetensors"
+    results = _serve(monkeypatch, b"\x91\x3f" * 100, url)
+
+    assert results["errors"], "a remote unreadable file recorded no error"
+    assert results["errors"][0]["unreadable"] is True
+    art = results["artifacts"][0]
+    assert not art.get("framework")
+    assert "LOW" not in art["risk_level"]
+
+
+def test_remote_lfs_pointer_names_the_remedy(monkeypatch):
+    """`raw.githubusercontent.com` serves the pointer, not the file, for
+    anything LFS-tracked — so this is a real remote case, not a contrived one.
+    The subtype survives even though the local precheck cannot run."""
+    url = "http://example.com/model.safetensors"
+    results = _serve(monkeypatch, LFS_POINTER, url)
+
+    assert results["errors"][0]["unreadable_type"] == "LfsPointer"
+    assert "git lfs pull" in results["errors"][0]["error"]
+
+
+# --- a caught exception must not stay a clean verdict ---------------------
+
+def test_caught_inspector_error_becomes_unreadable(tmp_path):
+    """Every inspector wraps its body in `except Exception: meta["error"]`, and
+    nothing read that key. ONNX and SafeTensors seed `risk_level` to LOW, so a
+    file that threw mid-parse exited 0 as clean (Codex review, PR #115)."""
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"\x08\x07\x12\x04test")   # parses far enough to seed LOW
+    scanner = DeepScanner(tmp_path)
+    meta = scanner._finalize_inspection(
+        {"name": "model.onnx", "risk_level": "LOW", "error": "boom"}, path,
+    )
+
+    assert meta["unreadable"] is True
+    assert "boom" in scanner.errors[0]["error"]
+
+
+def test_caught_error_never_downgrades_a_real_finding(tmp_path):
+    """An inspector can find a CRITICAL payload and *then* throw. Losing that
+    finding to an "unreadable" label is the one outcome worse than the bug
+    this slice fixes."""
+    scanner = DeepScanner(tmp_path)
+    meta = scanner._finalize_inspection(
+        {
+            "name": "model.pt",
+            "risk_level": "CRITICAL (RCE Detected: os.system)",
+            "error": "stream closed early",
+        },
+        tmp_path / "model.pt",
+    )
+
+    assert meta["risk_level"].startswith("CRITICAL")
+    assert "unreadable" not in meta
+    assert scanner.errors == []
+
+
+def test_empty_string_error_is_still_caught(tmp_path):
+    """The git-LFS stub set `meta["error"]` to the empty string, so a
+    truthiness check on that key would have missed it. Membership is tested."""
+    scanner = DeepScanner(tmp_path)
+    meta = scanner._finalize_inspection(
+        {"name": "model.safetensors", "risk_level": "LOW", "error": ""},
+        tmp_path / "model.safetensors",
+    )
+
+    assert meta["unreadable"] is True
+    assert "without reporting a reason" in scanner.errors[0]["error"]
 
 
 # --- regression from the real-tree probe ----------------------------------

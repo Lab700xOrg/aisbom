@@ -121,6 +121,14 @@ _UNREADABLE_RISK_LABELS = {
 # every pointer, so matching the prefix is exact rather than heuristic.
 LFS_POINTER_MAGIC = b"version https://git-lfs.github.com/spec/v1"
 
+# Named once because both the local precheck and the remote failure path report
+# it. The remedy is the useful half: this is a configuration problem, not a
+# corrupt artifact, and "could not parse" would send the reader hunting.
+LFS_POINTER_MESSAGE = (
+    "this is a git-LFS pointer file, not the model itself — run `git lfs pull` "
+    "to fetch the real artifact, then re-scan"
+)
+
 # --- ONNX protobuf field numbers ---
 # ONNX has no magic bytes — a .onnx file is a bare serialized ModelProto — so
 # these field numbers are the schema. Confirmed against models serialized by the
@@ -543,6 +551,39 @@ class DeepScanner:
         meta["unreadable_type"] = unreadable_type
         return meta
 
+    def _finalize_inspection(
+        self, meta: Dict[str, Any], ident, deferred: tuple[str, str] | None = None,
+    ) -> Dict[str, Any]:
+        """Route a failed inspection into results['errors'] (#131).
+
+        Called at the tail of every inspector, local and remote alike, so a
+        remote `.safetensors` of random bytes is reported the same way a local
+        one is — the first cut guarded each call on `local_path`, which meant
+        `hf://` and HTTPS scans, the flagship path, kept the old clean verdict
+        (Codex review, PR #115).
+
+        Two routes in. `deferred` is an inspector that decided for itself that
+        it could not read the file. Otherwise a caught exception is picked up
+        from ``meta["error"]``, which every inspector sets and, before this,
+        nothing read — including the git-LFS case that sets it to the *empty
+        string*, so membership is tested rather than truthiness.
+
+        A verdict already reached is never overwritten. An inspector can find
+        a CRITICAL payload and *then* throw; downgrading that to "unreadable"
+        would lose the finding, which is the one outcome worse than the bug
+        this fixes. Only the seeded placeholders give way.
+        """
+        if deferred is not None:
+            return self._mark_unreadable(meta, ident, *deferred)
+        if "error" not in meta:
+            return meta
+        if str(meta.get("risk_level", "")).split(" ")[0] not in ("UNKNOWN", "LOW"):
+            return meta
+        detail = meta["error"] or "the parser failed without reporting a reason"
+        return self._mark_unreadable(
+            meta, ident, "UnrecognizedFormat", f"could not be read: {detail}",
+        )
+
     def _inspect_claimed(self, path: Path, inspector) -> Dict[str, Any]:
         """Run ``inspector`` on a file a model extension claimed, unless the
         file is disqualified before any parser is worth running.
@@ -570,6 +611,36 @@ class DeepScanner:
         }, path, unreadable_type, message)
 
     @staticmethod
+    def _peek_head(source, local_path: Path | None) -> bytes | None:
+        """Read the first bytes of ``source`` without disturbing the caller.
+
+        Used on failure paths only. Tolerates anything: a closed handle, a
+        stream that will not seek, a vanished file — all of which mean "cannot
+        classify further", not an error worth raising over.
+        """
+        try:
+            if local_path is not None:
+                with open(local_path, "rb") as handle:
+                    return handle.read(len(LFS_POINTER_MAGIC))
+            source.seek(0)
+            return source.read(len(LFS_POINTER_MAGIC))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _lfs_pointer_verdict(head: bytes | None) -> tuple[str, str] | None:
+        """Classify ``head`` as a git-LFS pointer, if it is one.
+
+        Shared by the local precheck and the remote failure paths. Remote is
+        not hypothetical: `raw.githubusercontent.com` serves the pointer text,
+        not the file, for anything LFS-tracked — so a plain HTTPS scan of a
+        GitHub-hosted model hits exactly this.
+        """
+        if head and head.startswith(LFS_POINTER_MAGIC):
+            return ("LfsPointer", LFS_POINTER_MESSAGE)
+        return None
+
+    @staticmethod
     def _unreadable_precheck(path: Path | None) -> tuple[str, str] | None:
         """Classify a file that cannot hold a model regardless of extension.
 
@@ -590,13 +661,7 @@ class DeepScanner:
                 head = handle.read(len(LFS_POINTER_MAGIC))
         except OSError:
             return None
-        if head.startswith(LFS_POINTER_MAGIC):
-            return (
-                "LfsPointer",
-                "this is a git-LFS pointer file, not the model itself — "
-                "run `git lfs pull` to fetch the real artifact, then re-scan",
-            )
-        return None
+        return DeepScanner._lfs_pointer_verdict(head)
 
     def _record_fetch_error(self, target: str, exc: Exception) -> None:
         """Record a remote fetch failure as a structured, non-fatal error.
@@ -643,8 +708,8 @@ class DeepScanner:
                 return label
         return None
 
-    @staticmethod
-    def _looks_like_pth_config(content: bytes) -> bool:
+    @classmethod
+    def _looks_like_pth_config(cls, content: bytes) -> bool:
         """True if ``content`` is a Python path-configuration file (#131).
 
         `.pth` is the one model extension that is also a real text format:
@@ -672,10 +737,30 @@ class DeepScanner:
                 continue
             if line.startswith(("import ", "import\t")):
                 continue
-            # A path entry occupies the whole line, so interior whitespace,
-            # markup and unprintable bytes each rule it out.
-            if any(ch.isspace() or ch in "<>" or not ch.isprintable() for ch in line):
+            if not cls._looks_like_path_entry(line):
                 return False
+        return True
+
+    @staticmethod
+    def _looks_like_path_entry(line: str) -> bool:
+        """True if ``line`` could be a directory path in a `.pth` file.
+
+        Interior spaces are legal — `site.addpackage` only `rstrip`s a line
+        before joining it, so `/opt/My Models/site-packages` and the Windows
+        `C:\\Program Files\\...` shape are both valid entries (Codex review,
+        PR #115). Rejecting all whitespace would have called those corrupt.
+
+        But accepting *any* spaced text would undo the fix this validator
+        exists for: `totally not a model at all` would read as a path. So a
+        line carrying whitespace additionally has to look addressed — it needs
+        a path separator. Prose does not have one; a directory path does.
+        """
+        if any(ch in "<>" or not ch.isprintable() for ch in line):
+            # Markup and control characters are in no directory path, and the
+            # `<` is what rejects an HTML error page saved over a checkpoint.
+            return False
+        if any(ch.isspace() for ch in line):
+            return "/" in line or "\\" in line
         return True
 
     @staticmethod
@@ -901,9 +986,7 @@ class DeepScanner:
                     stream.close()
                 except Exception:
                     pass
-        if unreadable and local_path is not None:
-            self._mark_unreadable(meta, local_path, *unreadable)
-        return meta
+        return self._finalize_inspection(meta, local_path or name, unreadable)
 
     def _npy_member_threats(self, blob: bytes, details: Dict[str, Any]):
         """Scan one `.npy` buffer; return ``(threats, carries_pickle)``.
@@ -1130,9 +1213,7 @@ class DeepScanner:
                     stream.close()
                 except Exception:
                     pass
-        if variant_unreadable and local_path is not None:
-            self._mark_unreadable(meta, local_path, *variant_unreadable)
-        return meta
+        return self._finalize_inspection(meta, local_path or name, variant_unreadable)
 
     def _inspect_safetensors(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
         """Reads Safetensors header for Metadata/License."""
@@ -1220,13 +1301,18 @@ class DeepScanner:
                     f.close()
                 except Exception:
                     pass
-        if not parsed and local_path is not None:
-            self._mark_unreadable(
-                meta, local_path, "TruncatedStream",
+        if not parsed:
+            # Re-read the head only now that the parse has already failed, so
+            # the extra Range request a remote scan pays for it is never paid
+            # by a healthy file. It buys the LFS-pointer subtype and its
+            # remedy on the remote path, where the precheck cannot run.
+            verdict = self._lfs_pointer_verdict(self._peek_head(source, local_path))
+            return self._finalize_inspection(meta, local_path or name, verdict or (
+                "TruncatedStream",
                 f"SafeTensors header could not be read: "
                 f"{meta.get('error') or 'header shorter than 8 bytes'}",
-            )
-        return meta
+            ))
+        return self._finalize_inspection(meta, local_path or name)
 
     @staticmethod
     def _read_gguf_window(f, is_remote: bool) -> bytes:
@@ -1423,15 +1509,15 @@ class DeepScanner:
                 # Honest before #131, but consequence-free: an `UNKNOWN` label
                 # scores 0 in the CLI's `_risk_score`, below LOW, so the scan
                 # exited 0 and the file rated safer than a clean model.
-                if local_path is not None:
-                    self._mark_unreadable(
-                        meta, local_path, "UnrecognizedFormat",
+                return self._finalize_inspection(
+                    meta, local_path or name,
+                    self._lfs_pointer_verdict(self._peek_head(source, local_path))
+                    or (
+                        "UnrecognizedFormat",
                         "not a GGUF file — the header does not start with the "
                         "GGUF magic bytes",
-                    )
-                else:
-                    meta['risk_level'] = "UNKNOWN (Invalid Header)"
-                return meta
+                    ),
+                )
 
             # 2. Read the metadata block in as few reads as possible.
             # Walking the stream field by field costs one HTTP Range request per
@@ -1795,15 +1881,17 @@ class DeepScanner:
                     meta["risk_level"] = self._keras_risk_label(
                         salvage, meta["details"]["lambda_layers"]
                     )
-                elif local_path is not None:
-                    # Same consequence-free-UNKNOWN fix as GGUF above (#131).
-                    self._mark_unreadable(
-                        meta, local_path, "UnrecognizedFormat",
-                        "not a recognized Keras container — no HDF5 or zip "
-                        "signature found",
-                    )
                 else:
-                    meta["risk_level"] = "UNKNOWN (Unrecognized Container)"
+                    # Same consequence-free-UNKNOWN fix as GGUF above (#131).
+                    return self._finalize_inspection(
+                        meta, local_path or name,
+                        self._lfs_pointer_verdict(self._peek_head(source, local_path))
+                        or (
+                            "UnrecognizedFormat",
+                            "not a recognized Keras container — no HDF5 or zip "
+                            "signature found",
+                        ),
+                    )
                 return meta
 
             parsed = None
@@ -2177,14 +2265,11 @@ class DeepScanner:
 
             if not looks_like_onnx:
                 # Same consequence-free-UNKNOWN fix as GGUF/Keras (#131).
-                if local_path is not None:
-                    onnx_unreadable = (
-                        "UnrecognizedFormat",
-                        "not a parseable ONNX model — the bytes do not "
-                        "deserialize as a ModelProto",
-                    )
-                else:
-                    meta["risk_level"] = "UNKNOWN (Unparsable ONNX)"
+                onnx_unreadable = self._lfs_pointer_verdict(blob) or (
+                    "UnrecognizedFormat",
+                    "not a parseable ONNX model — the bytes do not "
+                    "deserialize as a ModelProto",
+                )
             else:
                 meta["risk_level"] = self._onnx_risk_label(threats)
         except Exception as e:
@@ -2195,9 +2280,7 @@ class DeepScanner:
                     f.close()
                 except Exception:
                     pass
-        if onnx_unreadable and local_path is not None:
-            self._mark_unreadable(meta, local_path, *onnx_unreadable)
-        return meta
+        return self._finalize_inspection(meta, local_path or name, onnx_unreadable)
 
     def _parse_requirements(self, path: Path):
         try:
