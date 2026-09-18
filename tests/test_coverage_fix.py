@@ -143,7 +143,10 @@ def test_scanner_invalid_gguf(tmp_path):
     
     scanner = DeepScanner(str(tmp_path))
     meta = scanner._inspect_gguf(f)
-    assert "Invalid Header" in meta["risk_level"]
+    # #131 routes a bad magic header through the unreadable path, which sets
+    # the label from a closed set rather than naming the header specifically.
+    assert meta["risk_level"] == "UNKNOWN (Unrecognized Format)"
+    assert meta["unreadable"] is True
 
 def test_scanner_malformed_requirements(tmp_path):
     """Test handling of malformed requirements.txt."""

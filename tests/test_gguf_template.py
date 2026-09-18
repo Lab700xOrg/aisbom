@@ -326,8 +326,12 @@ def test_unknown_value_type_stops_the_walk_cleanly(tmp_path):
 
 def test_invalid_magic_is_still_rejected(tmp_path):
     (tmp_path / "bad.gguf").write_bytes(b"NOPE" + b"\x00" * 32)
-    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
-    assert art["risk_level"] == "UNKNOWN (Invalid Header)"
+    results = DeepScanner(str(tmp_path)).scan()
+    art = results["artifacts"][0]
+    # #131: rejected *and* recorded. The label alone scored 0 in `_risk_score`,
+    # so "rejected" still meant exit 0.
+    assert art["risk_level"] == "UNKNOWN (Unrecognized Format)"
+    assert results["errors"]
 
 
 # --- end to end -----------------------------------------------------------

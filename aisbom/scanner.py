@@ -16,6 +16,7 @@ from aisbom.safety import (
     head_looks_like_pickle,
     jinja_threats_are_critical,
     looks_like_pickle_stream,
+    pickle_content_opcode_count,
     onnx_domain_is_custom,
     scan_jinja_template,
     scan_keras_config,
@@ -39,6 +40,12 @@ ONNX_EXTENSION = '.onnx'
 # the README documents `aisbom scan model.pkl --strict`, and until now that
 # scanned nothing and exited 0.
 PICKLE_VARIANT_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill', '.npy', '.npz'}
+
+# The subset whose format *is* a pickle stream. One of these that does not
+# disassemble through to a STOP opcode is truncated or mislabelled, not a clean
+# artifact (#131) — where a `.npy`/`.npz` of ordinary numbers legitimately
+# carries no pickle at all and stays LOW.
+PICKLE_STREAM_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill'}
 
 # Local reads get the same budget as the other formats; a remote read pays one
 # HTTP Range request per call and gets the tighter one.
@@ -75,6 +82,44 @@ TARGET_ERROR_TYPES = frozenset({
     "UnsupportedFileType",
     "NotAFileOrDirectory",
 })
+
+# Why a file carrying a model extension could not be read (#131). Same closed
+# -set discipline as TARGET_ERROR_TYPES and for the same reason: the subtype
+# rides into `cli_error` telemetry, so it is chosen at the call site and never
+# derived from the path or the exception text.
+#
+# The distinction these draw is the point of the slice. `LOW` asserts that a
+# file was inspected and nothing dangerous was found; for a file no parser ever
+# read, the honest answer is "could not read this". Collapsing the two let a
+# truncated download pass a CI gate as a clean model.
+UNREADABLE_TYPES = frozenset({
+    # A git-LFS pointer stub, not the model: the common real-world unparseable
+    # `.safetensors`, left behind by a clone without `git lfs pull`. Called out
+    # separately because it is a configuration problem with a specific remedy,
+    # and "could not parse" would send the reader hunting for corruption.
+    "LfsPointer",
+    "EmptyFile",
+    # Opened and recognized, but the data ran out: a pickle that never reaches
+    # STOP, a SafeTensors header shorter than its declared length.
+    "TruncatedStream",
+    # Nothing claimed it — no container magic, no parseable header, and not a
+    # valid `.pth` path config either.
+    "UnrecognizedFormat",
+})
+
+# Risk labels for unreadable files. `UNKNOWN (...)` follows the vocabulary the
+# GGUF/Keras/ONNX inspectors already used for "couldn't read it"; the exit code
+# comes from the errors list, not from this label.
+_UNREADABLE_RISK_LABELS = {
+    "LfsPointer": "UNKNOWN (Git LFS Pointer)",
+    "EmptyFile": "UNKNOWN (Empty File)",
+    "TruncatedStream": "UNKNOWN (Truncated)",
+    "UnrecognizedFormat": "UNKNOWN (Unrecognized Format)",
+}
+
+# First line of a git-LFS pointer file. The spec fixes this as the first line of
+# every pointer, so matching the prefix is exact rather than heuristic.
+LFS_POINTER_MAGIC = b"version https://git-lfs.github.com/spec/v1"
 
 # --- ONNX protobuf field numbers ---
 # ONNX has no magic bytes — a .onnx file is a bare serialized ModelProto — so
@@ -372,17 +417,17 @@ class DeepScanner:
         ext = full_path.suffix.lower()
 
         if ext in PYTORCH_EXTENSIONS:
-            self.artifacts.append(self._inspect_pytorch(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_pytorch))
         elif ext == SAFETENSORS_EXTENSION:
-            self.artifacts.append(self._inspect_safetensors(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_safetensors))
         elif ext == GGUF_EXTENSION:
-            self.artifacts.append(self._inspect_gguf(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_gguf))
         elif ext in KERAS_EXTENSIONS:
-            self.artifacts.append(self._inspect_keras(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_keras))
         elif ext == ONNX_EXTENSION:
-            self.artifacts.append(self._inspect_onnx(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_onnx))
         elif ext in PICKLE_VARIANT_EXTENSIONS:
-            self.artifacts.append(self._inspect_pickle_variant(full_path))
+            self.artifacts.append(self._inspect_claimed(full_path, self._inspect_pickle_variant))
         elif full_path.name == REQUIREMENTS_FILENAME:
             self._parse_requirements(full_path)
         elif self._sniff_is_pickle(full_path):
@@ -467,6 +512,92 @@ class DeepScanner:
             "target_error_type": error_type,
         })
 
+    def _mark_unreadable(
+        self, meta: Dict[str, Any], path: Path | str, unreadable_type: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        """Record a file no parser could read, and strip its format claims.
+
+        Two effects, deliberately paired. The error lands in results['errors']
+        so the CLI's `errors → exit 1` path fires and `score` refuses to grade
+        the scan (#114's gate keys off the same list). And `meta` loses its
+        format label and risk verdict: both were assertions about a file that
+        was never successfully parsed, and dropping `framework` is what stops
+        `aisbom:format` claiming 200 random bytes are SafeTensors.
+
+        The component itself stays in the SBOM, carrying the marker instead of
+        a verdict — an auditor still needs to see that the file was there and
+        was not examined. `scan_incomplete` (#113) set the precedent.
+        """
+        if unreadable_type not in UNREADABLE_TYPES:
+            raise ValueError(f"unknown unreadable type: {unreadable_type!r}")
+        self.errors.append({
+            "file": str(path),
+            "error": message,
+            "unreadable": True,
+            "unreadable_type": unreadable_type,
+        })
+        meta["framework"] = None
+        meta["risk_level"] = _UNREADABLE_RISK_LABELS[unreadable_type]
+        meta["unreadable"] = True
+        meta["unreadable_type"] = unreadable_type
+        return meta
+
+    def _inspect_claimed(self, path: Path, inspector) -> Dict[str, Any]:
+        """Run ``inspector`` on a file a model extension claimed, unless the
+        file is disqualified before any parser is worth running.
+
+        Wrapping the dispatch rather than each inspector keeps the precheck in
+        one place: every format gets the empty-file and LFS-stub verdicts on
+        the same terms, and a format added later inherits them.
+        """
+        precheck = self._unreadable_precheck(path)
+        if precheck is not None:
+            return self._unreadable_stub(path, *precheck)
+        return inspector(path)
+
+    def _unreadable_stub(
+        self, path: Path, unreadable_type: str, message: str,
+    ) -> Dict[str, Any]:
+        """A component for a file rejected before any parser ran."""
+        return self._mark_unreadable({
+            "name": path.name,
+            "type": "machine-learning-model",
+            "license": "Unknown",
+            "legal_status": "UNKNOWN",
+            "hash": self._calculate_hash(path),
+            "details": {},
+        }, path, unreadable_type, message)
+
+    @staticmethod
+    def _unreadable_precheck(path: Path | None) -> tuple[str, str] | None:
+        """Classify a file that cannot hold a model regardless of extension.
+
+        Runs before any format parser because neither case is that format
+        failing — an empty file and an LFS stub are the same whether they are
+        named `.safetensors` or `.gguf`, and the LFS case wants its own remedy
+        in the message rather than whatever error the header parse happens to
+        raise. (The stub used to reach the SafeTensors parser and set
+        `meta["error"]` to the empty string, which no truthiness check would
+        have caught.)
+        """
+        if path is None:
+            return None
+        try:
+            if path.stat().st_size == 0:
+                return ("EmptyFile", "file is empty — 0 bytes, nothing to inspect")
+            with open(path, "rb") as handle:
+                head = handle.read(len(LFS_POINTER_MAGIC))
+        except OSError:
+            return None
+        if head.startswith(LFS_POINTER_MAGIC):
+            return (
+                "LfsPointer",
+                "this is a git-LFS pointer file, not the model itself — "
+                "run `git lfs pull` to fetch the real artifact, then re-scan",
+            )
+        return None
+
     def _record_fetch_error(self, target: str, exc: Exception) -> None:
         """Record a remote fetch failure as a structured, non-fatal error.
 
@@ -511,6 +642,41 @@ class DeepScanner:
             if head.startswith(magic):
                 return label
         return None
+
+    @staticmethod
+    def _looks_like_pth_config(content: bytes) -> bool:
+        """True if ``content`` is a Python path-configuration file (#131).
+
+        `.pth` is the one model extension that is also a real text format:
+        Python's `site` module reads every `.pth` in site-packages and treats
+        each line as a directory to append to `sys.path`, or executes it when
+        it starts with `import`. Those files are in every virtualenv, so they
+        have to keep scanning clean.
+
+        Being *text* was never evidence of being one of them — that is what let
+        an HTML error page saved over a checkpoint score LOW. So this checks the
+        actual shape: every meaningful line is an `import` statement or a single
+        bare path, which prose, markup and LFS stubs all fail on whitespace.
+
+        Validated against all 141 `.pth` files in this machine's virtualenvs.
+        """
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        if not text.strip():
+            return False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(("import ", "import\t")):
+                continue
+            # A path entry occupies the whole line, so interior whitespace,
+            # markup and unprintable bytes each rule it out.
+            if any(ch.isspace() or ch in "<>" or not ch.isprintable() for ch in line):
+                return False
+        return True
 
     @staticmethod
     def _looks_like_text(content: bytes) -> bool:
@@ -624,6 +790,7 @@ class DeepScanner:
             "details": {}
         }
         stream = None
+        unreadable: tuple[str, str] | None = None
         try:
             # Choose stream
             if local_path:
@@ -705,10 +872,24 @@ class DeepScanner:
                         meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
                     elif looks_like_pickle_stream(content):
                         meta["risk_level"] = "MEDIUM (Pickle Present)"
-                    elif self._looks_like_text(content):
+                    elif (
+                        Path(name).suffix.lower() == ".pth"
+                        and self._looks_like_pth_config(content)
+                    ):
                         meta["risk_level"] = "LOW"
                         meta["type"] = "configuration"
                         meta["framework"] = "Python Path Config"
+                    elif self._looks_like_text(content):
+                        # Text, but not a path config — and nothing produces a
+                        # text `.pt`/`.bin` at all. A corrupt download, an HTML
+                        # error page saved to disk, or a checkpoint that never
+                        # finished writing; all were graded LOW before #131.
+                        unreadable = (
+                            "UnrecognizedFormat",
+                            "no model format could read this file — not a zip "
+                            "archive, not a pickle stream, and not a valid "
+                            "`.pth` path configuration",
+                        )
                     else:
                         # Binary, not a parsable pickle, not a known container.
                         meta["risk_level"] = "CRITICAL (Legacy Binary)"
@@ -720,6 +901,8 @@ class DeepScanner:
                     stream.close()
                 except Exception:
                     pass
+        if unreadable and local_path is not None:
+            self._mark_unreadable(meta, local_path, *unreadable)
         return meta
 
     def _npy_member_threats(self, blob: bytes, details: Dict[str, Any]):
@@ -786,6 +969,7 @@ class DeepScanner:
         details = meta["details"]
 
         stream = None
+        variant_unreadable: tuple[str, str] | None = None
         try:
             stream = open(local_path, "rb") if local_path else source
             budget = (PICKLE_VARIANT_MAX_SCAN_BYTES if local_path
@@ -912,6 +1096,28 @@ class DeepScanner:
                 meta["risk_level"] = f"MEDIUM (Unscanned Container: {unreadable})"
             elif carries_pickle:
                 meta["risk_level"] = "MEDIUM (Pickle Present)"
+            elif (
+                Path(name).suffix.lower() in PICKLE_STREAM_EXTENSIONS
+                and details.get("container") == "bare"
+                and pickle_content_opcode_count(blob) == 0
+            ):
+                # The extension says the whole file is a pickle, and the
+                # disassembler found nothing past the protocol header.
+                # `\x80\x05` — a bare header with no stream behind it — used to
+                # land in the LOW branch below, which exists for numeric `.npy`
+                # arrays that carry no pickle by design. A `.pkl` carrying no
+                # pickle at all is a different thing.
+                #
+                # "No content opcodes" rather than "never reached STOP": a real
+                # pickle need not be the whole file. joblib appends its arrays
+                # as raw bytes after STOP, and a STOP-based rule called 75
+                # valid files from its own test corpus unreadable.
+                variant_unreadable = (
+                    "TruncatedStream",
+                    "declared a pickle by its extension, but nothing past the "
+                    "protocol header could be disassembled — truncated or not "
+                    "a pickle at all",
+                )
             else:
                 # A `.npy` of ordinary numbers reaches here: a real file, fully
                 # read, carrying no pickle at all.
@@ -924,6 +1130,8 @@ class DeepScanner:
                     stream.close()
                 except Exception:
                     pass
+        if variant_unreadable and local_path is not None:
+            self._mark_unreadable(meta, local_path, *variant_unreadable)
         return meta
 
     def _inspect_safetensors(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
@@ -945,14 +1153,40 @@ class DeepScanner:
             "details": {}
         }
         f = None
+        # Only a completed header parse earns the SafeTensors label and the LOW
+        # verdict seeded above (#131). 200 bytes of noise used to keep both.
+        parsed = False
         try:
             f = open(local_path, "rb") if local_path else source
             f.seek(0)
             length_bytes = f.read(8)
             if len(length_bytes) == 8:
                 header_len = struct.unpack('<Q', length_bytes)[0]
-                header_json = json.loads(f.read(header_len))
-                
+                # Random bytes decode to an astronomical length. Bounding the
+                # read by what is actually on disk both keeps the allocation
+                # honest and replaces the raw OverflowError ("cannot fit 'int'
+                # into an index-sized integer") with a message that says what
+                # is wrong with the file.
+                available = (
+                    local_path.stat().st_size - 8 if local_path is not None
+                    else header_len
+                )
+                if header_len > max(available, 0):
+                    raise ValueError(
+                        f"header declares {header_len} bytes but only "
+                        f"{max(available, 0)} follow the length prefix"
+                    )
+                raw_header = f.read(header_len)
+                if len(raw_header) < header_len:
+                    raise ValueError(
+                        f"header declares {header_len} bytes, file holds "
+                        f"{len(raw_header)}"
+                    )
+                header_json = json.loads(raw_header)
+                if not isinstance(header_json, dict):
+                    raise ValueError("header is not a JSON object")
+                parsed = True
+
                 # EXTRACT METADATA
                 metadata = header_json.get("__metadata__", {})
                 
@@ -986,6 +1220,12 @@ class DeepScanner:
                     f.close()
                 except Exception:
                     pass
+        if not parsed and local_path is not None:
+            self._mark_unreadable(
+                meta, local_path, "TruncatedStream",
+                f"SafeTensors header could not be read: "
+                f"{meta.get('error') or 'header shorter than 8 bytes'}",
+            )
         return meta
 
     @staticmethod
@@ -1180,7 +1420,17 @@ class DeepScanner:
             # 1. Check Magic "GGUF"
             magic = f.read(4)
             if magic != b'GGUF':
-                meta['risk_level'] = "UNKNOWN (Invalid Header)"
+                # Honest before #131, but consequence-free: an `UNKNOWN` label
+                # scores 0 in the CLI's `_risk_score`, below LOW, so the scan
+                # exited 0 and the file rated safer than a clean model.
+                if local_path is not None:
+                    self._mark_unreadable(
+                        meta, local_path, "UnrecognizedFormat",
+                        "not a GGUF file — the header does not start with the "
+                        "GGUF magic bytes",
+                    )
+                else:
+                    meta['risk_level'] = "UNKNOWN (Invalid Header)"
                 return meta
 
             # 2. Read the metadata block in as few reads as possible.
@@ -1545,6 +1795,13 @@ class DeepScanner:
                     meta["risk_level"] = self._keras_risk_label(
                         salvage, meta["details"]["lambda_layers"]
                     )
+                elif local_path is not None:
+                    # Same consequence-free-UNKNOWN fix as GGUF above (#131).
+                    self._mark_unreadable(
+                        meta, local_path, "UnrecognizedFormat",
+                        "not a recognized Keras container — no HDF5 or zip "
+                        "signature found",
+                    )
                 else:
                     meta["risk_level"] = "UNKNOWN (Unrecognized Container)"
                 return meta
@@ -1869,6 +2126,7 @@ class DeepScanner:
         }
 
         f = None
+        onnx_unreadable: tuple[str, str] | None = None
         try:
             f = open(local_path, "rb") if local_path else source
             budget = ONNX_MAX_SCAN_BYTES if local_path else ONNX_MAX_REMOTE_SCAN_BYTES
@@ -1918,7 +2176,15 @@ class DeepScanner:
             }
 
             if not looks_like_onnx:
-                meta["risk_level"] = "UNKNOWN (Unparsable ONNX)"
+                # Same consequence-free-UNKNOWN fix as GGUF/Keras (#131).
+                if local_path is not None:
+                    onnx_unreadable = (
+                        "UnrecognizedFormat",
+                        "not a parseable ONNX model — the bytes do not "
+                        "deserialize as a ModelProto",
+                    )
+                else:
+                    meta["risk_level"] = "UNKNOWN (Unparsable ONNX)"
             else:
                 meta["risk_level"] = self._onnx_risk_label(threats)
         except Exception as e:
@@ -1929,7 +2195,10 @@ class DeepScanner:
                     f.close()
                 except Exception:
                     pass
+        if onnx_unreadable and local_path is not None:
+            self._mark_unreadable(meta, local_path, *onnx_unreadable)
         return meta
+
     def _parse_requirements(self, path: Path):
         try:
             req_file = RequirementsFile.from_file(path)

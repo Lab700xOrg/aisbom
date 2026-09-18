@@ -134,6 +134,22 @@ xattr -d com.apple.quarantine aisbom-macos-*
 
 `--no-fail-on-risk` governs risk findings only. An unusable target still exits `1`, so a typo'd path in CI fails loudly instead of passing as a clean scan.
 
+### Files that could not be read
+
+`LOW` is an assertion: AIsbom opened the artifact and found nothing dangerous. A file that no parser could read gets a different answer, reported in its own **Could not read** section and exiting `1`:
+
+```
+⚠️ Could not read:
+  - models/model.safetensors: this is a git-LFS pointer file, not the model
+    itself — run `git lfs pull` to fetch the real artifact, then re-scan
+  - models/head.pkl: declared a pickle by its extension, but nothing past the
+    protocol header could be disassembled — truncated or not a pickle at all
+```
+
+The cases are a git-LFS pointer stub (the usual one — a clone without `git lfs pull`), an empty file, a truncated stream, and a file in no recognised format. Such an artifact still appears in the SBOM, so an auditor can see it was present, but it carries **no framework label and no risk verdict** — a format label is only applied when that format's parser actually succeeded. In CycloneDX it is marked with `aisbom:unreadable` and `aisbom:unreadable_type` properties, and `aisbom score` refuses to grade a scan containing one.
+
+> **Upgrading:** before v1.7.0 these files were reported as `Risk: LOW` with a confident framework label and exited `0`, so a truncated download could pass a CI gate as a clean model. If your tree contains unreadable files, those scans now exit `1`. That is the behaviour the exit-code table above always documented; the files were never examined.
+
 ### Scan a Hugging Face model
 
 ```bash
