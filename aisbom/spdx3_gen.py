@@ -152,15 +152,30 @@ class SPDX3Generator:
         identical IRIs (they genuinely describe the same artifacts), and
         different inputs yield different ones no matter how close together the
         scans ran.
+
+        A locally matched model carries its own datasets in its fingerprint
+        entry, because the dataset *union* alone does not identify the
+        document: two scans can share a union while assigning it differently
+        between models (A `[x, y]`/B `[z]` versus A `[x]`/B `[y, z]`), which
+        produces different `trainedOn` relationships under one identity, and a
+        store importing both could conflate them. Only matched artifacts carry
+        the extra element, so documents where every model shares one card —
+        every `hf://` scan, and every local scan that matched nothing — keep
+        the identity they had before per-file cards existed.
         """
+        matches = results.get("hf_local_matches") or {}
+        artifacts = []
+        for index, art in enumerate(results.get("artifacts", [])):
+            entry = [
+                art.get("name") or art.get("filename") or "unknown-model",
+                art.get("hash"),
+            ]
+            if index in matches:
+                entry.append(_card_datasets(matches[index].card))
+            artifacts.append(entry)
+
         fingerprint = {
-            "artifacts": [
-                [
-                    art.get("name") or art.get("filename") or "unknown-model",
-                    art.get("hash"),
-                ]
-                for art in results.get("artifacts", [])
-            ],
+            "artifacts": artifacts,
             "dependencies": [
                 [dep.get("name"), dep.get("version")]
                 for dep in results.get("dependencies", [])

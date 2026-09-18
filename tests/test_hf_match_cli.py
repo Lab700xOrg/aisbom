@@ -273,6 +273,68 @@ def test_spdx3_trains_each_package_on_its_own_datasets_only():
     assert "ai_informationAboutTraining" not in pkgs["b.safetensors"]
 
 
+def _namespace_for(assignments):
+    """SPDX 3.0 document namespace for two models with the given datasets."""
+    artifacts = [
+        {"name": n, "type": "machine-learning-model", "framework": "SafeTensors",
+         "risk_level": "LOW", "legal_status": "UNKNOWN", "license": "Unknown",
+         "hash": h * 64, "details": {}}
+        for n, h in (("a.safetensors", "a"), ("b.safetensors", "b"))
+    ]
+    results = {
+        "artifacts": artifacts, "dependencies": [], "errors": [], "hf_model_card": None,
+        "hf_local_matches": {
+            i: hf_match.Match({"id": f"org/m{i}", "cardData": {"datasets": names}},
+                              hf_match.SOURCE_CACHE)
+            for i, names in enumerate(assignments)
+        },
+    }
+    doc = json.loads(generate_spdx3_sbom(results))
+    return next(e["spdxId"] for e in doc["@graph"] if e.get("type") == "SpdxDocument")
+
+
+def test_swapping_datasets_between_models_changes_the_document_identity():
+    """Same dataset union, different per-model assignment: distinct documents.
+
+    The namespace is content-derived so that two unrelated scans never share
+    element IRIs. Fingerprinting only the union would give these two scans one
+    identity, and a store importing both could conflate their trainedOn
+    relationships.
+    """
+    assert _namespace_for([["x", "y"], ["z"]]) != _namespace_for([["x"], ["y", "z"]])
+
+
+def test_identical_dataset_assignments_keep_one_identity():
+    """The other half of the contract: unchanged inputs, unchanged IRIs."""
+    assert _namespace_for([["x", "y"], ["z"]]) == _namespace_for([["x", "y"], ["z"]])
+
+
+def test_a_scan_with_no_local_match_keeps_the_namespace_it_had_before():
+    """Per-file cards must not renumber documents that have none.
+
+    The expected value was produced by the released generator, so a change to
+    the fingerprint's shape that would churn every existing SPDX 3.0 document's
+    IRIs fails here.
+    """
+    results = {
+        "artifacts": [{
+            "name": "model.safetensors", "type": "machine-learning-model",
+            "framework": "SafeTensors", "risk_level": "LOW",
+            "legal_status": "UNKNOWN", "license": "Unknown",
+            "hash": "a" * 64, "details": {},
+        }],
+        "dependencies": [{"name": "requests", "version": "2.32.0"}],
+        "errors": [],
+        "hf_model_card": {"id": "org/m", "cardData": {"datasets": ["x", "y"]}},
+    }
+    doc = json.loads(generate_spdx3_sbom(results))
+    document = next(e for e in doc["@graph"] if e.get("type") == "SpdxDocument")
+    assert document["spdxId"] == (
+        "https://aisbom.io/spdxdocs/aisbom-scan-22d3deecbaf9f0c75268d19b12abd1f5"
+        "#SPDXRef-DOCUMENT"
+    )
+
+
 # -- score --------------------------------------------------------------------
 
 def test_score_of_a_matched_local_tree_regains_model_card_and_dataset_points(tmp_path, monkeypatch):
