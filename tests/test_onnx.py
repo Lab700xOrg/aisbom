@@ -206,10 +206,16 @@ def test_garbage_onnx_file_is_not_reported_as_a_model(tmp_path):
 
 def test_empty_onnx_file_does_not_crash(tmp_path):
     (tmp_path / "empty.onnx").write_bytes(b"")
-    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+    results = DeepScanner(str(tmp_path)).scan()
+    art = results["artifacts"][0]
 
-    assert art["framework"] == "ONNX"
-    assert art["details"]["parsed"] is False
+    # Still the no-crash guarantee this test exists for. Since #131 a zero-byte
+    # file is classified before any parser runs, so it carries no ONNX label —
+    # the label asserts that ONNX's parser succeeded.
+    assert art["framework"] is None
+    assert art["unreadable"] is True
+    assert art["unreadable_type"] == "EmptyFile"
+    assert results["errors"]
 
 
 def test_truncated_model_still_reports_the_nodes_it_covers(tmp_path, monkeypatch):

@@ -328,10 +328,15 @@ def test_truncated_h5_still_flags_the_payload(tmp_path):
 def test_unreadable_keras_file_records_an_error_not_a_crash(tmp_path):
     path = tmp_path / "empty.h5"
     path.write_bytes(b"")
-    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+    results = DeepScanner(str(tmp_path)).scan()
+    art = results["artifacts"][0]
 
-    assert art["framework"] == "Keras"
     assert "CRITICAL" not in art["risk_level"]
+    # Since #131 this test's name is finally true: an empty file records an
+    # actual error rather than a Keras-labelled artifact with no verdict.
+    assert art["framework"] is None
+    assert art["unreadable_type"] == "EmptyFile"
+    assert results["errors"]
 
 
 # --- containers that do not present cleanly -------------------------------
@@ -386,10 +391,15 @@ def test_damaged_keras_archive_still_yields_its_signature(tmp_path):
 
 def test_unrecognized_container_with_no_signature_stays_unknown(tmp_path):
     (tmp_path / "junk.keras").write_bytes(b"not a container at all" * 10)
-    art = DeepScanner(str(tmp_path)).scan()["artifacts"][0]
+    results = DeepScanner(str(tmp_path)).scan()
+    art = results["artifacts"][0]
 
-    assert art["risk_level"] == "UNKNOWN (Unrecognized Container)"
+    # #131 gave this verdict its consequence. `UNKNOWN (...)` was honest but
+    # scored 0 in the CLI's `_risk_score` — below LOW — so an unreadable file
+    # exited 0 and rated safer than a clean model.
+    assert art["risk_level"] == "UNKNOWN (Unrecognized Format)"
     assert "CRITICAL" not in art["risk_level"]
+    assert results["errors"]
 
 
 def test_config_larger_than_the_read_budget_is_not_called_clean(tmp_path, monkeypatch):
