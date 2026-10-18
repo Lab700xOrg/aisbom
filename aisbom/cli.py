@@ -833,6 +833,10 @@ def scan(
     # (context) below. Intentional; see the slice notes.
     fetch_failures = [e for e in results['errors'] if e.get('fetch_failure')]
     target_errors = [e for e in results['errors'] if e.get('target_error')]
+    # Files a model extension claimed that no parser could read (#131). Split
+    # out here, ahead of telemetry, so the count and subtypes ride into
+    # `cli_scan` alongside the target-error split.
+    unreadable = [e for e in results['errors'] if e.get('unreadable')]
     # Loop detection (#99) works at scan granularity ("N runs in a row"): the
     # first failure's fingerprint represents the invocation — a fetch failure
     # if there is one, else a target error (#126: a cron job on a typo'd path
@@ -896,6 +900,14 @@ def scan(
         # split that tells "scanned nothing" from "scanned a corrupt model".
         "parse_error_count": str(len(results.get("errors", []))),
         "target_error_count": str(len(target_errors)),
+        # #131, following the #126 split. The count answers "how much of this
+        # tree could we not read", and the closed-set subtypes say why — which
+        # is what tells a wave of failed downloads from a wave of clones
+        # missing `git lfs pull`. Both are bounded cardinality by construction.
+        "unreadable_count": str(len(unreadable)),
+        "unreadable_types": ",".join(sorted(
+            {e["unreadable_type"] for e in unreadable if e.get("unreadable_type")}
+        )),
         "strict_mode": "true" if strict else "false",
     }
     telemetry_threads.append(
@@ -997,11 +1009,28 @@ def scan(
     if target_errors and not fetch_failures:
         _maybe_print_loop_warning(loop_count, first_payload["http_status"])
 
-    # Parse errors only — fetch failures and target errors already printed
-    # their own message to stderr and don't fit the "Could not parse" framing.
+    # Files carrying a model extension that no parser could read (#131). Their
+    # own section, because "could not parse" describes a parser that ran and
+    # failed, while these mostly never got that far — an empty file, a git-LFS
+    # stub, a stream that stops mid-way. The distinction is the actionable
+    # part: the LFS case is a `git lfs pull` away from scanning fine.
+    if unreadable:
+        console.print("\n[bold red]⚠️ Could not read:[/bold red]")
+        for err in unreadable:
+            console.print(f"  - [yellow]{err['file']}[/yellow]: {err['error']}")
+        console.print(
+            "\n[dim]These files were not examined, so they carry no risk "
+            "verdict. A scan that cannot read an artifact is not a scan that "
+            "found it clean.[/dim]"
+        )
+
+    # Parse errors only — fetch failures, target errors and unreadable files
+    # already printed their own message and don't fit the "Could not parse"
+    # framing.
     parse_errors = [
         e for e in results['errors']
         if not e.get('fetch_failure') and not e.get('target_error')
+        and not e.get('unreadable')
     ]
     if parse_errors:
         console.print("\n[bold red]⚠️ Errors Encountered:[/bold red]")

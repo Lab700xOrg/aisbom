@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.7.0 — unreleased
+
+> **Unreadable model files now exit `1` instead of `0`.** A file that no parser could read — a git-LFS pointer stub, an empty file, a truncated stream, a file in no recognised format — was reported as `Risk: LOW` with a confident framework label and passed as a clean scan. It is now reported as an error and exits `1`. **If your tree contains such files, a pipeline that passes today will start failing.** That is the intended signal: those files were never examined, and `--fail-on-risk` was reading `LOW` on an artifact nothing had opened. The exit-code table in the README has always documented exit `1` for "a file failed to parse".
+
+### Fixed
+
+- **"Could not read it" is no longer reported as "read it, it's clean".** `LOW` asserts that AIsbom opened an artifact and found nothing dangerous; for a file no parser could read, the honest answer is different. Five inspectors already recorded their own parse failure internally and nothing ever consulted it, so a truncated zip, a two-byte pickle, 200 bytes of random data named `.safetensors`, and a plain-text `.pt` all graded `LOW` at exit `0`.
+
+  Such files now land in the scan's error list, print in their own **Could not read** section, and exit `1`. They still appear in the SBOM — an auditor needs to see the file was present — but carry no framework label and no risk verdict, marked with `aisbom:unreadable` and `aisbom:unreadable_type` properties. A format label is applied only when that format's parser actually succeeded, so random bytes are no longer described as SafeTensors. `aisbom score` consequently refuses to grade a scan containing one.
+
+  A **git-LFS pointer** gets its own message naming the remedy (`git lfs pull`), since that is a configuration problem rather than a corrupt artifact and is the most common unreadable `.safetensors` in practice.
+
+- **`UNKNOWN` verdicts have a consequence.** An unparseable GGUF, Keras or ONNX file was already labelled honestly, but `UNKNOWN` scores below `LOW` in the risk ranking, so those scans exited `0` and the file rated *safer* than a clean model. They now exit `1` like every other unreadable file.
+
+- **A text `.pt` or `.bin` is no longer classified as a Python path config.** `.pth` is legitimately also a Python path-configuration format, and any text file in those three extensions inherited that classification — so an HTML error page saved over a checkpoint scored `LOW`. The classification is now `.pth`-only and validates against that format's actual spec (`import` statements and bare paths), verified against every `.pth` file in a real virtualenv.
+
+- **A SafeTensors header longer than the file is rejected before it is read.** Random bytes decode to an astronomical declared header length; that is now bounded by the bytes actually present, which replaces an internal `OverflowError` with a message saying what is wrong with the file.
+
+### Changed
+
+- **Telemetry reports unreadable files.** `cli_scan` gains `unreadable_count` and `unreadable_types` (a closed set: `LfsPointer`, `EmptyFile`, `TruncatedStream`, `UnrecognizedFormat`), so a wave of failed downloads is distinguishable from a wave of clones missing `git lfs pull`. Paths are never sent. `AISBOM_NO_TELEMETRY=1` still turns telemetry off.
+
 ## 1.6.0 — 2026-09-14
 
 > **`--vex` now contacts a third-party service.** When a `--vex` scan finds exact `requirements.txt` pins, it sends each pinned package name and version to the public OSV API at `api.osv.dev`. Nothing else is sent. Pass `--no-osv` or set `AISBOM_NO_OSV=1` to turn this off. The GitHub Action runs `--vex` whenever its `token` input is set, so those runs make the lookup too.

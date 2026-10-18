@@ -1151,6 +1151,36 @@ def looks_like_pickle_stream(data: bytes) -> bool:
     return False
 
 
+def pickle_content_opcode_count(data: bytes) -> int:
+    """How many opcodes past the protocol header ``data`` disassembles into.
+
+    Answers a narrower question than `looks_like_pickle_stream`: not "is this a
+    complete pickle" but "was there anything here to look at at all". Zero means
+    the disassembler got nothing beyond a bare `PROTO` byte — the file is
+    truncated or is not a pickle — which is what separates "could not read it"
+    from "read it, found nothing dangerous" (#131).
+
+    Reaching STOP is deliberately *not* required, because a real and complete
+    pickle need not be the whole file. joblib writes its arrays as raw bytes
+    directly after the pickle's STOP, so the opcode walk over a valid
+    `.pkl` from joblib's own test corpus dies on that trailing data after 54
+    content opcodes. Requiring STOP called 75 such files unreadable.
+
+    Disassembly only. The stream is never unpickled.
+    """
+    count = 0
+    try:
+        for opcode, _arg, _pos in pickletools.genops(io.BytesIO(data)):
+            if opcode.name == "PROTO":
+                # The header says which protocol follows; it is not content.
+                continue
+            count += 1
+    except Exception:
+        # A walk that dies partway still examined everything it counted.
+        pass
+    return count
+
+
 class _NullWriter:
     """Sink for `pickletools.dis`, which validates by writing a listing."""
 

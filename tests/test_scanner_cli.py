@@ -321,8 +321,15 @@ def test_deep_scanner_flags_legacy_pt_when_not_zip(tmp_path):
     scanner = DeepScanner(tmp_path)
     results = scanner.scan()
     art = {a["name"]: a for a in results["artifacts"]}[legacy.name]
-    assert art["risk_level"] == "LOW"
-    assert art["framework"] == "Python Path Config"
+    # Until #131 this asserted LOW / "Python Path Config", which is what the
+    # test's own name said it should not be: text in a `.pt` is a corrupt
+    # download or a saved error page, and nothing produces a text `.pt` path
+    # config. The path-config classification is now `.pth`-only and validated
+    # against that format's actual spec.
+    assert art["risk_level"] == "UNKNOWN (Unrecognized Format)"
+    assert art["framework"] is None
+    assert art["unreadable"] is True
+    assert [e for e in results["errors"] if e["file"].endswith(legacy.name)]
 
 
 def test_cli_scan_outputs_sbom_with_components(tmp_path):
