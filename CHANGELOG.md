@@ -1,8 +1,24 @@
 # Changelog
 
-## 1.7.0 — unreleased
+## 1.7.0 — 2026-10-25
 
+> **Scans now contact PyPI by default.** When a scan finds exact `requirements.txt` pins such as `transformers==5.13.1`, it requests each pinned package name and version from `pypi.org` to read that release's declared license. Nothing else is sent. The GitHub Action and `aisbom score` do the same.
+>
+> **Local scans can now contact Hugging Face.** A local model file in the Hugging Face cache layout, or next to a `config.json` whose `_name_or_path` names a repo, makes the scan fetch that repo's file list and model card from `huggingface.co`. What is sent is the repo id and, for a cached file, the commit from its path. The file's hash is compared on your machine. If `HF_TOKEN` is set, it is sent to `huggingface.co`, as for `hf://` scans. A tree with neither kind of file makes no request. Pass `--no-hf-lookup` or set `AISBOM_NO_HF_LOOKUP=1` to turn this off.
+>
+> **`--offline` turns off every network request**: both of these, the OSV lookup, telemetry and the update check. `AISBOM_OFFLINE=1` does the same.
+>
 > **Unreadable model files now exit `1` instead of `0`.** A file that no parser could read — a git-LFS pointer stub, an empty file, a truncated stream, a file in no recognised format — was reported as `Risk: LOW` with a confident framework label and passed as a clean scan. It is now reported as an error and exits `1`. **If your tree contains such files, a pipeline that passes today will start failing.** That is the intended signal: those files were never examined, and `--fail-on-risk` was reading `LOW` on an artifact nothing had opened. The exit-code table in the README has always documented exit `1` for "a file failed to parse".
+
+### New
+
+- **Dependency licenses from PyPI.** Library components parsed from `requirements.txt` now carry the license their package declares on PyPI, in the standard `licenses[]` field, with an `aisbom:license:source` property of `pypi`. Only exact `==` pins are looked up. Ranges such as `torch>=2.0` don't say which release is installed, so they are skipped and counted in the scan summary. The PEP 639 `License-Expression` is used first, then a valid SPDX identifier or expression in the `license` field, then a classifier that names exactly one license. A license text pasted into the field, or a classifier such as `BSD License` that doesn't say which BSD, gives no license rather than a guessed one.
+
+  In SPDX 2.3 output, SPDX-valid values become `licenseDeclared`, and `licenseConcluded` stays `NOASSERTION`. The license never affects the legal-risk status of model files. Results are cached in `~/.aisbom/pypi_license_cache.json`: 30 days for a resolved license, 24 hours for a package that declares none. If PyPI can't be reached, those dependencies carry no license, the scan prints a warning, and exit codes are unchanged. The lookup runs only for CycloneDX and SPDX 2.3 output, the two formats with a field for it.
+
+- **Model cards for local files downloaded from Hugging Face.** A local model file can now get the same `modelCard` data an `hf://` scan produces. The evidence is either the Hugging Face cache path (`models--<org>--<name>/snapshots/<commit>/`) or a `config.json` beside the file whose `_name_or_path` is a repo id. The card is added only if the file's hash appears in that repo's file list, and an `aisbom:hf:match` property records which evidence matched. A file whose bytes aren't in the repo, such as a fine-tune that still names its base model, gets no card. Neither does a file that matches more than one repo. The lookup runs for CycloneDX 1.7 and SPDX 3.0 output, and in `aisbom score`.
+
+- **`--offline` for air-gapped scans.** `aisbom scan --offline` and `aisbom score --offline` make no network access: no PyPI, OSV or Hugging Face lookup, no telemetry and no update check. `AISBOM_OFFLINE=1` does the same for any command. `hf://` and `https://` targets and `--share` are refused with exit `1`, because each needs the network. The SBOM is otherwise the same, minus the dependency licenses, CVE statements and model cards those lookups would have added. The air-gapped guide now recommends it.
 
 ### Fixed
 
