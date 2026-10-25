@@ -81,6 +81,7 @@ TARGET_ERROR_TYPES = frozenset({
     "MissingTarget",
     "UnsupportedFileType",
     "NotAFileOrDirectory",
+    "ListingTruncated",
 })
 
 # Why a file carrying a model extension could not be read (#131). Same closed
@@ -277,7 +278,12 @@ NONSTANDARD_CONTAINER_MAGICS = (
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 
-from aisbom.remote import RemoteStream, fetch_huggingface_model_card, resolve_huggingface_repo
+from aisbom.remote import (
+    RemoteStream,
+    fetch_huggingface_model_card,
+    hf_repo_relative_path,
+    resolve_huggingface_repo,
+)
 
 
 class _GGUFTruncated(Exception):
@@ -325,30 +331,42 @@ class DeepScanner:
             if targets and self.root_path.startswith("hf://"):
                 self.hf_model_card = fetch_huggingface_model_card(self.root_path)
 
+            # A listing that stopped at its page cap still had files left. What
+            # was listed is scanned below, but the scan must not pass as
+            # complete: this lands in errors, so the CLI exits 1.
+            if getattr(targets, "truncated", False):
+                self._record_target_error(
+                    self.root_path,
+                    f"File listing truncated after {targets.pages_read} pages; "
+                    "files beyond that were not scanned",
+                    "ListingTruncated",
+                )
+
             for url in targets:
                 ext = Path(url).suffix.lower()
+                name = self._remote_artifact_name(url)
                 # Per-target isolation: one gated/missing file in a multi-file
                 # repo records its error and continues, so the rest still scan.
                 try:
                     if ext in PYTORCH_EXTENSIONS:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_pytorch(stream, Path(url).name, is_remote=True))
+                            self.artifacts.append(self._inspect_pytorch(stream, name, is_remote=True))
                     elif ext == SAFETENSORS_EXTENSION:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_safetensors(stream, Path(url).name, is_remote=True))
+                            self.artifacts.append(self._inspect_safetensors(stream, name, is_remote=True))
                     elif ext == GGUF_EXTENSION:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_gguf(stream, Path(url).name, is_remote=True))
+                            self.artifacts.append(self._inspect_gguf(stream, name, is_remote=True))
                     elif ext in KERAS_EXTENSIONS:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_keras(stream, Path(url).name, is_remote=True))
+                            self.artifacts.append(self._inspect_keras(stream, name, is_remote=True))
                     elif ext == ONNX_EXTENSION:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_onnx(stream, Path(url).name, is_remote=True))
+                            self.artifacts.append(self._inspect_onnx(stream, name, is_remote=True))
                     elif ext in PICKLE_VARIANT_EXTENSIONS:
                         with RemoteStream(url) as stream:
                             self.artifacts.append(
-                                self._inspect_pickle_variant(stream, Path(url).name, is_remote=True)
+                                self._inspect_pickle_variant(stream, name, is_remote=True)
                             )
                 except Exception as e:
                     self._record_fetch_error(url, e)
@@ -400,6 +418,20 @@ class DeepScanner:
             "hf_model_card": self.hf_model_card,
             "artifact_paths": [self._local_paths.get(i) for i in range(len(self.artifacts))],
         }
+
+    def _remote_artifact_name(self, url: str) -> str:
+        """Component name for a remote artifact.
+
+        For `hf://` it is the file's path inside the repo, because the listing
+        reaches subfolders and two same-named files in different folders must
+        not collide. A root-level file keeps its bare filename, as before.
+        A plain URL target is a single file and keeps its basename.
+        """
+        if self.root_path.startswith("hf://"):
+            rel = hf_repo_relative_path(url, self.root_path)
+            if rel:
+                return rel
+        return Path(url).name
 
     def _resolve_remote_targets(self, target: str):
         if target.startswith("hf://"):

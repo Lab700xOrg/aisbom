@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- **`scan hf://` now scans model files in subfolders.** The Hugging Face file listing was read without `recursive=true` and only its first page was used, so every supported file under a folder (`onnx/`, `unet/`, `text_encoder/`, …) was skipped without a word. A repo whose weights all live in subfolders scanned as "No AI models found" and exited `0`. The listing now reaches every depth and follows every page. A failure on any page fails the scan the way a first-page failure always has, and a next-page link that leaves `huggingface.co` is refused, since the token is sent with each page. **Expect more components, and possibly new findings, from repos you already scan.**
+
 - **"Could not read it" is no longer reported as "read it, it's clean".** `LOW` asserts that AIsbom opened an artifact and found nothing dangerous; for a file no parser could read, the honest answer is different. Five inspectors already recorded their own parse failure internally and nothing ever consulted it, so a truncated zip, a two-byte pickle, 200 bytes of random data named `.safetensors`, and a plain-text `.pt` all graded `LOW` at exit `0`.
 
   Such files now land in the scan's error list, print in their own **Could not read** section, and exit `1`. They still appear in the SBOM — an auditor needs to see the file was present — but carry no framework label and no risk verdict, marked with `aisbom:unreadable` and `aisbom:unreadable_type` properties. A format label is applied only when that format's parser actually succeeded, so random bytes are no longer described as SafeTensors. `aisbom score` consequently refuses to grade a scan containing one.
@@ -19,6 +21,10 @@
 - **A SafeTensors header longer than the file is rejected before it is read.** Random bytes decode to an astronomical declared header length; that is now bounded by the bytes actually present, which replaces an internal `OverflowError` with a message saying what is wrong with the file.
 
 ### Changed
+
+- **`hf://` components in subfolders are named by their path in the repo.** `onnx/model.onnx` and `openvino/model.onnx` are now two distinguishable components rather than two named `model.onnx`. Files at the repo root keep the bare filename they had before, so existing `aisbom diff` baselines still match them.
+
+- **A file listing that has to stop early is an error.** The listing is capped at 100 pages (about 100,000 entries) so a pathological repo cannot hold a scan forever. If the cap is reached, everything listed is still scanned, and the scan reports `ListingTruncated` and exits `1` instead of passing on a partial view. `cli_error` telemetry carries `ListingTruncated` as its `error_type`.
 
 - **Telemetry reports unreadable files.** `cli_scan` gains `unreadable_count` and `unreadable_types` (a closed set: `LfsPointer`, `EmptyFile`, `TruncatedStream`, `UnrecognizedFormat`), so a wave of failed downloads is distinguishable from a wave of clones missing `git lfs pull`. Paths are never sent. `AISBOM_NO_TELEMETRY=1` still turns telemetry off.
 
