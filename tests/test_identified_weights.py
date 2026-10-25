@@ -269,6 +269,29 @@ def test_openvino_ir_graph_with_a_leading_comment_counts(tmp_path):
     assert art["framework"] == "OpenVINO IR"
 
 
+@pytest.mark.parametrize("xml_head", [
+    b"<!-- -->" * 30 + b"x",                    # 30 comments, no root
+    b"<!-- -->" * 500,                          # fills the 4 KB sniff window
+    b"<?xml version='1.0'?>" + b"<!---->" * 580 + b"<netx",
+])
+def test_ir_graph_check_is_linear_on_hostile_prologs(xml_head):
+    """A run of comments with no <net> root after it must fail fast.
+
+    The first version used one regex for the whole prolog, and it backtracked
+    exponentially here: 30 comments already took seconds.
+    """
+    import time
+
+    start = time.perf_counter()
+    assert DeepScanner._is_openvino_ir_graph(xml_head) is False
+    assert time.perf_counter() - start < 0.1
+
+
+def test_ir_graph_check_accepts_a_byte_order_mark_and_many_comments():
+    head = "﻿<?xml version='1.0'?>\n".encode() + b"<!-- a -->\n" * 50 + b"<net name='m'>"
+    assert DeepScanner._is_openvino_ir_graph(head) is True
+
+
 def test_pickle_payload_next_to_an_ir_graph_is_still_critical(tmp_path):
     """The sibling explains raw bytes; it does not excuse a pickle."""
     (tmp_path / "openvino_model.xml").write_text(_OPENVINO_XML)

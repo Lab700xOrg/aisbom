@@ -307,10 +307,10 @@ COREML_SENTINEL = struct.pack("<I", 0xDEADBEEF)
 # OpenVINO IR: the `.bin` is bare tensor data with no header at all, so the
 # only evidence is the same-stem `.xml` graph beside it, whose root is <net>.
 OPENVINO_XML_SNIFF_BYTES = 4096
-_OPENVINO_NET_ROOT = re.compile(
-    r"\A\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*<net[\s/>]",
-    re.DOTALL,
-)
+# Matched only after the prolog has been skipped by hand. A single regex that
+# also skipped comments backtracked exponentially on a run of comments with no
+# root after them, and the sibling `.xml` is attacker-supplied.
+_OPENVINO_NET_ROOT = re.compile(r"<net[\s/>]")
 
 # ModelProto's top-level fields and their wire types, for recognising ONNX
 # under a PyTorch extension. ONNX has no magic number; what it does have is a
@@ -971,9 +971,25 @@ class DeepScanner:
 
     @staticmethod
     def _is_openvino_ir_graph(xml_head: bytes) -> bool:
+        """True if the XML's root element is <net>, OpenVINO IR's graph root.
+
+        The prolog (XML declaration, then comments) is skipped with plain
+        `find` calls, each starting past the last, so the cost is linear in
+        the head size whatever the input.
+        """
         # The head is cut at a fixed size, possibly mid-character.
-        text = xml_head.decode("utf-8", errors="replace")
-        return bool(_OPENVINO_NET_ROOT.match(text.lstrip("\ufeff")))
+        text = xml_head.decode("utf-8", errors="replace").lstrip("\ufeff").lstrip()
+        if text.startswith("<?xml"):
+            end = text.find("?>")
+            if end < 0:
+                return False
+            text = text[end + 2:].lstrip()
+        while text.startswith("<!--"):
+            end = text.find("-->", 4)
+            if end < 0:
+                return False
+            text = text[end + 3:].lstrip()
+        return bool(_OPENVINO_NET_ROOT.match(text))
 
     @classmethod
     def _looks_like_pth_config(cls, content: bytes) -> bool:
