@@ -78,7 +78,7 @@ def _unsupported_target(tmp_path):
 
 def test_target_error_types_are_a_closed_set():
     assert TARGET_ERROR_TYPES == frozenset(
-        {"MissingTarget", "UnsupportedFileType", "NotAFileOrDirectory"}
+        {"MissingTarget", "UnsupportedFileType", "NotAFileOrDirectory", "ListingTruncated"}
     )
 
 
@@ -258,3 +258,37 @@ def test_clean_scan_reports_zero_target_errors(cli_env):
     runner.invoke(app, ["scan", str(clean)])
     (scan,) = _scans(cli_env["events"])
     assert scan["target_error_count"] == "0"
+
+
+def test_truncated_hf_listing_exits_1_and_emits_listing_truncated(cli_env, monkeypatch):
+    """A repo too large to list in full must not pass as a clean scan."""
+    import io
+    import struct
+
+    import aisbom.remote as remote
+    import aisbom.scanner as scanner_module
+
+    class _Stream:
+        def __init__(self, url):
+            header = b'{"__metadata__":{}}'
+            self._buf = io.BytesIO(struct.pack("<Q", len(header)) + header)
+
+        def __enter__(self):
+            return self._buf
+
+        def __exit__(self, *a):
+            return False
+
+    listing = remote.HFRepoListing(
+        ["https://huggingface.co/o/m/resolve/main/model.safetensors"],
+        truncated=True,
+        pages_read=100,
+    )
+    monkeypatch.setattr(scanner_module, "resolve_huggingface_repo", lambda t: listing)
+    monkeypatch.setattr(scanner_module, "RemoteStream", _Stream)
+    monkeypatch.setattr(scanner_module, "fetch_huggingface_model_card", lambda t: None)
+
+    result = runner.invoke(app, ["scan", "hf://o/m"])
+
+    assert result.exit_code == 1
+    assert [e["error_type"] for e in _errors(cli_env["events"])] == ["ListingTruncated"]

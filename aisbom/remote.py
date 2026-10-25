@@ -1,7 +1,7 @@
 import os
 import re
 from typing import List, Optional, Any, Dict
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 # Per ADR-0001: bearer credentials are sent only to this exact host. HF's
 # resolve endpoint 302-redirects byte fetches to a presigned LFS CDN / S3 host;
@@ -143,23 +143,38 @@ def _supported_extensions() -> List[str]:
     )
 
 
-def resolve_huggingface_repo(repo_id: str) -> List[str]:
+# The tree API pages at 1,000 entries, so this reads up to ~100k entries.
+# No real model repo comes close; the cap exists so a pathological listing
+# cannot hold a scan forever. Hitting it is reported, never silent.
+_HF_LISTING_MAX_PAGES = 100
+
+
+class HFRepoListing(list):
+    """The download URLs of a repo's supported model files.
+
+    A plain list of URL strings, so callers that iterate it are unaffected,
+    plus whether the listing stopped at the page cap with more pages left.
+    A truncated listing means some files were never seen, and the scanner
+    must say so instead of reporting the repo clean.
+    """
+
+    def __init__(self, urls=(), truncated: bool = False, pages_read: int = 0):
+        super().__init__(urls)
+        self.truncated = truncated
+        self.pages_read = pages_read
+
+
+def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
     """
     Resolve a Hugging Face repo into a list of file URLs for supported model artifacts.
     Accepts repo ids with or without the hf:// prefix.
+
+    The listing is recursive and follows every page. Without both, files in
+    subfolders (`onnx/`, `unet/`, `text_encoder/`, ...) were never fetched,
+    and a repo whose weights all live in subfolders scanned as empty.
     """
     if repo_id.startswith("hf://"):
         repo_id = repo_id[len("hf://") :]
-
-    api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
-    # Let fetch failures propagate (no broad swallow): a 401/403 on a
-    # private/gated repo, a 404 typo, or a network error must surface to the
-    # scanner as a real error with a status-aware hint — returning [] here is
-    # what produced the silent "0 artifacts found" (#58). A successful 200 with
-    # no supported files still returns [] below, which is correct.
-    resp = requests.get(api_url, headers=_auth_headers(api_url))
-    resp.raise_for_status()
-    data = resp.json()
 
     # Derived from the scanner's own dispatch sets rather than restated here.
     # A format missing from this list is silently skipped for `hf://` scans — a
@@ -168,13 +183,62 @@ def resolve_huggingface_repo(repo_id: str) -> List[str]:
     # happens. The import is function-local because `scanner` imports this
     # module, so a module-level one would be circular.
     supported_exts = tuple(_supported_extensions())
-    urls = []
-    for entry in data:
-        path = entry.get("path", "")
-        if any(path.endswith(ext) for ext in supported_exts):
-            urls.append(f"https://huggingface.co/{repo_id}/resolve/main/{path}")
 
-    return urls
+    url: Optional[str] = f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"
+    urls: List[str] = []
+    pages_read = 0
+    while url and pages_read < _HF_LISTING_MAX_PAGES:
+        # Let fetch failures propagate (no broad swallow): a 401/403 on a
+        # private/gated repo, a 404 typo, or a network error must surface to
+        # the scanner as a real error with a status-aware hint — returning []
+        # here is what produced the silent "0 artifacts found" (#58). This
+        # holds for every page: a listing that fails halfway is not a smaller
+        # repo. A successful listing with no supported files still returns
+        # an empty list, which is correct.
+        resp = requests.get(url, headers=_auth_headers(url))
+        resp.raise_for_status()
+        page = resp.json()
+        if not isinstance(page, list):
+            raise ValueError(f"Hugging Face file listing for {repo_id} was not a list")
+        pages_read += 1
+
+        for entry in page:
+            if entry.get("type") == "directory":
+                continue
+            path = entry.get("path", "")
+            if any(path.endswith(ext) for ext in supported_exts):
+                urls.append(
+                    f"https://huggingface.co/{repo_id}/resolve/main/{quote(path, safe='/')}"
+                )
+
+        url = ((getattr(resp, "links", None) or {}).get("next") or {}).get("url")
+        # The token rides on every request to huggingface.co, so a next link
+        # pointing anywhere else is refused rather than followed.
+        if url and urlparse(url).hostname != _HF_HOST:
+            raise ValueError(
+                f"Hugging Face file listing for {repo_id} linked its next page "
+                f"outside huggingface.co"
+            )
+
+    return HFRepoListing(urls, truncated=bool(url), pages_read=pages_read)
+
+
+def hf_repo_relative_path(url: str, repo_id: str) -> Optional[str]:
+    """The repo-relative path of a URL built by `resolve_huggingface_repo`, else None.
+
+    Used as the component name for `hf://` artifacts, so two `model.onnx`
+    files in different folders stay distinguishable. A file at the repo root
+    yields its bare filename, which is the name it always had.
+
+    Matches the exact prefix the resolver builds rather than searching the
+    path for "resolve", which a repo can itself be named.
+    """
+    if repo_id.startswith("hf://"):
+        repo_id = repo_id[len("hf://") :]
+    prefix = f"https://huggingface.co/{repo_id}/resolve/main/"
+    if not url.startswith(prefix):
+        return None
+    return unquote(url[len(prefix) :]) or None
 
 
 # The model-card fetch is deliberately capped well below the file-listing

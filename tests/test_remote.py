@@ -568,3 +568,187 @@ def test_file_index_and_card_refuse_malformed_ids_without_a_request(monkeypatch,
     monkeypatch.setattr(remote.requests, "get", explode)
     assert fetch_huggingface_file_index(repo_id, revision) is None
     assert fetch_huggingface_model_card(repo_id, revision) is None
+
+
+# ---------------------------------------------------------------------------
+# Recursive, paginated hf:// listing. Model files in subfolders must be
+# scanned, every page must be read, and a listing that stopped early must be
+# reported rather than passed off as the whole repo.
+# ---------------------------------------------------------------------------
+
+_LIST_PAGE1 = "https://huggingface.co/api/models/org/model/tree/main?recursive=true"
+_LIST_PAGE2 = _LIST_PAGE1 + "&cursor=page2"
+_LIST_PAGE3 = _LIST_PAGE1 + "&cursor=page3"
+_RESOLVE = "https://huggingface.co/org/model/resolve/main/"
+
+
+def _tree_page(entries, next_url=None):
+    resp = _mock_response(json.dumps(entries).encode(), status=200)
+    resp.links = {"next": {"url": next_url}} if next_url else {}
+    return resp
+
+
+def _serve_listing(monkeypatch, pages):
+    """Serve `pages` (url -> response or exception) and record each URL asked for."""
+    seen = []
+
+    def fake_get(url, headers=None):
+        seen.append(url)
+        result = pages[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(remote, "requests", remote._RequestsStub())
+    monkeypatch.setattr(remote.requests, "get", fake_get)
+    return seen
+
+
+def test_resolve_lists_nested_tree_across_pages(monkeypatch):
+    seen = _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([
+            {"path": "model.safetensors", "type": "file"},
+            {"path": "README.md", "type": "file"},
+            {"path": "onnx", "type": "directory"},
+            {"path": "onnx/model.onnx", "type": "file"},
+        ], next_url=_LIST_PAGE2),
+        _LIST_PAGE2: _tree_page([
+            {"path": "unet/diffusion_pytorch_model.bin", "type": "file"},
+            {"path": "text_encoder/fp16/model.safetensors", "type": "file"},
+        ]),
+    })
+
+    urls = resolve_huggingface_repo("hf://org/model")
+
+    assert list(urls) == [
+        _RESOLVE + "model.safetensors",
+        _RESOLVE + "onnx/model.onnx",
+        _RESOLVE + "unet/diffusion_pytorch_model.bin",
+        _RESOLVE + "text_encoder/fp16/model.safetensors",
+    ]
+    assert seen == [_LIST_PAGE1, _LIST_PAGE2]
+    assert urls.truncated is False
+
+
+def test_resolve_skips_directory_entries_with_model_extensions(monkeypatch):
+    # A folder can be named like a model file; it has no bytes to fetch.
+    _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([
+            {"path": "weights.pt", "type": "directory"},
+            {"path": "weights.pt/data.pt", "type": "file"},
+        ]),
+    })
+    assert list(resolve_huggingface_repo("org/model")) == [_RESOLVE + "weights.pt/data.pt"]
+
+
+def test_resolve_quotes_paths_in_download_urls(monkeypatch):
+    _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([{"path": "my dir/model #1.safetensors", "type": "file"}]),
+    })
+    assert list(resolve_huggingface_repo("org/model")) == [
+        _RESOLVE + "my%20dir/model%20%231.safetensors"
+    ]
+
+
+def test_resolve_propagates_a_failure_on_a_later_page(monkeypatch):
+    # A listing that fails halfway is not a smaller repo: it must fail the
+    # same way a first-page failure does.
+    _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([{"path": "model.pt", "type": "file"}], next_url=_LIST_PAGE2),
+        _LIST_PAGE2: _http_error(500),
+    })
+    with pytest.raises(_requests.exceptions.HTTPError):
+        resolve_huggingface_repo("org/model")
+
+
+def test_resolve_refuses_a_next_link_to_another_host(monkeypatch):
+    # The token is sent to huggingface.co on every page, so a next link that
+    # points anywhere else must not be followed.
+    elsewhere = "https://mirror.example.com/api/models/org/model/tree/main?cursor=x"
+    seen = _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([{"path": "model.pt", "type": "file"}], next_url=elsewhere),
+    })
+    with pytest.raises(ValueError, match="huggingface.co"):
+        resolve_huggingface_repo("org/model")
+    assert seen == [_LIST_PAGE1]
+
+
+def test_resolve_rejects_a_page_that_is_not_a_list(monkeypatch):
+    _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _mock_response(b'{"error": "Invalid cursor"}', status=200),
+    })
+    with pytest.raises(ValueError, match="not a list"):
+        resolve_huggingface_repo("org/model")
+
+
+def test_resolve_reports_truncation_at_the_page_cap(monkeypatch):
+    monkeypatch.setattr(remote, "_HF_LISTING_MAX_PAGES", 2)
+    seen = _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([{"path": "a.pt", "type": "file"}], next_url=_LIST_PAGE2),
+        _LIST_PAGE2: _tree_page([{"path": "b/b.pt", "type": "file"}], next_url=_LIST_PAGE3),
+    })
+
+    urls = resolve_huggingface_repo("org/model")
+
+    assert list(urls) == [_RESOLVE + "a.pt", _RESOLVE + "b/b.pt"]
+    assert urls.truncated is True
+    assert urls.pages_read == 2
+    assert seen == [_LIST_PAGE1, _LIST_PAGE2]
+
+
+def test_resolve_last_page_at_the_cap_is_not_truncation(monkeypatch):
+    monkeypatch.setattr(remote, "_HF_LISTING_MAX_PAGES", 2)
+    _serve_listing(monkeypatch, {
+        _LIST_PAGE1: _tree_page([{"path": "a.pt", "type": "file"}], next_url=_LIST_PAGE2),
+        _LIST_PAGE2: _tree_page([{"path": "b.pt", "type": "file"}]),
+    })
+    assert resolve_huggingface_repo("org/model").truncated is False
+
+
+def test_scanner_names_hf_components_by_repo_relative_path(monkeypatch):
+    urls = [
+        "https://huggingface.co/o/m/resolve/main/model.safetensors",
+        "https://huggingface.co/o/m/resolve/main/onnx/model.safetensors",
+        "https://huggingface.co/o/m/resolve/main/a/b/model.safetensors",
+        "https://huggingface.co/o/m/resolve/main/my%20dir/x.safetensors",
+    ]
+    monkeypatch.setattr(scanner_module, "resolve_huggingface_repo", lambda t: urls)
+    monkeypatch.setattr(scanner_module, "RemoteStream", _FakeRemoteStream)
+    monkeypatch.setattr(scanner_module, "fetch_huggingface_model_card", lambda t: None)
+
+    results = DeepScanner("hf://o/m").scan()
+
+    # Root-level files keep the bare name they always had; nested ones are
+    # told apart by their folder.
+    assert [a["name"] for a in results["artifacts"]] == [
+        "model.safetensors",
+        "onnx/model.safetensors",
+        "a/b/model.safetensors",
+        "my dir/x.safetensors",
+    ]
+
+
+def test_plain_https_target_keeps_its_basename(monkeypatch):
+    monkeypatch.setattr(scanner_module, "RemoteStream", _FakeRemoteStream)
+    results = DeepScanner("https://example.com/files/deep/model.safetensors").scan()
+    assert [a["name"] for a in results["artifacts"]] == ["model.safetensors"]
+
+
+def test_scanner_records_a_truncated_listing_as_a_target_error(monkeypatch):
+    listing = remote.HFRepoListing(
+        ["https://huggingface.co/o/m/resolve/main/good.safetensors"],
+        truncated=True,
+        pages_read=100,
+    )
+    monkeypatch.setattr(scanner_module, "resolve_huggingface_repo", lambda t: listing)
+    monkeypatch.setattr(scanner_module, "RemoteStream", _FakeRemoteStream)
+    monkeypatch.setattr(scanner_module, "fetch_huggingface_model_card", lambda t: None)
+
+    results = DeepScanner("hf://o/m").scan()
+
+    # What was listed is still scanned; the rest is an error, never silence.
+    assert [a["name"] for a in results["artifacts"]] == ["good.safetensors"]
+    (err,) = [e for e in results["errors"] if e.get("target_error")]
+    assert err["file"] == "hf://o/m"
+    assert err["target_error_type"] == "ListingTruncated"
+    assert "100" in err["error"]
