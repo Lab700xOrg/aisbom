@@ -158,10 +158,15 @@ class HFRepoListing(list):
     must say so instead of reporting the repo clean.
     """
 
-    def __init__(self, urls=(), truncated: bool = False, pages_read: int = 0):
+    def __init__(self, urls=(), truncated: bool = False, pages_read: int = 0,
+                 paths=()):
         super().__init__(urls)
         self.truncated = truncated
         self.pages_read = pages_read
+        # Every file in the repo, scanned or not. A format that is identified
+        # by a companion file (OpenVINO's `.xml` graph beside its `.bin`) is
+        # checked against this, so a missing companion costs no request.
+        self.paths = frozenset(paths)
 
 
 def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
@@ -186,6 +191,7 @@ def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
 
     url: Optional[str] = f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"
     urls: List[str] = []
+    all_paths: List[str] = []
     pages_read = 0
     while url and pages_read < _HF_LISTING_MAX_PAGES:
         # Let fetch failures propagate (no broad swallow): a 401/403 on a
@@ -206,6 +212,8 @@ def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
             if entry.get("type") == "directory":
                 continue
             path = entry.get("path", "")
+            if path:
+                all_paths.append(path)
             if any(path.endswith(ext) for ext in supported_exts):
                 urls.append(
                     f"https://huggingface.co/{repo_id}/resolve/main/{quote(path, safe='/')}"
@@ -220,7 +228,7 @@ def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
                 f"outside huggingface.co"
             )
 
-    return HFRepoListing(urls, truncated=bool(url), pages_read=pages_read)
+    return HFRepoListing(urls, truncated=bool(url), pages_read=pages_read, paths=all_paths)
 
 
 def hf_repo_relative_path(url: str, repo_id: str) -> Optional[str]:

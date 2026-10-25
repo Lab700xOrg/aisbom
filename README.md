@@ -87,6 +87,7 @@ Need the older schema for a downstream tool? `--schema-version 1.6` (or `1.5`) s
 | **GGUF** | `.gguf` | License and architecture metadata, plus the embedded Jinja **chat template**, checked for sandbox-escape constructs. |
 | **ONNX** | `.onnx` | Producer/opset/IR metadata, custom operators, and external-data paths that point outside the model directory. |
 | **SafeTensors** | `.safetensors` | Header metadata, tensor inventory, and license. Safe by construction — no code path. |
+| **CTranslate2, OpenVINO IR, Core ML weights** | `.bin` | Recognised by content, after the pickle scan finds nothing: the CTranslate2 header and spec name (faster-whisper), an OpenVINO `.bin` whose same-name `.xml` graph sits beside it, and the Core ML weight-blob header inside an `.mlpackage` or `.mlmodelc`. Rated `LOW`: none of them is a pickle or runs code on load. A `.bin` matching none of these is still `CRITICAL (Legacy Binary)`. |
 | **Dependencies** | `requirements.txt` | Pinned packages, emitted as SBOM components. |
 
 Don't like reading JSON? [Open the viewer →](https://aisbom.io/viewer?ref=cli-readme), drag your `sbom.json` in, and get an instant dashboard of risks, license issues, and compliance stats. *The viewer is client-side only — your data never leaves your browser.*

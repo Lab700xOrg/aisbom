@@ -6,7 +6,7 @@ import zlib
 import struct
 import hashlib
 from typing import List, Dict, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from pip_requirements_parser import RequirementsFile
 from aisbom import pickle_containers as pc
 from aisbom import protobuf_reader as pb
@@ -275,6 +275,52 @@ NONSTANDARD_CONTAINER_MAGICS = (
     (b"\x89LZO", "lzo"),
 )
 
+# --- Weights formats recognised by content ---
+# Every one of these used to reach the `CRITICAL (Legacy Binary)` catch-all,
+# which exists because an unknown binary cannot be proven safe. These are not
+# unknown: each is matched on structure a real writer always produces, and
+# matching only ever happens *after* the pickle scan has found nothing, so the
+# header cannot be used to excuse a payload.
+
+# A zip's local-file header. Every torch checkpoint starts with it.
+ZIP_LOCAL_HEADER_MAGIC = b"PK\x03\x04"
+
+# CTranslate2 `model.bin`: uint32 binary version, then (from version 2) a
+# uint16-length, NUL-terminated spec name such as `WhisperSpec`, a uint32 spec
+# revision and a uint32 variable count. Version 1 carries no spec name and is
+# left in the catch-all rather than matched on a bare integer.
+CT2_MIN_BINARY_VERSION = 2
+CT2_MAX_BINARY_VERSION = 16
+CT2_MAX_NAME_BYTES = 256
+CT2_MAX_VARIABLES = 1_000_000
+_CT2_SPEC_NAME = re.compile(rb"[A-Za-z][A-Za-z0-9_]*Spec")
+_CT2_VARIABLE_NAME = re.compile(rb"[A-Za-z0-9_./\-]+")
+
+# Core ML weight blob (`weight.bin` in an `.mlpackage` or compiled `.mlmodelc`):
+# a 64-byte storage header of uint32 count, uint32 version 2 and 56 reserved
+# zero bytes, then the first blob's metadata, which opens with 0xDEADBEEF.
+# Checked against five files across four repos and both package layouts.
+COREML_BLOB_VERSION = 2
+COREML_HEADER_BYTES = 64
+COREML_SENTINEL = struct.pack("<I", 0xDEADBEEF)
+
+# OpenVINO IR: the `.bin` is bare tensor data with no header at all, so the
+# only evidence is the same-stem `.xml` graph beside it, whose root is <net>.
+OPENVINO_XML_SNIFF_BYTES = 4096
+_OPENVINO_NET_ROOT = re.compile(
+    r"\A\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*<net[\s/>]",
+    re.DOTALL,
+)
+
+# ModelProto's top-level fields and their wire types, for recognising ONNX
+# under a PyTorch extension. ONNX has no magic number; what it does have is a
+# fixed schema, and a serializer writes ir_version (field 1) first. A head is
+# accepted only if every field in it belongs to that schema.
+_ONNX_TOP_LEVEL_WIRE_TYPES = {
+    1: 0, 2: 2, 3: 2, 4: 2, 5: 0, 6: 2, 7: 2, 8: 2, 14: 2, 20: 2, 25: 2, 26: 2,
+}
+ONNX_MAX_IR_VERSION = 32
+
 # Simple blocklist for license keywords that imply legal risk in commercial software
 RESTRICTED_LICENSES = ["non-commercial", "cc-by-nc", "agpl", "commons clause"]
 
@@ -350,7 +396,10 @@ class DeepScanner:
                 try:
                     if ext in PYTORCH_EXTENSIONS:
                         with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_pytorch(stream, name, is_remote=True))
+                            self.artifacts.append(self._inspect_pytorch(
+                                stream, name, is_remote=True,
+                                sibling_head=self._remote_sibling_reader(url, targets),
+                            ))
                     elif ext == SAFETENSORS_EXTENSION:
                         with RemoteStream(url) as stream:
                             self.artifacts.append(self._inspect_safetensors(stream, name, is_remote=True))
@@ -740,6 +789,192 @@ class DeepScanner:
                 return label
         return None
 
+    @staticmethod
+    def _has_zip_signature(stream) -> bool:
+        stream.seek(0)
+        return stream.read(len(ZIP_LOCAL_HEADER_MAGIC)) == ZIP_LOCAL_HEADER_MAGIC
+
+    @staticmethod
+    def _zip_open_error(stream) -> str:
+        """Why ``stream`` will not open as a zip, in the library's own words.
+
+        `is_zipfile` only answers yes or no; opening the archive directly is
+        what surfaces the reason — a missing end-of-archive record, or the
+        network error the first check swallowed.
+        """
+        try:
+            stream.seek(0)
+            with zipfile.ZipFile(stream):
+                pass
+        except Exception as e:
+            # zipfile re-raises an OSError from its read as a bare
+            # "File is not a zip file"; the read error is the useful part.
+            cause = e.__cause__ or e.__context__
+            if isinstance(cause, OSError):
+                e = cause
+            return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        return "the end-of-archive record could not be read"
+
+    @staticmethod
+    def _format_by_content(head: bytes) -> str | None:
+        """Name the inspector for another format's bytes under a PyTorch name.
+
+        Dispatch is by extension, and real ONNX models are published under a
+        `.pt` name. The suffix is the author's claim; the bytes are the file.
+        """
+        if head.startswith(b"GGUF"):
+            return "_inspect_gguf"
+        if len(head) > 8:
+            declared = struct.unpack("<Q", head[:8])[0]
+            if 2 <= declared <= len(head) - 8 and head[8:9] == b"{":
+                try:
+                    if isinstance(json.loads(head[8:8 + declared]), dict):
+                        return "_inspect_safetensors"
+                except ValueError:
+                    pass
+        if DeepScanner._looks_like_onnx_head(head):
+            return "_inspect_onnx"
+        return None
+
+    @staticmethod
+    def _looks_like_onnx_head(head: bytes) -> bool:
+        """True if ``head`` begins as a serialized ONNX ModelProto.
+
+        Requires: ir_version first and in range, every top-level field one the
+        schema defines with its declared wire type, and a graph or opset_import
+        reached. A one-byte match on the leading 0x08 is not enough — plenty
+        of binary data starts with it.
+        """
+        if not head.startswith(b"\x08"):
+            return False
+        for index, (number, wire_type, value) in enumerate(pb.iter_fields(head)):
+            if _ONNX_TOP_LEVEL_WIRE_TYPES.get(number) != wire_type:
+                return False
+            if index == 0 and not (number == 1 and 1 <= value <= ONNX_MAX_IR_VERSION):
+                return False
+            if number in (_ONNX_MODEL_GRAPH, _ONNX_MODEL_OPSET_IMPORT):
+                return True
+        return False
+
+    @staticmethod
+    def _local_sibling_reader(local_path: Path):
+        def read(suffix: str) -> bytes | None:
+            sibling = local_path.with_suffix(suffix)
+            if not sibling.is_file():
+                return None
+            with open(sibling, "rb") as handle:
+                return handle.read(OPENVINO_XML_SNIFF_BYTES)
+        return read
+
+    def _remote_sibling_reader(self, url: str, listing):
+        """A sibling reader for a remote file, backed by the repo listing.
+
+        Only a file the listing names is ever fetched, so a `.bin` with no IR
+        graph beside it costs no extra request. A plain URL target has no
+        listing and therefore no siblings. A listed sibling that fails to
+        fetch raises: "could not check" must not read as "unknown binary".
+        """
+        paths = getattr(listing, "paths", None)
+        if not paths or not self.root_path.startswith("hf://"):
+            return lambda suffix: None
+        rel = hf_repo_relative_path(url, self.root_path)
+
+        def read(suffix: str) -> bytes | None:
+            if rel is None:
+                return None
+            # Repo paths are always `/`-separated, whatever the host OS.
+            sibling_rel = str(PurePosixPath(rel).with_suffix(suffix))
+            if sibling_rel not in paths:
+                return None
+            ext = PurePosixPath(rel).suffix
+            sibling_url = url[: len(url) - len(ext)] + suffix
+            with RemoteStream(sibling_url) as stream:
+                return stream.read(OPENVINO_XML_SNIFF_BYTES)
+        return read
+
+    @classmethod
+    def _identify_weights_format(cls, head: bytes, name: str, local_path: Path | None,
+                                 sibling_head) -> tuple[str, Dict[str, Any]] | None:
+        """Name a non-pickle weights format, or None to leave the catch-all."""
+        ct2 = cls._ctranslate2_header(head)
+        if ct2 is not None:
+            return "CTranslate2", ct2
+
+        location = (local_path.as_posix() if local_path is not None else name) or ""
+        coreml = cls._coreml_header(head, location)
+        if coreml is not None:
+            return "Core ML", coreml
+
+        if Path(location).suffix.lower() == ".bin" and sibling_head is not None:
+            xml = sibling_head(".xml")
+            if xml is not None and cls._is_openvino_ir_graph(xml):
+                return "OpenVINO IR", {
+                    "ir_graph": Path(location).with_suffix(".xml").name,
+                    "threats": [],
+                }
+        return None
+
+    @staticmethod
+    def _ctranslate2_header(head: bytes) -> Dict[str, Any] | None:
+        try:
+            (version,) = struct.unpack_from("<I", head, 0)
+            if not CT2_MIN_BINARY_VERSION <= version <= CT2_MAX_BINARY_VERSION:
+                return None
+            (name_len,) = struct.unpack_from("<H", head, 4)
+            if not 2 <= name_len <= CT2_MAX_NAME_BYTES:
+                return None
+            raw_name = head[6:6 + name_len]
+            if len(raw_name) != name_len or not raw_name.endswith(b"\x00"):
+                return None
+            spec = raw_name[:-1]
+            if not _CT2_SPEC_NAME.fullmatch(spec):
+                return None
+            pos = 6 + name_len
+            revision, variables = struct.unpack_from("<II", head, pos)
+            if not 1 <= variables <= CT2_MAX_VARIABLES:
+                return None
+            pos += 8
+            # The first variable's name, which every model has: one more
+            # length-prefixed, NUL-terminated identifier.
+            (var_len,) = struct.unpack_from("<H", head, pos)
+            var_name = head[pos + 2:pos + 2 + var_len]
+            if (var_len < 2 or len(var_name) != var_len
+                    or not var_name.endswith(b"\x00")
+                    or not _CT2_VARIABLE_NAME.fullmatch(var_name[:-1])):
+                return None
+        except struct.error:
+            return None
+        return {
+            "binary_version": version,
+            "spec": spec.decode("ascii"),
+            "spec_revision": revision,
+            "variable_count": variables,
+            "threats": [],
+        }
+
+    @staticmethod
+    def _coreml_header(head: bytes, location: str) -> Dict[str, Any] | None:
+        parts = location.replace("\\", "/").split("/")
+        in_weights_dir = len(parts) >= 3 and parts[-2] == "weights" and (
+            parts[-3] == "com.apple.CoreML" or parts[-3].endswith(".mlmodelc")
+        )
+        if not in_weights_dir:
+            return None
+        if len(head) < COREML_HEADER_BYTES + len(COREML_SENTINEL):
+            return None
+        count, version = struct.unpack_from("<II", head, 0)
+        if (version != COREML_BLOB_VERSION
+                or head[8:COREML_HEADER_BYTES] != b"\x00" * (COREML_HEADER_BYTES - 8)
+                or head[COREML_HEADER_BYTES:COREML_HEADER_BYTES + 4] != COREML_SENTINEL):
+            return None
+        return {"blob_version": version, "blob_count": count, "threats": []}
+
+    @staticmethod
+    def _is_openvino_ir_graph(xml_head: bytes) -> bool:
+        # The head is cut at a fixed size, possibly mid-character.
+        text = xml_head.decode("utf-8", errors="replace")
+        return bool(_OPENVINO_NET_ROOT.match(text.lstrip("\ufeff")))
+
     @classmethod
     def _looks_like_pth_config(cls, content: bytes) -> bool:
         """True if ``content`` is a Python path-configuration file (#131).
@@ -887,13 +1122,23 @@ class DeepScanner:
         incomplete = PICKLE_SCAN_INCOMPLETE in (threats or [])
         return [t for t in (threats or []) if t != PICKLE_SCAN_INCOMPLETE], incomplete
 
-    def _inspect_pytorch(self, source, name: str | None = None, is_remote: bool = False) -> Dict[str, Any]:
-        """Peeks inside PyTorch."""
+    def _inspect_pytorch(self, source, name: str | None = None, is_remote: bool = False,
+                         sibling_head=None) -> Dict[str, Any]:
+        """Peeks inside PyTorch.
+
+        ``sibling_head(suffix)`` returns the head of the same-stem file with
+        that suffix, or None when there is none. Only OpenVINO IR needs it: its
+        `.bin` is raw tensor data, so the `.xml` graph beside it is the only
+        evidence of what it is. Local scans read the neighbour from disk;
+        remote scans pass a reader that consults the repo listing first.
+        """
         local_path = None
         if isinstance(source, (str, Path)):
             local_path = Path(source)
             name = name or local_path.name
             is_remote = False
+            if sibling_head is None:
+                sibling_head = self._local_sibling_reader(local_path)
         name = name or getattr(source, "name", "unknown")
 
         meta = {
@@ -915,7 +1160,38 @@ class DeepScanner:
             else:
                 stream = source
 
-            if zipfile.is_zipfile(stream):
+            # `zipfile.is_zipfile` swallows every OSError, and every `requests`
+            # error is one. A single failed Range read of the end-of-archive
+            # record therefore made a torch zip look like an unknown binary,
+            # and that is how an ordinary 1.26 GB checkpoint was once rated
+            # `CRITICAL (Legacy Binary)`. A file that *starts* like a
+            # zip gets one more try, and if it still will not open, the scan
+            # says it could not read it rather than delivering a verdict.
+            is_zip = zipfile.is_zipfile(stream)
+            zip_failure = None
+            if not is_zip and self._has_zip_signature(stream):
+                is_zip = zipfile.is_zipfile(stream)
+                if not is_zip:
+                    zip_failure = self._zip_open_error(stream)
+
+            if zip_failure is not None:
+                # Still disassembled first: a payload outranks a read failure.
+                stream.seek(0)
+                content = stream.read(PICKLE_MAX_SCAN_BYTES)
+                threats, _ = self._split_scan_incomplete(
+                    scan_pickle_stream(bytes(content), strict_mode=self.strict_mode)
+                )
+                meta["details"]["threats"] = threats
+                if threats:
+                    meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
+                else:
+                    unreadable = (
+                        "TruncatedStream",
+                        "starts with a ZIP header but the archive could not be "
+                        f"opened ({zip_failure}) — a truncated download or an "
+                        "incomplete read; re-scan once the file is complete",
+                    )
+            elif is_zip:
                 stream.seek(0)
                 with zipfile.ZipFile(stream, 'r') as z:
                     files = z.namelist()
@@ -983,12 +1259,44 @@ class DeepScanner:
                         meta["details"]["scan_incomplete"] = True
                     self._apply_lint(meta, content)
 
+                    rerouted = None
+                    identified = None
+                    if not threats and not incomplete and not looks_like_pickle_stream(content):
+                        rerouted = self._format_by_content(content)
+                        if rerouted is None:
+                            identified = self._identify_weights_format(
+                                content, name, local_path, sibling_head,
+                            )
+
                     if threats:
                         meta["risk_level"] = f"CRITICAL (RCE Detected: {', '.join(threats)})"
                     elif incomplete:
                         meta["risk_level"] = "MEDIUM (Pickle Scan Incomplete)"
                     elif looks_like_pickle_stream(content):
                         meta["risk_level"] = "MEDIUM (Pickle Present)"
+                    elif rerouted is not None:
+                        # Another format's bytes under a PyTorch name. Its own
+                        # inspector reads it — including its own failure modes
+                        # — and the result says the extension was not trusted.
+                        inspector = getattr(self, rerouted)
+                        if local_path is None:
+                            stream.seek(0)
+                        result = (
+                            inspector(local_path) if local_path is not None
+                            else inspector(stream, name, is_remote=True)
+                        )
+                        result["name"] = name
+                        result.setdefault("details", {})["identified_by_content"] = True
+                        return result
+                    elif identified is not None:
+                        framework, details = identified
+                        # A format named by structural evidence, holding no
+                        # pickle (the scan above ran first and found none),
+                        # whose loader does not deserialize code: graded like
+                        # SafeTensors and GGUF.
+                        meta["framework"] = framework
+                        meta["risk_level"] = "LOW"
+                        meta["details"].update(details)
                     elif (
                         Path(name).suffix.lower() == ".pth"
                         and self._looks_like_pth_config(content)

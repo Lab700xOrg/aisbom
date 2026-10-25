@@ -49,7 +49,9 @@ SHAPES = [
     ("truncated_pickle.pkl", b"\x80\x05", "TruncatedStream"),
     ("random.safetensors", b"\x91\x3f" * 100, "TruncatedStream"),
     ("garbage.pt", b"totally not a model at all", "UnrecognizedFormat"),
-    ("truncated_zip.pt", b"PK\x03\x04corrupt-not-a-real-zip", "UnrecognizedFormat"),
+    # A zip header that will not open is a truncated archive. It used
+    # to reach the text check, and only printable filler kept it off CRITICAL.
+    ("truncated_zip.pt", b"PK\x03\x04corrupt-not-a-real-zip", "TruncatedStream"),
 ]
 
 

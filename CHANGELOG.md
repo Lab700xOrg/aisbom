@@ -6,6 +6,17 @@
 
 ### Fixed
 
+- **Common non-pickle weights files no longer score `CRITICAL (Legacy Binary)`.** A `.pt`/`.pth`/`.bin` that was not a zip, a pickle, or a path config fell into a catch-all that rated it CRITICAL and exited `2`. In a scan of the 500 most-downloaded Hugging Face models, every HIGH or CRITICAL result came from that catch-all and none was a payload. Three weights formats are now recognised by their content and rated `LOW`, like SafeTensors and GGUF, because none is a pickle or runs code on load:
+  - **CTranslate2** `model.bin`, which covers every faster-whisper model: recognised by its version header and spec name (`WhisperSpec`, …).
+  - **OpenVINO IR** `.bin`: recognised only when its same-name `.xml` graph sits beside it. On `hf://` scans, the repo listing is checked first, so a `.bin` with no graph costs no extra request.
+  - **Core ML** `weight.bin` inside an `.mlpackage` or compiled `.mlmodelc`: recognised by its weight-blob header.
+
+  Their components carry `aisbom:format` values `ctranslate2`, `openvino` and `coreml`. The pickle scan still runs first, so a payload under any of these names is still CRITICAL. A `.bin` matching none of them is still `CRITICAL (Legacy Binary)`. With recursive `hf://` scans (below), this is what keeps `hf://sentence-transformers/all-MiniLM-L6-v2` and `hf://google-bert/bert-base-uncased` from failing on their `openvino/` and `coreml/` folders.
+
+- **ONNX, SafeTensors and GGUF files with a PyTorch extension are inspected as what they are.** Dispatch used to be by extension alone, so an ONNX model saved as `.pt` went through the pickle path and came out `CRITICAL (Legacy Binary)`. Such a file now goes to its own format's inspector. The component is marked `identified_by_content` in its details.
+
+- **A failed read of a torch checkpoint is an error, not `CRITICAL`.** Python's zip check swallows network errors, so one failed Range request on a remote checkpoint made an ordinary torch zip look like an unknown binary. A file that starts with a zip header now gets a second check. If it still won't open, it is reported as unreadable (`TruncatedStream`, exit `1`) with the underlying error, never as a verdict. A local truncated zip gets the same treatment, so its `unreadable_type` changes from `UnrecognizedFormat` to `TruncatedStream`.
+
 - **`scan hf://` now scans model files in subfolders.** The Hugging Face file listing was read without `recursive=true` and only its first page was used, so every supported file under a folder (`onnx/`, `unet/`, `text_encoder/`, …) was skipped without a word. A repo whose weights all live in subfolders scanned as "No AI models found" and exited `0`. The listing now reaches every depth and follows every page. A failure on any page fails the scan the way a first-page failure always has, and a next-page link that leaves `huggingface.co` is refused, since the token is sent with each page. **Expect more components, and possibly new findings, from repos you already scan.**
 
 - **"Could not read it" is no longer reported as "read it, it's clean".** `LOW` asserts that AIsbom opened an artifact and found nothing dangerous; for a file no parser could read, the honest answer is different. Five inspectors already recorded their own parse failure internally and nothing ever consulted it, so a truncated zip, a two-byte pickle, 200 bytes of random data named `.safetensors`, and a plain-text `.pt` all graded `LOW` at exit `0`.
