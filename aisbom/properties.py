@@ -29,6 +29,11 @@ _FRAMEWORK_TO_FORMAT = {
     "Pickle": "pickle",
     "Joblib": "joblib",
     "NumPy": "numpy",
+    # Weights formats recognised by content under a `.bin` name. None carries
+    # a pickle, so none joins the pickle vocabulary below.
+    "CTranslate2": "ctranslate2",
+    "OpenVINO IR": "openvino",
+    "Core ML": "coreml",
 }
 
 # Formats whose findings are pickle opcodes. They share the `aisbom:pickle:*`
