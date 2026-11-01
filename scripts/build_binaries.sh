@@ -27,7 +27,22 @@ poetry run pyinstaller \
     --collect-all=spdx_tools \
     --hidden-import=rich \
     --hidden-import=requests \
+    --exclude-module=brotli \
+    --exclude-module=_brotli \
+    --exclude-module=brotlicffi \
     run_aisbom.py
+
+# Keep brotli out of the binary. It arrives only through py7zr (used to build
+# the 7z case of `bypass-scorecard`, which works fine without brotli), but
+# urllib3 turns on brotli response decoding whenever brotli is importable. So
+# bundling it would put a native decoder on the path of every remote scan for
+# no benefit to users. Fail the build if it ever comes back.
+FORBIDDEN='(^|[^A-Za-z0-9_])(_?brotli|brotlicffi)([^A-Za-z0-9_]|$)'
+if poetry run pyi-archive_viewer --recursive --brief dist/aisbom | grep -E "$FORBIDDEN"; then
+    echo "FAIL: brotli (listed above) was bundled into dist/aisbom" >&2
+    exit 1
+fi
+echo "OK: brotli not bundled"
 
 echo "Build complete. Binary is at dist/aisbom"
 ls -lh dist/aisbom
