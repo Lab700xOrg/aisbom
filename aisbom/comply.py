@@ -304,16 +304,35 @@ def _intro(w: _Writer, title: str, target: str, *, legend: bool = True) -> None:
 # EU AI Act — Annex XI
 # ---------------------------------------------------------------------------
 
+# Every per-format threat property the scanner writes (see `properties.py`),
+# with the label the summary gives it.
+_THREAT_PROPERTIES = (
+    ("aisbom:pickle:opcode", "dangerous imports"),
+    ("aisbom:keras:threat", "Keras threats"),
+    ("aisbom:gguf:chat_template_threat", "chat template threats"),
+    ("aisbom:onnx:threat", "ONNX threats"),
+)
+
+_ELEVATED_RISKS = ("CRITICAL", "HIGH")
+
+
 def _findings(component: Dict[str, Any]) -> str:
     notes: List[str] = []
-    opcodes = _prop_values(component, "aisbom:pickle:opcode")
-    if opcodes:
-        notes.append("dangerous imports: " + ", ".join(opcodes))
+    for prop, label in _THREAT_PROPERTIES:
+        values = _prop_values(component, prop)
+        if values:
+            notes.append(f"{label}: " + ", ".join(values))
     if _prop_values(component, "aisbom:unreadable"):
         notes.append("not readable by any parser; not inspected")
     if _prop_values(component, "aisbom:pickle:scan_incomplete"):
         notes.append("pickle scan incomplete")
-    return "; ".join(notes) or "none"
+    if notes:
+        return "; ".join(notes)
+    # A threat property this module does not know yet must not read as a
+    # clean bill of health beside an elevated rating.
+    if any(r.upper().startswith(_ELEVATED_RISKS) for r in _prop_values(component, "aisbom:risk")):
+        return f"see the AIsbom risk rating and {SBOM_FILE}"
+    return "none"
 
 
 def _annex_xi(facts: _Facts, target: str) -> _Writer:

@@ -260,6 +260,43 @@ def test_security_findings_are_listed_with_their_opcodes():
     assert "posix.system" in annex
 
 
+def _model_with(fmt, risk, props):
+    return {
+        "components": [{
+            "type": "machine-learning-model",
+            "name": f"m.{fmt}",
+            "bom-ref": f"artifact-0-m.{fmt}",
+            "properties": [
+                {"name": "aisbom:format", "value": fmt},
+                {"name": "aisbom:risk", "value": risk},
+                *[{"name": n, "value": v} for n, v in props],
+            ],
+        }],
+    }
+
+
+@pytest.mark.parametrize("fmt,prop,value", [
+    ("keras", "aisbom:keras:threat", "Lambda layer: marshalled bytecode"),
+    ("gguf", "aisbom:gguf:chat_template_threat", "jinja: __globals__ access"),
+    ("onnx", "aisbom:onnx:threat", "custom operator domain: evil.ops"),
+])
+def test_non_pickle_threats_are_listed(fmt, prop, value):
+    """The summary must never contradict the SBOM it bundles."""
+    annex = _eu(_model_with(fmt, "CRITICAL", [(prop, value)]))[comply.ANNEX_XI_FILE]
+    row = next(line for line in annex.splitlines() if line.startswith(f"| m.{fmt}"))
+    assert value in row
+    assert "| none |" not in row
+
+
+def test_a_high_risk_file_never_reads_none():
+    """A threat property this module does not know yet still cannot surface
+    as 'none' beside a CRITICAL rating."""
+    annex = _eu(_model_with("newfmt", "CRITICAL (something)", []))[comply.ANNEX_XI_FILE]
+    row = next(line for line in annex.splitlines() if line.startswith("| m.newfmt"))
+    assert "| none |" not in row
+    assert "sbom.json" in row
+
+
 def test_pipes_in_file_names_do_not_break_tables():
     annex = _eu(_local_sbom())[comply.ANNEX_XI_FILE]
     row = next(line for line in annex.splitlines() if "weights" in line and line.startswith("|"))
