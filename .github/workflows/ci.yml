@@ -94,3 +94,19 @@ jobs:
           if poetry run aisbom scan hf://google-bert/bert-base-uncased --offline --no-fail-on-risk; then
             echo "::error::--offline scanned a remote target"; exit 1
           fi
+
+      # Both frameworks, one local and one remote target, and every file each
+      # pack promises — so a pack that silently dropped a document fails here.
+      - name: Smoke Test #14 - Documentation Packs (comply)
+        run: |
+          poetry run aisbom comply hf://google-bert/bert-base-uncased --framework eu-ai-act --output-dir comply-eu
+          test -s comply-eu/annex-xi-technical-documentation.md
+          test -s comply-eu/art53-training-content-summary.md
+          test -s comply-eu/sbom.json
+          test -s comply-eu/README.md
+          poetry run aisbom comply demo_data --framework fda --output-dir comply-fda
+          test -s comply-fda/sbom.json
+          test -s comply-fda/sbom.openvex.json
+          test -s comply-fda/sbom.vex.cdx.json
+          test -s comply-fda/component-support.csv
+          test -s comply-fda/README.md
