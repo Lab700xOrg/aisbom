@@ -484,6 +484,34 @@ per-document denominator is not comparable with anyone else's.
 `aisbom score` grades CycloneDX. SPDX input is rejected rather than partially
 scored.
 
+### Documentation packs (`aisbom comply`)
+
+`aisbom comply` scans a target and writes a folder of regulator-facing
+documents pre-filled from what the scan read:
+
+```bash
+aisbom comply hf://google-bert/bert-base-uncased --framework eu-ai-act
+aisbom comply ./models --framework fda --output-dir ./submission/sbom
+```
+
+| `--framework` | Writes |
+|---|---|
+| `eu-ai-act` | `annex-xi-technical-documentation.md` (Annex XI skeleton), `art53-training-content-summary.md` (in the sections of the Commission's training-content template), `sbom.json`, `README.md` |
+| `fda` | `sbom.json`, `sbom.openvex.json`, `sbom.vex.cdx.json`, `component-support.csv` (support level and end-of-support date per component), `README.md` |
+
+A field is filled only from something the scan read, such as the model card's
+task, architecture, licence and declared datasets, file formats, hashes and
+security findings. Each value names its source. Everything else, including
+provider identity, release dates, training process, compute and lifecycle
+dates, is left as `TODO (provider)` rather than guessed.
+[docs/comply.md](docs/comply.md) lists every field and where its value comes
+from.
+
+The pack describes files, not your organisation, and is not legal advice.
+A scan with an unreadable target exits `1` and writes nothing. Otherwise the
+command exits `0` whatever the findings; gate CI with `aisbom scan`. `--offline`,
+`--no-osv` and `--no-hf-lookup` work as they do for `scan`.
+
 ---
 
 ## Use as a GitHub Action
@@ -696,6 +724,10 @@ If you explicitly use `--share`: the generated `sbom.json` document is uploaded 
 
 Per `aisbom diff`: a `cli_diff` event with `has_drift=true|false`.
 
+Per `aisbom score`: a `cli_score` event with the letter `grade` and the number of `models`.
+
+Per `aisbom comply`: a `cli_comply` event with the `framework` (`eu-ai-act` or `fda`). The generated documents are never sent.
+
 On a scan fetch failure or unhandled exception: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`), a low-cardinality `http_status` bucket (e.g. `401`, `timeout`), a `token_present` boolean (whether an `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` was set), and a `consecutive_failures` bucket (`1`–`9` or `10+` — how many runs in a row hit the same failure shape) — never the token value, the message, the traceback, a URL, or any file content.
 
 When the scan target itself is unusable (a path that doesn't exist, a file no scanner supports, or something that isn't a regular file or directory): a `cli_error` event with the same fields, where `error_type` is one of a fixed set — `MissingTarget`, `UnsupportedFileType`, or `NotAFileOrDirectory` — and `http_status` is `none`. Never the path, the file name, or its extension.
@@ -706,17 +738,17 @@ To detect failure loops (see [Authentication](#authentication-private--gated-hug
 
 Each event carries an anonymous `user_id` — a SHA-256 of your machine's MAC address plus an app salt, truncated to 16 hex chars. Stored in `~/.aisbom/config.json`. Lets us see returning users without identifying anyone.
 
-### OSV lookups (`--vex` only)
+### OSV lookups (`--vex` and `comply --framework fda` only)
 
-When you pass `--vex` and the scan finds exact `requirements.txt` pins, AIsbom sends each pinned **package name and version** to the public OSV API at `https://api.osv.dev`, and fetches the advisories it names. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-osv`, `AISBOM_NO_OSV=1` or `--offline` does. Responses are cached locally in `~/.aisbom/osv_cache.json` for 24 hours, and deleting that file is always safe.
+When you pass `--vex`, or run `aisbom comply --framework fda`, and the scan finds exact `requirements.txt` pins, AIsbom sends each pinned **package name and version** to the public OSV API at `https://api.osv.dev`, and fetches the advisories it names. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-osv`, `AISBOM_NO_OSV=1` or `--offline` does. Responses are cached locally in `~/.aisbom/osv_cache.json` for 24 hours, and deleting that file is always safe.
 
 ### PyPI license lookups (on by default)
 
-When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output, AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
+When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output (including the SBOM `aisbom score` and `aisbom comply` build), AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
 
 ### Hugging Face model-card lookups (local scans)
 
-When a local scan writes CycloneDX 1.7 or SPDX 3.0 output (or `aisbom score` grades a directory) and a model file is in the Hugging Face cache layout, or sits next to a `config.json` whose `_name_or_path` looks like `org/name`, AIsbom asks `https://huggingface.co` for that repo's file list (`/api/models/<repo>/tree/<revision>`, one request per page) and, if the file's hash is in that list, its model card (`/api/models/<repo>` or `/revision/<commit>`). Each repo is asked once per scan however many of its files are present. What is sent is the **repo id** and, for cached files, the **commit** from the cache path. The hash comparison happens on your machine, so no file paths, file names, hashes or findings are sent. A `_name_or_path` that is a single name, looks like a path, or names a directory that exists next to the file is never sent. A tree with none of this evidence makes no request. If `HF_TOKEN` is set it is sent to `huggingface.co` as for `hf://` scans, so matches in private repos you can access work too. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-hf-lookup`, `AISBOM_NO_HF_LOOKUP=1` or `--offline` does. Nothing is cached.
+When a local scan writes CycloneDX 1.7 or SPDX 3.0 output (or `aisbom score` or `aisbom comply` scans a directory) and a model file is in the Hugging Face cache layout, or sits next to a `config.json` whose `_name_or_path` looks like `org/name`, AIsbom asks `https://huggingface.co` for that repo's file list (`/api/models/<repo>/tree/<revision>`, one request per page) and, if the file's hash is in that list, its model card (`/api/models/<repo>` or `/revision/<commit>`). Each repo is asked once per scan however many of its files are present. What is sent is the **repo id** and, for cached files, the **commit** from the cache path. The hash comparison happens on your machine, so no file paths, file names, hashes or findings are sent. A `_name_or_path` that is a single name, looks like a path, or names a directory that exists next to the file is never sent. A tree with none of this evidence makes no request. If `HF_TOKEN` is set it is sent to `huggingface.co` as for `hf://` scans, so matches in private repos you can access work too. This is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-hf-lookup`, `AISBOM_NO_HF_LOOKUP=1` or `--offline` does. Nothing is cached.
 
 ### What's never collected
 
@@ -734,7 +766,7 @@ export AISBOM_NO_TELEMETRY=1
 AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
 ```
 
-`AISBOM_OFFLINE=1` (or `--offline` on `scan` and `score`) goes further: it disables telemetry and also every other network request — the update check and the PyPI, OSV and Hugging Face model-card lookups.
+`AISBOM_OFFLINE=1` (or `--offline` on `scan`, `score` and `comply`) goes further: it disables telemetry and also every other network request — the update check and the PyPI, OSV and Hugging Face model-card lookups.
 
 ### Where the data goes
 

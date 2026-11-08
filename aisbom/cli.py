@@ -16,6 +16,7 @@ from .scanner import DeepScanner
 from .diff import SBOMDiff
 from .cyclonedx_gen import build_cyclonedx_json
 from . import score as score_mod
+from . import comply as comply_mod
 from .vex import (
     baseline_findings,
     derive_statements,
@@ -521,8 +522,9 @@ def _emit_vex(
     schema_version: str,
     dependencies: list[dict] | None = None,
     osv_enabled: bool = False,
-) -> None:
-    """Write the VEX document(s) that accompany a just-written SBOM.
+) -> list:
+    """Write the VEX document(s) that accompany a just-written SBOM, and
+    return the statements they carry.
 
     The serial number is read back out of the serialized SBOM rather than off
     the ``Bom`` object: it is the value the file on disk actually carries, and
@@ -598,6 +600,8 @@ def _emit_vex(
                 "(only exact == pins are looked up)"
             )
         console.print(line + ".[/dim]")
+
+    return statements
 
 
 def _generate_markdown(results: dict) -> str:
@@ -1345,6 +1349,57 @@ def bypass_scorecard(
         console.print("\n[green]Scorecard gate passed[/green] — no case below the floor.")
 
 
+def _scan_whole_target(
+    target: str,
+    *,
+    strict: bool,
+    no_hf_lookup: bool,
+    progress: Console,
+    telemetry_threads: list,
+    refusal: str,
+    consequence: str,
+) -> dict:
+    """Scan TARGET for a command that builds a document from the result, and
+    exit 1 unless every file was read.
+
+    A fetch or parse failure is recorded in ``results["errors"]`` and the scan
+    returns normally. A document built from what survived would silently
+    describe a release missing the file that failed, so `score` and `comply`
+    refuse it, as `scan` already exits 1 on the same errors.
+
+    The enrichment `scan` applies runs here too, so the document describes the
+    file a scan would have written.
+    """
+    progress.print(
+        Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]")
+    )
+    try:
+        scanner = DeepScanner(target, strict_mode=strict, lint=False)
+        with progress.status("[cyan]Scanning...[/cyan]"):
+            results = scanner.scan()
+    except Exception as exc:
+        console.print(f"[bold red]✖ Scan failed:[/bold red] {exc}")
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=1)
+
+    if results.get("errors"):
+        console.print(
+            f"[bold red]✖ {refusal}[/bold red] — "
+            f"{len(results['errors'])} target(s) could not be read:"
+        )
+        for err in results["errors"]:
+            console.print(
+                f"  [red]•[/red] {err.get('file', '?')}: {err.get('error', '?')}"
+            )
+        console.print(f"\n[dim]{consequence}[/dim]")
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=1)
+
+    _resolve_dependency_licenses(results, progress)
+    _match_local_model_cards(results, target, no_hf_lookup, progress)
+    return results
+
+
 def _render_score_footer() -> None:
     """Print the post-score footer, mirroring `scan`'s "Next steps" panel.
 
@@ -1471,44 +1526,18 @@ def score(
         # machine-readable result *only*, so a progress panel on stdout would
         # make `aisbom score <dir> --json | jq` fail on the first line.
         progress = err_console if json_output else console
-        progress.print(
-            Panel.fit(f"🚀 [bold cyan]AIsbom[/bold cyan] Scanning: [underline]{target}[/underline]")
+        results = _scan_whole_target(
+            target,
+            strict=strict,
+            no_hf_lookup=no_hf_lookup,
+            progress=progress,
+            telemetry_threads=telemetry_threads,
+            refusal="Refusing to score a partial scan",
+            consequence=(
+                "A grade computed from only the artifacts that scanned "
+                "would overstate the document's completeness."
+            ),
         )
-        try:
-            scanner = DeepScanner(target, strict_mode=strict, lint=False)
-            with progress.status("[cyan]Scanning...[/cyan]"):
-                results = scanner.scan()
-        except Exception as exc:
-            console.print(f"[bold red]✖ Scan failed:[/bold red] {exc}")
-            _flush_telemetry_threads(telemetry_threads)
-            raise typer.Exit(code=1)
-
-        # A fetch or parse failure is recorded in results["errors"] and the
-        # scan returns normally, so the except above never fires. Grading what
-        # survived would hand back a completeness score for a document that is
-        # silently missing the shard that failed — precisely the claim this
-        # command exists to make trustworthy. `scan` already exits 1 on these;
-        # scoring must not be the softer path.
-        if results.get("errors"):
-            console.print(
-                "[bold red]✖ Refusing to score a partial scan[/bold red] — "
-                f"{len(results['errors'])} target(s) could not be read:"
-            )
-            for err in results["errors"]:
-                console.print(
-                    f"  [red]•[/red] {err.get('file', '?')}: {err.get('error', '?')}"
-                )
-            console.print(
-                "\n[dim]A grade computed from only the artifacts that scanned "
-                "would overstate the document's completeness.[/dim]"
-            )
-            _flush_telemetry_threads(telemetry_threads)
-            raise typer.Exit(code=1)
-
-        # The same enrichment `scan` applies, so the grade still describes the
-        # file a scan would have written (#129).
-        _resolve_dependency_licenses(results, progress)
-        _match_local_model_cards(results, target, no_hf_lookup, progress)
         doc = json.loads(build_cyclonedx_json(results, "1.7"))
     else:
         console.print(
@@ -1602,6 +1631,147 @@ def score(
         _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=2)
 
+    _check_update_status()
+    _flush_telemetry_threads(telemetry_threads)
+
+
+class ComplyFramework(str, Enum):
+    EU_AI_ACT = "eu-ai-act"
+    FDA = "fda"
+
+
+@app.command()
+def comply(
+    target: str = typer.Argument(
+        ..., help="What to scan: a directory, a model file, an hf:// slug, or an HTTP(S) URL."
+    ),
+    framework: ComplyFramework = typer.Option(
+        ...,
+        "--framework",
+        case_sensitive=False,
+        help=(
+            "eu-ai-act: Annex XI technical documentation + Article 53 training-content "
+            "summary. fda: §524B SBOM, VEX and component support table."
+        ),
+    ),
+    output_dir: str | None = typer.Option(
+        None,
+        "--output-dir",
+        help="Folder to write the pack into. Defaults to ./aisbom-comply-<framework>.",
+    ),
+    strict: bool = typer.Option(
+        False, help="Enable strict allowlisting mode (flags any unknown imports)."
+    ),
+    no_osv: bool = typer.Option(
+        False,
+        "--no-osv",
+        help=(
+            "For --framework fda, do not query OSV (api.osv.dev) for CVEs affecting "
+            "exact requirements.txt pins. AISBOM_NO_OSV=1 does the same."
+        ),
+    ),
+    no_hf_lookup: bool = typer.Option(
+        False,
+        "--no-hf-lookup",
+        help=(
+            "When TARGET is a directory, do not ask huggingface.co for the model "
+            "card of local model files matched to their repo. "
+            "AISBOM_NO_HF_LOOKUP=1 does the same."
+        ),
+    ),
+    offline_mode: bool = typer.Option(
+        False,
+        "--offline",
+        help=(
+            "Make no network access of any kind; remote targets are refused. "
+            "AISBOM_OFFLINE=1 does the same."
+        ),
+    ),
+):
+    """
+    Generate a regulator-facing documentation pack pre-filled from a scan.
+
+    Fields are filled only from what the scan read, each tagged with its
+    source; everything else is left as a TODO for the provider. The pack
+    describes files, not your organisation, and is not legal advice.
+    """
+    offline.enable(offline_mode)
+    if not offline.is_offline():
+        t = threading.Thread(target=run_version_check_wrapper, daemon=True)
+        t.start()
+    _refuse_remote_target_offline(target)
+
+    scan_id = uuid.uuid4().hex
+    telemetry_threads: list[threading.Thread | None] = [_maybe_emit_install_event()]
+
+    if _classify_target(target) == "local" and not Path(target).exists():
+        console.print(
+            f"[bold red]✖ Cannot build a pack from[/bold red] {target}: not an existing "
+            "file or directory, an hf:// slug or an HTTP(S) URL."
+        )
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=1)
+
+    results = _scan_whole_target(
+        target,
+        strict=strict,
+        no_hf_lookup=no_hf_lookup,
+        progress=console,
+        telemetry_threads=telemetry_threads,
+        refusal="Refusing to build a pack from a partial scan",
+        consequence=(
+            "Documentation built from only the files that scanned would "
+            "describe a release that is missing the ones that failed."
+        ),
+    )
+    sbom_json = build_cyclonedx_json(results, "1.7")
+    doc = json.loads(sbom_json)
+
+    out = Path(output_dir or f"aisbom-comply-{framework.value}")
+    out.mkdir(parents=True, exist_ok=True)
+    sbom_path = out / comply_mod.SBOM_FILE
+    sbom_path.write_text(sbom_json)
+
+    vex_names: list[str] = []
+    if framework == ComplyFramework.FDA:
+        vex_names = [Path(p).name for p in _vex_paths(str(sbom_path))]
+        statements = _emit_vex(
+            sbom_json=sbom_json,
+            artifacts=results["artifacts"],
+            dependencies=results.get("dependencies", []),
+            output=str(sbom_path),
+            vex_format=VexFormat.BOTH,
+            baseline_path=None,
+            schema_version="1.7",
+            osv_enabled=not (no_osv or osv.disabled_by_env() or offline.is_offline()),
+        )
+        pack = comply_mod.build_fda_pack(
+            doc,
+            target=target,
+            vex_statements=statements,
+            vex_files=vex_names,
+        )
+        title = "FDA §524B pack"
+    else:
+        pack = comply_mod.build_eu_ai_act_pack(doc, target=target)
+        title = "EU AI Act pack"
+
+    for name, content in pack.items():
+        (out / name).write_text(content)
+
+    written = sorted([comply_mod.SBOM_FILE, *vex_names, *pack])
+    console.print(f"\n[bold green]✔ {title} written to[/bold green] {out}/")
+    for name in written:
+        console.print(f"  [dim]•[/dim] {name}")
+    console.print(
+        f"\n[dim]Start with {out / comply_mod.README_FILE}. Every "
+        f"'{comply_mod.TODO}' field needs your input, and pre-filled values "
+        "should be checked before use. This is not legal advice.[/dim]"
+    )
+
+    telemetry_threads.append(telemetry.post_event(
+        "cli_comply", {"framework": framework.value}, scan_id=scan_id,
+    ))
     _check_update_status()
     _flush_telemetry_threads(telemetry_threads)
 
