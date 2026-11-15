@@ -311,6 +311,16 @@ def rewrite_hf_web_url(target: str):
 
     parts = [p for p in parsed.path.split("/") if p]
     if parts and parts[0] in ("datasets", "spaces"):
+        # A single file in a dataset or Space is still a file. Its /resolve/
+        # URL always reached RemoteStream, and its blob page maps onto that
+        # URL exactly, so only the repo-level pages are refused.
+        repo_parts, file_rest = parts[1:3], parts[3:]
+        if len(repo_parts) == 2 and all(_REPO_SEGMENT_RE.match(s) for s in repo_parts):
+            if file_rest[:1] == ["resolve"]:
+                return None, None
+            if file_rest[:1] == ["blob"] and len(file_rest) >= 3:
+                prefix = "/".join(parts[:3])
+                return f"https://{_HF_HOST}/{prefix}/resolve/{'/'.join(file_rest[1:])}", None
         kind = parts[0][:-1]
         return None, (
             f"{target} is a Hugging Face {kind} page; aisbom scans model repos "

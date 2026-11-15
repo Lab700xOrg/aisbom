@@ -8,9 +8,9 @@
 
 - **Hugging Face page URLs are scanned.** Pasting a model's web address used to find nothing and exit `0`. Now:
   - `https://huggingface.co/<owner>/<repo>` and `…/tree/main` are scanned as `hf://<owner>/<repo>`.
-  - `…/blob/<revision>/<path>` is scanned as the file at `…/resolve/<revision>/<path>`.
+  - `…/blob/<revision>/<path>` is scanned as the file at `…/resolve/<revision>/<path>`, in a model repo, a dataset or a Space.
 
-  A dim line on stderr says which target was scanned, so you can put that form in your pipeline. Pages with no exact equivalent exit `1` with the target to use instead. These are a branch or a subfolder (`tree/dev`, `tree/main/onnx`), a dataset or Space, or anything else that isn't a model repo. An `hf://` target reads every file at `main`, so following a branch or subfolder page would scan files you didn't name. `cli_error` telemetry reports a refused page as `UnsupportedHFPageURL`. The URL and repo id are never sent.
+  A dim line on stderr says which target was scanned, so you can put that form in your pipeline. Pages with no exact equivalent exit `1` with the target to use instead. These are a branch or a subfolder (`tree/dev`, `tree/main/onnx`), a dataset or Space repo page, or anything else that isn't a model repo. An `hf://` target reads every file at `main`, so following a branch or subfolder page would scan files you didn't name. `cli_error` telemetry reports a refused page as `UnsupportedHFPageURL`. The URL and repo id are never sent.
 
 ### Fixed
 

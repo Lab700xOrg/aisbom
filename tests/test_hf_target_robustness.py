@@ -237,6 +237,11 @@ def test_repo_and_root_tree_pages_become_hf_targets(url):
      "https://huggingface.co/org/model/resolve/v1.0/model.pt"),
     ("https://huggingface.co/org/model/blob/main/my%20model.pt",
      "https://huggingface.co/org/model/resolve/main/my%20model.pt"),
+    # A file hosted in a dataset or Space is still a single file.
+    ("https://huggingface.co/datasets/org/data/blob/main/weights.safetensors",
+     "https://huggingface.co/datasets/org/data/resolve/main/weights.safetensors"),
+    ("https://hf.co/spaces/org/app/blob/main/model.pt",
+     "https://huggingface.co/spaces/org/app/resolve/main/model.pt"),
 ])
 def test_blob_pages_become_resolve_urls(url, expected):
     assert rewrite_hf_web_url(url) == (expected, None)
@@ -244,6 +249,10 @@ def test_blob_pages_become_resolve_urls(url, expected):
 
 @pytest.mark.parametrize("url", [
     "https://huggingface.co/org/model/resolve/main/model.pt",
+    # Direct file URLs in datasets and Spaces always reached RemoteStream;
+    # refusing the repo pages must not refuse these.
+    "https://huggingface.co/datasets/org/data/resolve/main/weights.safetensors",
+    "https://huggingface.co/spaces/org/app/resolve/main/model.safetensors",
     "https://example.com/org/model/tree/main",
     "https://cdn-lfs.huggingface.co/repos/ab/cd/file",
     "hf://org/model",
@@ -262,6 +271,7 @@ def test_non_page_targets_are_left_alone(url):
     ("https://huggingface.co/org/model/discussions", "hf://org/model"),
     ("https://huggingface.co/datasets/org/data", "model repos"),
     ("https://huggingface.co/spaces/org/app", "model repos"),
+    ("https://huggingface.co/datasets/org/data/tree/main", "model repos"),
     ("https://huggingface.co/gpt2", "hf://<owner>/<repo>"),
     ("https://huggingface.co/", "hf://<owner>/<repo>"),
 ])

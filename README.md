@@ -164,8 +164,8 @@ An `hf://` target reads every file in the repo at `main`. A model's web address 
 | You pass | Scanned as |
 |---|---|
 | `https://huggingface.co/<owner>/<repo>` or `…/tree/main` | `hf://<owner>/<repo>` |
-| `https://huggingface.co/<owner>/<repo>/blob/<rev>/<path>` | that file, via `…/resolve/<rev>/<path>` |
-| `…/tree/<branch>`, `…/tree/main/<folder>`, a dataset or Space page | refused with exit `1` and the target to use instead |
+| `https://huggingface.co/<owner>/<repo>/blob/<rev>/<path>` (also in a dataset or Space) | that file, via `…/resolve/<rev>/<path>` |
+| `…/tree/<branch>`, `…/tree/main/<folder>`, a dataset or Space repo page | refused with exit `1` and the target to use instead |
 
 Requests to Hugging Face time out after 10 seconds without a connection or 60 seconds without data. A timeout exits `1`, so a stalled API fails the CI job rather than hanging it.
 
