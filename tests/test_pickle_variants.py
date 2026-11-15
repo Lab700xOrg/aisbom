@@ -629,7 +629,7 @@ def test_hf_repo_resolution_returns_the_new_formats(monkeypatch):
             pass
 
     monkeypatch.setattr(remote, "requests", remote._RequestsStub())
-    monkeypatch.setattr(remote.requests, "get", lambda url, headers=None: Resp())
+    monkeypatch.setattr(remote.requests, "get", lambda url, headers=None, timeout=None: Resp())
 
     urls = remote.resolve_huggingface_repo("hf://org/model")
     resolved = {u.rsplit("/", 1)[-1] for u in urls}
@@ -862,7 +862,7 @@ def test_bare_pickle_shares_the_pytorch_format_token(tmp_path):
 
 def _serve(content):
     """A Range-request server over one in-memory blob."""
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = (headers or {}).get("Range", "bytes=0-0")
         start, _, end = rng.split("=")[1].partition("-")
         start = int(start)

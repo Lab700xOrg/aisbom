@@ -27,7 +27,7 @@ def _mock_response(content: bytes, status=206, headers=None):
 def test_remote_stream_read_and_seek(monkeypatch):
     data = b"HelloRemoteWorld"
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = headers.get("Range", "bytes=0-0")
         # Parse bytes=start-end
         start_end = rng.split("=")[1]
@@ -56,7 +56,7 @@ def test_resolve_huggingface_repo(monkeypatch):
         {"path": "weights.gguf", "type": "file"},
     ]
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         return _mock_response(json.dumps(tree).encode(), status=200)
 
     import aisbom.remote as remote
@@ -79,7 +79,7 @@ def test_remote_scanner_detects_pickle_threat(monkeypatch, tmp_path):
         zf.writestr("archive/version", "3")
     content = zip_bytes.read_bytes()
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = headers.get("Range", "bytes=0-0")
         start_end = rng.split("=")[1]
         start, end = start_end.split("-")
@@ -135,7 +135,7 @@ def test_remote_stream_sends_bearer_per_request_to_hf(monkeypatch):
     data = b"HelloRemoteWorld"
     seen_headers = []
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         seen_headers.append(headers or {})
         rng = (headers or {}).get("Range", "bytes=0-0")
         start_end = rng.split("=")[1]
@@ -164,7 +164,7 @@ def test_remote_stream_no_bearer_on_non_hf_host(monkeypatch):
     data = b"data"
     seen_headers = []
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         seen_headers.append(headers or {})
         rng = (headers or {}).get("Range", "bytes=0-0")
         start_end = rng.split("=")[1]
@@ -188,7 +188,7 @@ def test_resolve_huggingface_repo_sends_bearer(monkeypatch):
     tree = [{"path": "model.pt", "type": "file"}]
     seen_headers = []
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         seen_headers.append(headers or {})
         return _mock_response(json.dumps(tree).encode(), status=200)
 
@@ -218,7 +218,7 @@ def _http_error(status: int) -> _requests.exceptions.HTTPError:
 def test_resolve_huggingface_repo_propagates_401(monkeypatch):
     """A private/gated repo must raise (caller surfaces a hint), not return []."""
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         raise _http_error(401)
 
     monkeypatch.setattr(remote, "requests", remote._RequestsStub())
@@ -592,7 +592,7 @@ def _serve_listing(monkeypatch, pages):
     """Serve `pages` (url -> response or exception) and record each URL asked for."""
     seen = []
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         seen.append(url)
         result = pages[url]
         if isinstance(result, Exception):

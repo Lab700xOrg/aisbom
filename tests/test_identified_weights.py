@@ -497,7 +497,7 @@ def test_remote_ir_graph_that_fails_to_fetch_is_an_error_not_critical(monkeypatc
 
 
 def test_listing_keeps_every_path_for_sibling_checks(monkeypatch):
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         resp = requests.Response()
         resp.status_code = 200
         resp._content = (

@@ -125,7 +125,7 @@ xattr -d com.apple.quarantine aisbom-macos-*
 
 ### Scan targets and exit codes
 
-`scan` accepts a directory, a single model file, a `hf://` repo, or an HTTPS URL. A directory is walked recursively; a single file is scanned on its own.
+`scan` accepts a directory, a single model file, a `hf://` repo, or an HTTPS URL. A directory is walked recursively; a single file is scanned on its own. A URL must point at a model file; one that no scanner claims (a `.zip`, a web page) exits `1`.
 
 | Exit | Meaning |
 |---|---|
@@ -158,6 +158,16 @@ aisbom scan hf://google-bert/bert-base-uncased
 ```
 
 We use HTTP Range requests to inspect just the headers — scans complete in seconds and use zero disk. Verify SafeTensors compliance before you `git clone`.
+
+An `hf://` target reads every file in the repo at `main`. A model's web address works too:
+
+| You pass | Scanned as |
+|---|---|
+| `https://huggingface.co/<owner>/<repo>` or `…/tree/main` | `hf://<owner>/<repo>` |
+| `https://huggingface.co/<owner>/<repo>/blob/<rev>/<path>` (also in a dataset or Space) | that file, via `…/resolve/<rev>/<path>` |
+| `…/tree/<branch>`, `…/tree/main/<folder>`, a dataset or Space repo page | refused with exit `1` and the target to use instead |
+
+Requests to Hugging Face time out after 10 seconds without a connection or 60 seconds without data. A timeout exits `1`, so a stalled API fails the CI job rather than hanging it.
 
 ### Authentication (private & gated Hugging Face models)
 
@@ -753,7 +763,7 @@ Per `aisbom comply`: a `cli_comply` event with the `framework` (`eu-ai-act` or `
 
 On a scan fetch failure or unhandled exception: a `cli_error` event records the exception class name only (e.g. `JSONDecodeError`), a low-cardinality `http_status` bucket (e.g. `401`, `timeout`), a `token_present` boolean (whether an `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` was set), and a `consecutive_failures` bucket (`1`–`9` or `10+` — how many runs in a row hit the same failure shape) — never the token value, the message, the traceback, a URL, or any file content.
 
-When the scan target itself is unusable (a path that doesn't exist, a file no scanner supports, or something that isn't a regular file or directory): a `cli_error` event with the same fields, where `error_type` is one of a fixed set — `MissingTarget`, `UnsupportedFileType`, or `NotAFileOrDirectory` — and `http_status` is `none`. Never the path, the file name, or its extension.
+When the scan target itself is unusable (a path that doesn't exist, a file or URL no scanner supports, something that isn't a regular file or directory, an `hf://` listing that hit its page cap, or a Hugging Face page URL with no exact `hf://` equivalent): a `cli_error` event with the same fields, where `error_type` is one of a fixed set — `MissingTarget`, `UnsupportedFileType`, `NotAFileOrDirectory`, `ListingTruncated`, or `UnsupportedHFPageURL` — and `http_status` is `none`. Never the path, the URL, the repo id, the file name, or its extension.
 
 ### Local state (no network)
 

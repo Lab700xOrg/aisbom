@@ -87,6 +87,7 @@ TARGET_ERROR_TYPES = frozenset({
     "UnsupportedFileType",
     "NotAFileOrDirectory",
     "ListingTruncated",
+    "UnsupportedHFPageURL",
 })
 
 # Why a file carrying a model extension could not be read (#131). Same closed
@@ -334,7 +335,9 @@ from aisbom.remote import (
     fetch_huggingface_model_card,
     hf_repo_relative_path,
     resolve_huggingface_repo,
+    rewrite_hf_web_url,
 )
+from urllib.parse import urlparse
 
 
 class _GGUFTruncated(Exception):
@@ -356,6 +359,16 @@ class DeepScanner:
         # Where each local artifact was read from, by artifact index. Used only
         # to match a local file back to its HF repo; never serialized.
         self._local_paths: Dict[int, Path] = {}
+        # A huggingface.co web-page URL is mapped onto its exact scannable
+        # equivalent here, before anything reads root_path, so every command
+        # that builds a scanner gets the same answer. `rewritten_from` keeps
+        # what the user typed for the CLI's note; an unmappable page is held
+        # as a problem and reported by scan() without a request.
+        self.rewritten_from: Optional[str] = None
+        new_target, self._target_problem = rewrite_hf_web_url(root_path)
+        if new_target:
+            self.rewritten_from = root_path
+            self.root_path = root_path = new_target
         self.is_remote = isinstance(root_path, str) and (
             root_path.startswith("http://")
             or root_path.startswith("https://")
@@ -368,11 +381,17 @@ class DeepScanner:
             # Resolving the repo is itself a network call; a 401/403/404 here
             # must surface as a structured error (not a swallowed empty list or
             # a raw traceback) so the CLI can render a status-aware hint.
-            try:
-                targets = self._resolve_remote_targets(self.root_path)
-            except Exception as e:
-                self._record_fetch_error(self.root_path, e)
+            if self._target_problem:
+                self._record_target_error(
+                    self.root_path, self._target_problem, "UnsupportedHFPageURL"
+                )
                 targets = []
+            else:
+                try:
+                    targets = self._resolve_remote_targets(self.root_path)
+                except Exception as e:
+                    self._record_fetch_error(self.root_path, e)
+                    targets = []
 
             # Enrichment only (#111), and only for hf:// — a plain https:// URL
             # is a single file with no repo to describe. Fetched once per scan
@@ -394,34 +413,38 @@ class DeepScanner:
                 )
 
             for url in targets:
-                ext = Path(url).suffix.lower()
+                # From the URL's path, so a query string (`?download=true`)
+                # cannot hide the extension and skip the file.
+                ext = Path(urlparse(url).path).suffix.lower()
                 name = self._remote_artifact_name(url)
+                inspect = self._remote_inspector(ext, url, name, targets)
+                if inspect is None:
+                    # Nothing claims this URL. Skipping it silently reported a
+                    # `.zip` or a web page as a clean, empty scan; the user
+                    # named this target, so declining it is a failure, as it
+                    # is for a named local file.
+                    self._record_target_error(
+                        url,
+                        f"Unsupported file type '{ext or name}' — no scanner claims this URL",
+                        "UnsupportedFileType",
+                    )
+                    continue
                 # Per-target isolation: one gated/missing file in a multi-file
                 # repo records its error and continues, so the rest still scan.
+                errors_before = len(self.errors)
                 try:
-                    if ext in PYTORCH_EXTENSIONS:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_pytorch(
-                                stream, name, is_remote=True,
-                                sibling_head=self._remote_sibling_reader(url, targets),
-                            ))
-                    elif ext == SAFETENSORS_EXTENSION:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_safetensors(stream, name, is_remote=True))
-                    elif ext == GGUF_EXTENSION:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_gguf(stream, name, is_remote=True))
-                    elif ext in KERAS_EXTENSIONS:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_keras(stream, name, is_remote=True))
-                    elif ext == ONNX_EXTENSION:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(self._inspect_onnx(stream, name, is_remote=True))
-                    elif ext in PICKLE_VARIANT_EXTENSIONS:
-                        with RemoteStream(url) as stream:
-                            self.artifacts.append(
-                                self._inspect_pickle_variant(stream, name, is_remote=True)
-                            )
+                    with RemoteStream(url) as stream:
+                        artifact = inspect(stream)
+                    # The inspectors swallow exceptions while parsing, so a
+                    # request that failed mid-file (a stall, a dropped
+                    # connection) comes back as an unreadable verdict. The
+                    # stream remembers the failure: drop that verdict and
+                    # report the fetch failure it really was.
+                    fetch_error = getattr(stream, "fetch_error", None)
+                    if fetch_error is not None:
+                        del self.errors[errors_before:]
+                        raise fetch_error
+                    self.artifacts.append(artifact)
                 except Exception as e:
                     self._record_fetch_error(url, e)
                     continue
@@ -519,7 +542,32 @@ class DeepScanner:
             rel = hf_repo_relative_path(url, self.root_path)
             if rel:
                 return rel
-        return Path(url).name
+        # The path's basename, so a query string stays out of the name. For a
+        # URL without one this is exactly the old `Path(url).name`.
+        return Path(urlparse(url).path).name or Path(url).name
+
+    def _remote_inspector(self, ext: str, url: str, name: str, targets):
+        """The inspector for a remote file, as a callable taking its stream.
+
+        None when no scanner claims the extension. Chosen before the stream is
+        opened, so a URL nothing claims costs no request.
+        """
+        if ext in PYTORCH_EXTENSIONS:
+            return lambda s: self._inspect_pytorch(
+                s, name, is_remote=True,
+                sibling_head=self._remote_sibling_reader(url, targets),
+            )
+        if ext == SAFETENSORS_EXTENSION:
+            return lambda s: self._inspect_safetensors(s, name, is_remote=True)
+        if ext == GGUF_EXTENSION:
+            return lambda s: self._inspect_gguf(s, name, is_remote=True)
+        if ext in KERAS_EXTENSIONS:
+            return lambda s: self._inspect_keras(s, name, is_remote=True)
+        if ext == ONNX_EXTENSION:
+            return lambda s: self._inspect_onnx(s, name, is_remote=True)
+        if ext in PICKLE_VARIANT_EXTENSIONS:
+            return lambda s: self._inspect_pickle_variant(s, name, is_remote=True)
+        return None
 
     def _resolve_remote_targets(self, target: str):
         if target.startswith("hf://"):

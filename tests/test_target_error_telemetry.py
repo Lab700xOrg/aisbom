@@ -78,7 +78,8 @@ def _unsupported_target(tmp_path):
 
 def test_target_error_types_are_a_closed_set():
     assert TARGET_ERROR_TYPES == frozenset(
-        {"MissingTarget", "UnsupportedFileType", "NotAFileOrDirectory", "ListingTruncated"}
+        {"MissingTarget", "UnsupportedFileType", "NotAFileOrDirectory", "ListingTruncated",
+         "UnsupportedHFPageURL"}
     )
 
 

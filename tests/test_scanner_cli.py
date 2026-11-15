@@ -686,7 +686,7 @@ def test_format_fetch_error_hf_resolve_target_uses_repo_id_and_host():
     msg = _format_fetch_error(_http_error(404), "hf://acme/private-model")
     assert "acme/private-model not found" in msg
     timeout_msg = _format_fetch_error(requests.exceptions.Timeout(), "hf://acme/private-model")
-    assert "reaching huggingface.co" in timeout_msg
+    assert "Timed out waiting for huggingface.co" in timeout_msg
 
 
 class _FetchFailingScanner:
@@ -791,7 +791,7 @@ def test_mixed_failure_modes_print_one_line_each(monkeypatch):
     flat = " ".join(result.output.split())
     assert flat.count("Authentication failed") == 1
     assert "1 more file with the same error" in flat
-    assert flat.count("Network error") == 1
+    assert flat.count("Timed out") == 1
 
 
 def test_sharded_failures_still_emit_one_cli_error_per_file(monkeypatch):
