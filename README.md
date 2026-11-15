@@ -497,15 +497,21 @@ aisbom comply ./models --framework fda --output-dir ./submission/sbom
 | `--framework` | Writes |
 |---|---|
 | `eu-ai-act` | `annex-xi-technical-documentation.md` (Annex XI skeleton), `art53-training-content-summary.md` (in the sections of the Commission's training-content template), `sbom.json`, `README.md` |
-| `fda` | `sbom.json`, `sbom.openvex.json`, `sbom.vex.cdx.json`, `component-support.csv` (support level and end-of-support date per component), `README.md` |
+| `fda` | `sbom.json`, `sbom.openvex.json`, `sbom.vex.cdx.json`, `component-support.csv` (supplier, support level and end-of-support date per component), `README.md` |
 
 A field is filled only from something the scan read, such as the model card's
-task, architecture, licence and declared datasets, file formats, hashes and
-security findings. Each value names its source. Everything else, including
-provider identity, release dates, training process, compute and lifecycle
-dates, is left as `TODO (provider)` rather than guessed.
-[docs/comply.md](docs/comply.md) lists every field and where its value comes
-from.
+task, architecture, licence, declared datasets, base model and languages, the
+parameter count, file formats, hashes and security findings. Each value names
+its source. What a card *declares* without answering the field (its
+languages, CO2 emissions, evaluation results, the repository's creation date)
+gets its own "declared" row, and readings such as modality from the task or
+supplier from the repository owner are labelled *AIsbom's mapping*. For the
+FDA pack, end-of-support dates come from
+[endoflife.date](#endoflifedate-lookups-comply---framework-fda-only) for the
+packages it tracks. Everything else, including provider identity, release
+dates, training process, compute and energy, is left as `TODO (provider)`
+rather than guessed. [docs/comply.md](docs/comply.md) lists every field and
+where its value comes from.
 
 To fill those TODOs once and keep them across runs, write a starter answers
 file, fill it in, and pass it back on every run:
@@ -526,7 +532,8 @@ full field-id list. The answers file is read locally and never sent anywhere.
 The pack describes files, not your organisation, and is not legal advice.
 A scan with an unreadable target exits `1` and writes nothing. Otherwise the
 command exits `0` whatever the findings; gate CI with `aisbom scan`. `--offline`,
-`--no-osv` and `--no-hf-lookup` work as they do for `scan`.
+`--no-osv` and `--no-hf-lookup` work as they do for `scan`; `--no-eol-lookup`
+skips the endoflife.date lookup.
 
 ---
 
@@ -760,7 +767,11 @@ When you pass `--vex`, or run `aisbom comply --framework fda`, and the scan find
 
 ### PyPI license lookups (on by default)
 
-When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output (including the SBOM `aisbom score` and `aisbom comply` build), AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
+When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3 output (including the SBOM `aisbom score` and `aisbom comply` build), AIsbom requests each pinned **package name and version** from the public PyPI JSON API at `https://pypi.org/pypi/<name>/<version>/json` to read its declared license and author. Nothing else is sent: no file paths, model names, hashes, findings, or identifiers. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--offline` or `AISBOM_OFFLINE=1` does. Answers are cached locally in `~/.aisbom/pypi_license_cache.json`, and deleting that file is always safe.
+
+### endoflife.date lookups (`comply --framework fda` only)
+
+When `aisbom comply --framework fda` finds exact `requirements.txt` pins, AIsbom asks the public endoflife.date API for each distinct **package name** (`https://endoflife.date/api/v1/products/<name>`) to fill end-of-support dates in `component-support.csv`. Versions are matched on your machine and are not sent, and neither are file paths, model names, hashes, findings, or identifiers. `aisbom scan` never makes this request. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-eol-lookup`, `AISBOM_NO_EOL_LOOKUP=1` or `--offline` does. Nothing is cached.
 
 ### Hugging Face model-card lookups (local scans)
 
@@ -782,7 +793,7 @@ export AISBOM_NO_TELEMETRY=1
 AISBOM_NO_TELEMETRY=1 aisbom scan ./my-project
 ```
 
-`AISBOM_OFFLINE=1` (or `--offline` on `scan`, `score` and `comply`) goes further: it disables telemetry and also every other network request — the update check and the PyPI, OSV and Hugging Face model-card lookups.
+`AISBOM_OFFLINE=1` (or `--offline` on `scan`, `score` and `comply`) goes further: it disables telemetry and also every other network request — the update check and the PyPI, OSV, Hugging Face model-card and endoflife.date lookups.
 
 ### Where the data goes
 

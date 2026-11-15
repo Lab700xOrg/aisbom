@@ -30,7 +30,7 @@ Sources, in order of preference:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .hf_match import MATCH_PROPERTY
 
@@ -46,7 +46,23 @@ _ML_COMPONENT_TYPE = "machine-learning-model"
 _HF_SCALAR_PROPERTIES = (
     ("library_name", "aisbom:hf:library_name"),
     ("sha", "aisbom:hf:revision"),
+    # The repo owner. Recorded as declared; whether the owner is the model's
+    # *supplier* is a rule `aisbom comply` applies, not a fact the card states.
+    ("author", "aisbom:hf:author"),
 )
+
+# Every repository that predates Hugging Face's 2022 storage migration reports
+# this exact `createdAt` (bert-base-uncased, published in 2018, among them).
+# It is when HF migrated the repo, so recording it as "first published on
+# Hugging Face" would be wrong for every older model.
+HF_MIGRATION_CREATED_AT = "2022-03-02T23:29:04.000Z"
+
+# Leaderboard-style cards list hundreds of results. A compliance pack wants the
+# declared evaluation, not every row, and an unbounded list bloats every SBOM.
+MAX_PERFORMANCE_METRICS = 50
+
+# Sub-fields of a dict-shaped `co2_eq_emissions` worth carrying, as declared.
+_CO2_FIELDS = ("source", "training_type", "geographical_location", "hardware_used")
 
 
 def _clean_str(value: Any) -> Optional[str]:
@@ -94,6 +110,117 @@ def _datasets(hf_meta: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
         # only honest value for a training corpus.
         datasets.append({"type": "dataset", "name": name})
     return datasets
+
+
+def _str_list(raw: Any) -> List[str]:
+    """A card field given as one string or a list of strings, de-duplicated."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for entry in raw:
+        value = _clean_str(entry)
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _number(value: Any) -> Optional[str]:
+    """A JSON number as text; bools (a JSON number's lookalike) are refused."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return str(value)
+
+
+def _declared_properties(hf_meta: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Model-card declarations `aisbom comply` offers as *declared* values.
+
+    Each is recorded exactly as the card or API states it. None of them is
+    asserted as the answer to a regulatory field: the card's languages are not
+    necessarily the training data's, and an emissions figure is not energy.
+    """
+    props: List[Dict[str, str]] = []
+    card = _card_data(hf_meta)
+
+    for base in _str_list(card.get("base_model")):
+        props.append({"name": "aisbom:hf:base_model", "value": base})
+    for language in _str_list(card.get("language")):
+        props.append({"name": "aisbom:hf:language", "value": language})
+
+    created = _clean_str(hf_meta.get("createdAt"))
+    if created and created != HF_MIGRATION_CREATED_AT:
+        props.append({"name": "aisbom:hf:created_at", "value": created})
+
+    # Hugging Face computes this server-side across every safetensors shard
+    # in the repo, so it does not depend on how much of the repo was scanned.
+    safetensors = hf_meta.get("safetensors")
+    total = safetensors.get("total") if isinstance(safetensors, dict) else None
+    if isinstance(total, int) and not isinstance(total, bool) and total > 0:
+        props.append({"name": "aisbom:hf:parameters_total", "value": str(total)})
+
+    co2 = card.get("co2_eq_emissions")
+    emissions = _number(co2.get("emissions") if isinstance(co2, dict) else co2)
+    if emissions is not None:
+        props.append({"name": "aisbom:hf:co2_eq_emissions", "value": emissions})
+        if isinstance(co2, dict):
+            for key in _CO2_FIELDS:
+                value = _clean_str(co2.get(key))
+                if value:
+                    props.append({"name": f"aisbom:hf:co2_eq_emissions:{key}", "value": value})
+    return props
+
+
+def _slice(result: Dict[str, Any]) -> Optional[str]:
+    """`text-classification on glue (sst2, validation)` from a model-index result."""
+    task = result.get("task")
+    task_type = _clean_str(task.get("type")) if isinstance(task, dict) else None
+    dataset = result.get("dataset")
+    name = qualifiers = None
+    if isinstance(dataset, dict):
+        name = _clean_str(dataset.get("name")) or _clean_str(dataset.get("type"))
+        qualifiers = [v for v in (_clean_str(dataset.get("config")),
+                                  _clean_str(dataset.get("split"))) if v]
+    if name and qualifiers:
+        name = f"{name} ({', '.join(qualifiers)})"
+    if task_type and name:
+        return f"{task_type} on {name}"
+    return task_type or name
+
+
+def _performance_metrics(hf_meta: Dict[str, Any]) -> Tuple[List[Dict[str, str]], int]:
+    """Map the card's `model-index` to typed `performanceMetrics`, capped.
+
+    Returns the (capped) metrics and how many the card declared in all. These
+    are the card's self-reported results; `comply` labels them as declared.
+    """
+    raw = _card_data(hf_meta).get("model-index")
+    if raw is None:
+        raw = hf_meta.get("model-index")
+    if not isinstance(raw, list):
+        return [], 0
+    metrics: List[Dict[str, str]] = []
+    for model in raw:
+        results = model.get("results") if isinstance(model, dict) else None
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if not isinstance(result, dict) or not isinstance(result.get("metrics"), list):
+                continue
+            where = _slice(result)
+            for metric in result["metrics"]:
+                if not isinstance(metric, dict):
+                    continue
+                kind = _clean_str(metric.get("type"))
+                value = metric.get("value")
+                value = _number(value) or _clean_str(value)
+                if not kind or value is None:
+                    continue
+                entry = {"type": kind, "value": value}
+                if where:
+                    entry["slice"] = where
+                metrics.append(entry)
+    return metrics[:MAX_PERFORMANCE_METRICS], len(metrics)
 
 
 def _model_parameters(art: Dict[str, Any], hf_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -169,6 +296,7 @@ def _properties(art: Dict[str, Any], hf_meta: Optional[Dict[str, Any]]) -> List[
     if hf_meta.get("private") is True:
         props.append({"name": "aisbom:hf:private", "value": "true"})
 
+    props.extend(_declared_properties(hf_meta))
     return props
 
 
@@ -195,9 +323,14 @@ def build_model_card(
         card["modelParameters"] = params
 
     props = _properties(art, hf_meta)
+    metrics, declared = _performance_metrics(hf_meta or {})
+    if metrics:
+        card["quantitativeAnalysis"] = {"performanceMetrics": metrics}
+        if declared > len(metrics):
+            props.append({"name": "aisbom:hf:model_index_truncated", "value": str(declared)})
     # Only alongside something the match actually contributed: a card holding
     # nothing but "this was matched" would describe nothing.
-    if match_source and (params or props):
+    if match_source and (params or props or metrics):
         props.append({"name": MATCH_PROPERTY, "value": match_source})
     if props:
         card["properties"] = props

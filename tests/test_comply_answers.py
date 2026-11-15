@@ -271,7 +271,7 @@ def test_fda_index_counts_components_with_provider_support_data():
     assert "provider-supplied" in readme
     plain = _fda(_local_sbom())[comply.README_FILE]
     assert "component(s) in" not in plain
-    assert f"marks both {comply.TODO}" in plain
+    assert f"marks them {comply.TODO}" in plain
 
 
 # ---------------------------------------------------------------------------
