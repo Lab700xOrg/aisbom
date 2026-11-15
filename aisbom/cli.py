@@ -512,6 +512,17 @@ def _vex_paths(output: str) -> tuple[str, str]:
     return f"{stem}.openvex.json", f"{stem}.vex.cdx.json"
 
 
+def _comply_pack_files(framework: "ComplyFramework") -> list[str]:
+    """Every file name `aisbom comply` writes into its output folder."""
+    names = [comply_mod.SBOM_FILE, comply_mod.README_FILE]
+    if framework == ComplyFramework.FDA:
+        names += [Path(p).name for p in _vex_paths(comply_mod.SBOM_FILE)]
+        names.append(comply_mod.SUPPORT_FILE)
+    else:
+        names += [comply_mod.ANNEX_XI_FILE, comply_mod.ART53_FILE]
+    return names
+
+
 def _emit_vex(
     *,
     sbom_json: str,
@@ -1687,13 +1698,31 @@ def comply(
             "AISBOM_OFFLINE=1 does the same."
         ),
     ),
+    answers_file: str | None = typer.Option(
+        None,
+        "--answers",
+        help=(
+            "YAML file of your answers, keyed by field id (see docs/comply.md), "
+            "that fills the pack's TODO fields on every run. Answers are tagged "
+            "provider-supplied and never replace a value the scan read."
+        ),
+    ),
+    write_answers_template: str | None = typer.Option(
+        None,
+        "--write-answers-template",
+        help=(
+            "Also write a starter answers file to this path, listing every field "
+            "id and the scanned components. Refuses to overwrite an existing file."
+        ),
+    ),
 ):
     """
     Generate a regulator-facing documentation pack pre-filled from a scan.
 
     Fields are filled only from what the scan read, each tagged with its
-    source; everything else is left as a TODO for the provider. The pack
-    describes files, not your organisation, and is not legal advice.
+    source; everything else is left as a TODO for the provider, or filled
+    from your --answers file. The pack describes files, not your
+    organisation, and is not legal advice.
     """
     offline.enable(offline_mode)
     if not offline.is_offline():
@@ -1708,6 +1737,51 @@ def comply(
         console.print(
             f"[bold red]✖ Cannot build a pack from[/bold red] {target}: not an existing "
             "file or directory, an hf:// slug or an HTTP(S) URL."
+        )
+        _flush_telemetry_threads(telemetry_threads)
+        raise typer.Exit(code=1)
+
+    # Check the provider's files before spending a scan on them. Neither may
+    # be a file the pack is about to write: the run would overwrite the
+    # answers, or clobber a pack file with the template.
+    out = Path(output_dir or f"aisbom-comply-{framework.value}")
+    pack_files = {(out / name).resolve(): name for name in _comply_pack_files(framework)}
+    for flag, path in (("--answers", answers_file),
+                       ("--write-answers-template", write_answers_template)):
+        if path and Path(path).resolve() in pack_files:
+            console.print(
+                f"[bold red]✖ {flag} {path}[/bold red] is the pack's own "
+                f"{pack_files[Path(path).resolve()]}, which this run writes. "
+                "Choose a path outside the pack's files."
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+
+    answers = None
+    if answers_file:
+        try:
+            answers = comply_mod.load_answers(Path(answers_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            console.print(f"[bold red]✖ Cannot read answers file[/bold red] {answers_file}: {exc}")
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+        except comply_mod.AnswersError as exc:
+            console.print(f"[bold red]✖ Answers file[/bold red] {answers_file} [bold red]cannot be used:[/bold red]")
+            for problem in exc.problems:
+                console.print(f"  • {problem}", markup=False, highlight=False)
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+        for where, word in comply_mod.verdict_words_in(answers):
+            console.print(
+                f"[yellow]⚠ {where} uses \"{word}\". It is written as you gave it, "
+                "but reads as a regulatory verdict; consider describing what you did "
+                "instead.[/yellow]",
+                highlight=False,
+            )
+    if write_answers_template and Path(write_answers_template).exists():
+        console.print(
+            f"[bold red]✖ Not overwriting[/bold red] {write_answers_template}: it already "
+            "exists and may hold your answers. Choose another path."
         )
         _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=1)
@@ -1727,7 +1801,6 @@ def comply(
     sbom_json = build_cyclonedx_json(results, "1.7")
     doc = json.loads(sbom_json)
 
-    out = Path(output_dir or f"aisbom-comply-{framework.value}")
     out.mkdir(parents=True, exist_ok=True)
     sbom_path = out / comply_mod.SBOM_FILE
     sbom_path.write_text(sbom_json)
@@ -1750,10 +1823,17 @@ def comply(
             target=target,
             vex_statements=statements,
             vex_files=vex_names,
+            answers=answers,
         )
         title = "FDA §524B pack"
+        for entry in comply_mod.unmatched_component_answers(doc, answers or comply_mod.Answers()):
+            console.print(
+                f"[yellow]⚠ Answers entry ({entry}) matches no component in this scan; "
+                "its support data was not used.[/yellow]",
+                highlight=False,
+            )
     else:
-        pack = comply_mod.build_eu_ai_act_pack(doc, target=target)
+        pack = comply_mod.build_eu_ai_act_pack(doc, target=target, answers=answers)
         title = "EU AI Act pack"
 
     for name, content in pack.items():
@@ -1763,11 +1843,35 @@ def comply(
     console.print(f"\n[bold green]✔ {title} written to[/bold green] {out}/")
     for name in written:
         console.print(f"  [dim]•[/dim] {name}")
+    if write_answers_template:
+        # Exclusive create: a file that appeared during the scan is not ours
+        # to overwrite either.
+        try:
+            with open(write_answers_template, "x", encoding="utf-8") as fh:
+                fh.write(comply_mod.answers_template(doc))
+        except FileExistsError:
+            console.print(
+                f"[bold red]✖ Not overwriting[/bold red] {write_answers_template}: it "
+                "appeared while the pack was being built. The pack is written; "
+                "rerun with another template path."
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold green]✔ Answers template written to[/bold green] {write_answers_template}. "
+            "Fill it in and pass it back with --answers."
+        )
     console.print(
         f"\n[dim]Start with {out / comply_mod.README_FILE}. Every "
         f"'{comply_mod.TODO}' field needs your input, and pre-filled values "
         "should be checked before use. This is not legal advice.[/dim]"
     )
+    if not (answers_file or write_answers_template):
+        console.print(
+            "[dim]To answer the TODOs once and keep them across runs, rerun with "
+            "--write-answers-template comply.yaml, fill it in, then pass "
+            "--answers comply.yaml.[/dim]"
+        )
 
     telemetry_threads.append(telemetry.post_event(
         "cli_comply", {"framework": framework.value}, scan_id=scan_id,

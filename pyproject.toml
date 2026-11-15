@@ -66,6 +66,10 @@ pip-requirements-parser = "^32.0.1"
 click = "<8.6.0"
 spdx-tools = "^0.8.3"
 packaging = ">=24,<27"
+# `aisbom comply --answers` reads a YAML answers file (safe_load only).
+# Already installed for every user via spdx-tools; declared because the CLI
+# now imports it directly.
+pyyaml = ">=6.0,<7.0"
 
 [tool.poetry.dependencies.requests]
 version = "^2.32.3"
