@@ -507,6 +507,22 @@ dates, is left as `TODO (provider)` rather than guessed.
 [docs/comply.md](docs/comply.md) lists every field and where its value comes
 from.
 
+To fill those TODOs once and keep them across runs, write a starter answers
+file, fill it in, and pass it back on every run:
+
+```bash
+aisbom comply ./models --framework eu-ai-act --write-answers-template comply.yaml
+# edit comply.yaml, then:
+aisbom comply ./models --framework eu-ai-act --answers comply.yaml
+```
+
+The template lists every field id with its label and one support entry per
+scanned component for the FDA table. Answers are tagged `(provider-supplied)`
+and never replace a value the scan read: when both exist, the pack shows both.
+A malformed file or an unknown field id stops the run with exit `1`. See
+[docs/comply.md](docs/comply.md#answers-file---answers) for the format and the
+full field-id list. The answers file is read locally and never sent anywhere.
+
 The pack describes files, not your organisation, and is not legal advice.
 A scan with an unreadable target exits `1` and writes nothing. Otherwise the
 command exits `0` whatever the findings; gate CI with `aisbom scan`. `--offline`,

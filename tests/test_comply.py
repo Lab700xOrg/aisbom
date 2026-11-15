@@ -16,20 +16,8 @@ runner = CliRunner()
 
 # The verdict words the aisbom.io compliance guides are held to. The generated
 # documents describe files, so wording that reads as a regulatory verdict
-# about the provider is banned here too. Keep the two lists in step.
-VERDICT_WORDS = [
-    "compliant",
-    "compliance verdict",
-    "certified",
-    "certifies",
-    "guarantee",
-    "guaranteed",
-    "meets the requirement",
-    "satisfies the requirement",
-    "legally",
-    "approved by",
-    "audit-proof",
-]
+# about the provider is banned here too.
+VERDICT_WORDS = comply.VERDICT_WORDS
 
 
 # ---------------------------------------------------------------------------

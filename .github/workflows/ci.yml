@@ -110,3 +110,10 @@ jobs:
           test -s comply-fda/sbom.vex.cdx.json
           test -s comply-fda/component-support.csv
           test -s comply-fda/README.md
+          # Answers file round trip: write the template, fill one field, and
+          # check the answer lands in the pack tagged provider-supplied.
+          poetry run aisbom comply demo_data --framework eu-ai-act --offline --output-dir comply-tpl --write-answers-template comply-answers.yaml
+          sed 's/^  art53.1_1.provider:$/  art53.1_1.provider: CI Smoke Provider/' comply-answers.yaml > comply-answers-filled.yaml
+          poetry run aisbom comply demo_data --framework eu-ai-act --offline --output-dir comply-ans --answers comply-answers-filled.yaml
+          grep -q "CI Smoke Provider _(provider-supplied)_" comply-ans/art53-training-content-summary.md
+          grep -q "provider-supplied from the answers file" comply-ans/README.md

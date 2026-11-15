@@ -22,25 +22,55 @@ pre-filled value can be traced back to a field a reader can inspect.
 Wording follows the aisbom.io compliance guides: the documents describe what
 the files contain and never pass a verdict on the provider. The test suite
 fails on the same verdict words the platform bans.
+
+The provider can fill the TODOs from an answers file (``--answers``), keyed
+by the stable field ids every field carries. Answers are written as given and
+tagged ``provider-supplied``; a value the scan read is never replaced, and
+when both exist the pack shows both.
 """
 
 from __future__ import annotations
 
 import csv
+import datetime
+import difflib
 import io
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import yaml
 
 # Bump on every change to the wording or field mapping of a generated
 # document, so a pack in someone's submission folder can be traced to the
 # exact template that produced it.
-TEMPLATE_VERSION = "2026-11-08"
+TEMPLATE_VERSION = "2026-11-15"
 
 TODO = "TODO (provider)"
 
 SOURCE_HF = "Hugging Face model card"
 SOURCE_HEADER = "model file header"
 SOURCE_SCAN = "AIsbom scan"
+SOURCE_PROVIDER = "provider-supplied"
+
+# Wording that reads as a regulatory verdict about the provider. AIsbom's own
+# text never uses it (the test suite checks every generated file); provider
+# answers that use it are written as given, with a warning. Keep in step with
+# the list the aisbom.io compliance guides are held to.
+VERDICT_WORDS = (
+    "compliant",
+    "compliance verdict",
+    "certified",
+    "certifies",
+    "guarantee",
+    "guaranteed",
+    "meets the requirement",
+    "satisfies the requirement",
+    "legally",
+    "approved by",
+    "audit-proof",
+)
 
 ANNEX_XI_FILE = "annex-xi-technical-documentation.md"
 ART53_FILE = "art53-training-content-summary.md"
@@ -66,6 +96,21 @@ _COMMISSION_TEMPLATE = (
 )
 _GUIDE_ART53 = "https://aisbom.io/compliance/eu-ai-act-article-53"
 _GUIDE_FDA = "https://aisbom.io/compliance/fda-524b"
+# The field-id list and answers-file guide. Linked online because a pip
+# install ships only the `aisbom` package, not `docs/`.
+DOCS_URL = "https://github.com/Lab700xOrg/aisbom/blob/main/docs/comply.md"
+
+
+def _filling_todos(w: "_Writer", what: str) -> None:
+    w.heading(2, "Filling in the TODOs")
+    w.para(
+        f"Write {what} once in an answers file and every later pack comes out "
+        "filled. Rerun the same command with `--write-answers-template "
+        "comply.yaml` to get a starter file listing every field, fill in what "
+        "you can, then rerun with `--answers comply.yaml`. Answers are tagged "
+        f"_({SOURCE_PROVIDER})_ and never replace a value the scan read. "
+        f"Field ids and examples: {DOCS_URL}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,35 +280,84 @@ def _esc(value: Any) -> str:
 
 
 @dataclass
+class _Field:
+    """One answerable field, as the answers file and its template see it."""
+
+    fid: str
+    label: str
+    hint: str
+    heading: str
+    scan: bool  # the scan pre-fills it when it can read a value
+    doc: str = ""
+
+
+def _provider_value(answer: str) -> Tuple[str, List[str]]:
+    """Render an answer: the inline part, plus indented lines for a
+    multi-line answer so its paragraphs survive inside the list item."""
+    if "\n" not in answer:
+        return f"{answer} _({SOURCE_PROVIDER})_", []
+    block = [f"  {line}" if line.strip() else "" for line in answer.split("\n")]
+    return f"_({SOURCE_PROVIDER}, below)_", block
+
+
+@dataclass
 class _Writer:
+    answers: Dict[str, str] = field(default_factory=dict)
     lines: List[str] = field(default_factory=list)
     filled: int = 0
+    provided: int = 0
     todo: int = 0
+    both: List[str] = field(default_factory=list)
+    fields: List[_Field] = field(default_factory=list)
+    _heading: str = ""
 
     def heading(self, level: int, text: str) -> None:
         if self.lines and self.lines[-1] != "":
             self.lines.append("")
         self.lines.extend([f"{'#' * level} {text}", ""])
+        self._heading = text
 
     def para(self, text: str) -> None:
         if self.lines and self.lines[-1] != "":
             self.lines.append("")
         self.lines.extend([text, ""])
 
-    def fact(self, label: str, values: Sequence[Tuple[str, str]], hint: str = "") -> None:
-        """A field pre-filled from the scan, or a TODO when the scan had nothing."""
+    def fact(self, fid: str, label: str, values: Sequence[Tuple[str, str]],
+             hint: str = "") -> None:
+        """A field pre-filled from the scan, or a TODO when the scan had nothing.
+
+        A provider answer never replaces a scan-read value: both are shown,
+        scan first, and the field is listed for the provider to reconcile.
+        """
+        self.fields.append(_Field(fid, label, hint, self._heading, scan=True))
+        answer = self.answers.get(fid)
         if not values:
-            self.ask(label, hint)
+            self._answer_or_todo(label, hint, answer)
             return
         self.filled += 1
-        rendered = ", ".join(f"`{_esc(v)}` _({src})_" for v, src in values)
-        line = f"- **{label}:** {rendered}"
+        line = f"- **{label}:** " + ", ".join(f"`{_esc(v)}` _({src})_" for v, src in values)
+        block: List[str] = []
+        if answer is not None:
+            self.both.append(fid)
+            inline, block = _provider_value(answer)
+            line += f"; {inline}"
         if hint:
             line += f" — {hint}"
         self.lines.append(line)
+        self.lines.extend(block)
 
-    def ask(self, label: str, hint: str = "") -> None:
+    def ask(self, fid: str, label: str, hint: str = "") -> None:
         """A field only the provider can answer."""
+        self.fields.append(_Field(fid, label, hint, self._heading, scan=False))
+        self._answer_or_todo(label, hint, self.answers.get(fid))
+
+    def _answer_or_todo(self, label: str, hint: str, answer: Optional[str]) -> None:
+        if answer is not None:
+            self.provided += 1
+            inline, block = _provider_value(answer)
+            self.lines.append(f"- **{label}:** {inline}")
+            self.lines.extend(block)
+            return
         self.todo += 1
         line = f"- **{label}:** **{TODO}**"
         if hint:
@@ -286,7 +380,8 @@ class _Writer:
         return "\n".join(self.lines).rstrip() + "\n"
 
 
-def _intro(w: _Writer, title: str, target: str, *, legend: bool = True) -> None:
+def _intro(w: _Writer, title: str, target: str, *, legend: bool = True,
+           provider: bool = False) -> None:
     w.lines.extend([f"# {title}", ""])
     w.para(
         f"Generated by AIsbom from a scan of `{_esc(target)}`. "
@@ -294,10 +389,16 @@ def _intro(w: _Writer, title: str, target: str, *, legend: bool = True) -> None:
     )
     if legend:
         w.para(
-        f"Values tagged with a source in italics were read by the scan. Fields "
-        f"marked **{TODO}** need information a file scan cannot read; "
-        f"AIsbom leaves them blank rather than guess."
-    )
+            f"Values tagged with a source in italics were read by the scan. Fields "
+            f"marked **{TODO}** need information a file scan cannot read; "
+            f"AIsbom leaves them blank rather than guess."
+        )
+    if provider:
+        w.para(
+            f"Values tagged _({SOURCE_PROVIDER})_ come from the provider's "
+            f"answers file and are written as given; AIsbom did not read them "
+            f"from the files."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +436,10 @@ def _findings(component: Dict[str, Any]) -> str:
     return "none"
 
 
-def _annex_xi(facts: _Facts, target: str) -> _Writer:
-    w = _Writer()
-    _intro(w, "Technical documentation — EU AI Act Annex XI (skeleton)", target)
+def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
+    w = _Writer(answers=answers)
+    _intro(w, "Technical documentation — EU AI Act Annex XI (skeleton)", target,
+           provider=bool(answers))
     w.para(
         "Article 53(1)(a) of Regulation (EU) 2024/1689 asks providers of "
         "general-purpose AI models to draw up technical documentation containing "
@@ -350,57 +452,65 @@ def _annex_xi(facts: _Facts, target: str) -> _Writer:
     w.para("**Point 1 — General description of the model.**")
 
     w.heading(3, "Point 1(a) — Intended tasks and the AI systems the model can be integrated into")
-    w.fact("Task declared in the model card", facts.tasks,
+    w.fact("annex_xi.1a.task_declared", "Task declared in the model card", facts.tasks,
            "confirm it matches the tasks you intend the model to perform")
-    w.ask("Intended tasks", "what the model is intended to do")
-    w.ask("Type and nature of AI systems it can be integrated into")
+    w.ask("annex_xi.1a.intended_tasks", "Intended tasks", "what the model is intended to do")
+    w.ask("annex_xi.1a.integration_systems",
+          "Type and nature of AI systems it can be integrated into")
 
     w.heading(3, "Point 1(b) — Acceptable use policies")
-    w.ask("Applicable acceptable use policies")
+    w.ask("annex_xi.1b.acceptable_use", "Applicable acceptable use policies")
 
     w.heading(3, "Point 1(c) — Date of release and methods of distribution")
-    w.ask("Date of release")
-    w.fact("Hugging Face repository the scanned files come from", facts.repos)
-    w.ask("Methods of distribution")
+    w.ask("annex_xi.1c.release_date", "Date of release")
+    w.fact("annex_xi.1c.hf_repository",
+           "Hugging Face repository the scanned files come from", facts.repos)
+    w.ask("annex_xi.1c.distribution_methods", "Methods of distribution")
 
     w.heading(3, "Point 1(d) — Architecture and number of parameters")
-    w.fact("Architecture family", facts.families)
-    w.fact("Model architecture", facts.architectures)
-    w.ask("Number of parameters", "AIsbom does not derive this from tensor shapes")
+    w.fact("annex_xi.1d.architecture_family", "Architecture family", facts.families)
+    w.fact("annex_xi.1d.model_architecture", "Model architecture", facts.architectures)
+    w.ask("annex_xi.1d.parameter_count", "Number of parameters",
+          "AIsbom does not derive this from tensor shapes")
 
     w.heading(3, "Point 1(e) — Modality and format of inputs and outputs")
-    w.ask("Input modality and format")
-    w.ask("Output modality and format")
+    w.ask("annex_xi.1e.input_modality", "Input modality and format")
+    w.ask("annex_xi.1e.output_modality", "Output modality and format")
 
     w.heading(3, "Point 1(f) — Licence")
-    w.fact("Licence", facts.licenses)
+    w.fact("annex_xi.1f.licence", "Licence", facts.licenses)
 
     w.para("**Point 2 — Detailed description of the elements in point 1 and of the development process.**")
 
     w.heading(3, "Point 2(a) — Technical means needed for integration")
-    w.fact("Library declared in the model card", facts.libraries)
-    w.fact("Model file formats in this release", facts.formats)
-    w.ask("Instructions of use, infrastructure and tools needed to integrate the model")
+    w.fact("annex_xi.2a.library", "Library declared in the model card", facts.libraries)
+    w.fact("annex_xi.2a.file_formats", "Model file formats in this release", facts.formats)
+    w.ask("annex_xi.2a.integration_instructions",
+          "Instructions of use, infrastructure and tools needed to integrate the model")
 
     w.heading(3, "Point 2(b) — Design specifications and training process")
-    w.ask("Training methodologies and techniques")
-    w.ask("Key design choices, with rationale and assumptions")
-    w.ask("What the model is designed to optimise for, and the relevance of its parameters")
+    w.ask("annex_xi.2b.training_methods", "Training methodologies and techniques")
+    w.ask("annex_xi.2b.design_choices", "Key design choices, with rationale and assumptions")
+    w.ask("annex_xi.2b.optimisation_target",
+          "What the model is designed to optimise for, and the relevance of its parameters")
 
     w.heading(3, "Point 2(c) — Data used for training, testing and validation")
-    w.fact("Training datasets declared in the model card", facts.datasets,
-           "confirm each one, and list any the card omits")
-    w.ask("Type and provenance of the data, and curation methodologies")
-    w.ask("Number of data points, scope and main characteristics")
-    w.ask("How the data was obtained and selected")
-    w.ask("Measures to detect unsuitable data sources and identifiable biases")
+    w.fact("annex_xi.2c.declared_datasets", "Training datasets declared in the model card",
+           facts.datasets, "confirm each one, and list any the card omits")
+    w.ask("annex_xi.2c.data_provenance",
+          "Type and provenance of the data, and curation methodologies")
+    w.ask("annex_xi.2c.data_points", "Number of data points, scope and main characteristics")
+    w.ask("annex_xi.2c.data_selection", "How the data was obtained and selected")
+    w.ask("annex_xi.2c.bias_measures",
+          "Measures to detect unsuitable data sources and identifiable biases")
 
     w.heading(3, "Point 2(d) — Computational resources used to train the model")
-    w.ask("Computational resources", "for example the number of floating point operations")
-    w.ask("Training time and other relevant training details")
+    w.ask("annex_xi.2d.compute", "Computational resources",
+          "for example the number of floating point operations")
+    w.ask("annex_xi.2d.training_time", "Training time and other relevant training details")
 
     w.heading(3, "Point 2(e) — Energy consumption")
-    w.ask("Known or estimated energy consumption",
+    w.ask("annex_xi.2e.energy", "Known or estimated energy consumption",
           "may be estimated from the computational resources in point 2(d)")
 
     w.heading(2, "Section 2 — Additional information for models with systemic risk")
@@ -409,11 +519,13 @@ def _annex_xi(facts: _Facts, target: str) -> _Writer:
         "risk (Article 51); otherwise mark it not applicable."
     )
     w.heading(3, "Item 1 — Evaluation strategies and results")
-    w.ask("Evaluation strategies, criteria, metrics and results")
+    w.ask("annex_xi.s2_1.evaluation", "Evaluation strategies, criteria, metrics and results")
     w.heading(3, "Item 2 — Adversarial testing and model adaptations")
-    w.ask("Adversarial testing measures (for example red teaming), alignment and fine-tuning")
+    w.ask("annex_xi.s2_2.adversarial_testing",
+          "Adversarial testing measures (for example red teaming), alignment and fine-tuning")
     w.heading(3, "Item 3 — System architecture")
-    w.ask("How the software components build on or feed into each other",
+    w.ask("annex_xi.s2_3.system_architecture",
+          "How the software components build on or feed into each other",
           "where applicable")
 
     w.heading(2, "Appendix A — Scanned model files")
@@ -472,9 +584,10 @@ _YES_NO = "Yes / No"
 _MODALITY = "Text / Image / Audio / Video / Other"
 
 
-def _art53(facts: _Facts, target: str) -> _Writer:
-    w = _Writer()
-    _intro(w, "Public summary of training content — EU AI Act Article 53(1)(d) (draft)", target)
+def _art53(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
+    w = _Writer(answers=answers)
+    _intro(w, "Public summary of training content — EU AI Act Article 53(1)(d) (draft)",
+           target, provider=bool(answers))
     w.para(
         "Follows the sections of the European Commission's *Template for the "
         "Public Summary of Training Content for General-Purpose AI models* "
@@ -482,95 +595,119 @@ def _art53(facts: _Facts, target: str) -> _Writer:
         "template is the form providers use; this draft follows its numbering "
         "so answers can be transferred section by section."
     )
-    w.ask("Version of the summary", "with links to previous versions where applicable")
-    w.ask("Last update")
+    w._heading = "Summary version"
+    w.ask("art53.summary.version", "Version of the summary",
+          "with links to previous versions where applicable")
+    w.ask("art53.summary.last_update", "Last update")
 
     w.heading(2, "1 General information")
     w.heading(3, "1.1 Provider identification")
-    w.ask("Provider name and contact details")
-    w.ask("Authorised representative name and contact details",
+    w.ask("art53.1_1.provider", "Provider name and contact details")
+    w.ask("art53.1_1.authorised_representative",
+          "Authorised representative name and contact details",
           "only if the provider is established outside the Union (Article 54)")
 
     w.heading(3, "1.2 Model identification")
-    w.fact("Versioned model name(s)", facts.versioned_names,
+    w.fact("art53.1_2.versioned_names", "Versioned model name(s)", facts.versioned_names,
            "replace with the versioned name you place on the market if it differs")
-    w.fact("Model card link",
+    w.fact("art53.1_2.model_card_link", "Model card link",
            [(f"https://huggingface.co/{repo}", src) for repo, src in facts.repos])
-    w.ask("Model dependencies",
+    w.ask("art53.1_2.model_dependencies", "Model dependencies",
           "if the model modifies or fine-tunes another general-purpose AI model, "
           "name it and link its summary")
-    w.ask("Date of placement of the model on the Union market")
+    w.ask("art53.1_2.market_placement_date",
+          "Date of placement of the model on the Union market")
 
     w.heading(3, "1.3 Modalities, overall training data size and other characteristics")
-    w.ask("Modalities present in the training data", _MODALITY)
-    w.ask("Training data size per modality", "the template's size ranges, or another unit")
-    w.ask("Types of content per modality")
-    w.ask("Latest date of data acquisition or collection", "MM/YYYY, and whether training continues on new data")
-    w.ask("Linguistic characteristics of the overall training data")
-    w.ask("Other relevant characteristics of the overall training data")
+    w.ask("art53.1_3.modalities", "Modalities present in the training data", _MODALITY)
+    w.ask("art53.1_3.size_per_modality", "Training data size per modality",
+          "the template's size ranges, or another unit")
+    w.ask("art53.1_3.content_types", "Types of content per modality")
+    w.ask("art53.1_3.latest_acquisition_date", "Latest date of data acquisition or collection",
+          "MM/YYYY, and whether training continues on new data")
+    w.ask("art53.1_3.linguistic_characteristics",
+          "Linguistic characteristics of the overall training data")
+    w.ask("art53.1_3.other_characteristics",
+          "Other relevant characteristics of the overall training data")
 
     w.heading(2, "2 List of data sources")
     w.heading(3, "2.1 Publicly available datasets")
-    w.ask("Have you used publicly available datasets to train the model?", _YES_NO)
-    w.fact("Datasets declared in the model card", facts.datasets,
+    w.ask("art53.2_1.used", "Have you used publicly available datasets to train the model?",
+          _YES_NO)
+    w.fact("art53.2_1.declared_datasets", "Datasets declared in the model card", facts.datasets,
            "confirm each was used, add an access link, and check whether it is "
            "'large' (over 3% of the public-dataset data for a modality)")
-    w.ask("List of large publicly available datasets", "name and access link for each")
-    w.ask("General description of other publicly available datasets")
+    w.ask("art53.2_1.large_datasets", "List of large publicly available datasets",
+          "name and access link for each")
+    w.ask("art53.2_1.other_datasets", "General description of other publicly available datasets")
 
     w.heading(3, "2.2 Private non-publicly available datasets obtained from third parties")
     w.heading(4, "2.2.1 Datasets commercially licensed by rightsholders or their representatives")
-    w.ask("Transactional commercial licensing agreements concluded?", _YES_NO)
-    w.ask("Modalities covered", _MODALITY)
+    w.ask("art53.2_2_1.licensed", "Transactional commercial licensing agreements concluded?",
+          _YES_NO)
+    w.ask("art53.2_2_1.modalities", "Modalities covered", _MODALITY)
     w.heading(4, "2.2.2 Private datasets obtained from other third parties")
-    w.ask("Private datasets obtained from other third parties?", _YES_NO)
-    w.ask("Modalities covered", _MODALITY)
-    w.ask("List of those datasets, if publicly known")
-    w.ask("General description of those not publicly known")
+    w.ask("art53.2_2_2.obtained", "Private datasets obtained from other third parties?", _YES_NO)
+    w.ask("art53.2_2_2.modalities", "Modalities covered", _MODALITY)
+    w.ask("art53.2_2_2.known_datasets", "List of those datasets, if publicly known")
+    w.ask("art53.2_2_2.other_description", "General description of those not publicly known")
 
     w.heading(3, "2.3 Data crawled and scraped from online sources")
-    w.ask("Were crawlers used by the provider or on its behalf?", _YES_NO)
-    w.ask("Crawler name(s) or identifier(s)")
-    w.ask("Purposes of the crawler(s)")
-    w.ask("General description of crawler behaviour", "for example robots.txt, paywalls, captchas")
-    w.ask("Period of data collection", "from MM/YYYY to MM/YYYY")
-    w.ask("Description of the type of content and online sources crawled")
-    w.ask("Modalities covered", _MODALITY)
-    w.ask("Most relevant domain names crawled",
+    w.ask("art53.2_3.crawlers_used", "Were crawlers used by the provider or on its behalf?",
+          _YES_NO)
+    w.ask("art53.2_3.crawler_names", "Crawler name(s) or identifier(s)")
+    w.ask("art53.2_3.crawler_purposes", "Purposes of the crawler(s)")
+    w.ask("art53.2_3.crawler_behaviour", "General description of crawler behaviour",
+          "for example robots.txt, paywalls, captchas")
+    w.ask("art53.2_3.collection_period", "Period of data collection", "from MM/YYYY to MM/YYYY")
+    w.ask("art53.2_3.content_description",
+          "Description of the type of content and online sources crawled")
+    w.ask("art53.2_3.modalities", "Modalities covered", _MODALITY)
+    w.ask("art53.2_3.top_domains", "Most relevant domain names crawled",
           "top 10% by content size; SMEs top 5% or 1,000, whichever is lower")
 
     w.heading(3, "2.4 User data")
-    w.ask("Was data from user interactions with the model used to train it?", _YES_NO)
-    w.ask("Was data from user interactions with your other services or products used?", _YES_NO)
-    w.ask("Description of the services or products the user data came from")
-    w.ask("Modalities covered", _MODALITY)
+    w.ask("art53.2_4.model_interactions_used",
+          "Was data from user interactions with the model used to train it?", _YES_NO)
+    w.ask("art53.2_4.other_services_used",
+          "Was data from user interactions with your other services or products used?", _YES_NO)
+    w.ask("art53.2_4.services_description",
+          "Description of the services or products the user data came from")
+    w.ask("art53.2_4.modalities", "Modalities covered", _MODALITY)
 
     w.heading(3, "2.5 Synthetic data")
-    w.ask("Was synthetic AI-generated data created by you or on your behalf to train the model?", _YES_NO)
-    w.ask("Modalities of the synthetic data", _MODALITY)
-    w.ask("General-purpose AI model(s) on the market used to generate it")
-    w.ask("Other AI models used to generate it, including your own")
+    w.ask("art53.2_5.synthetic_used",
+          "Was synthetic AI-generated data created by you or on your behalf to train the model?",
+          _YES_NO)
+    w.ask("art53.2_5.modalities", "Modalities of the synthetic data", _MODALITY)
+    w.ask("art53.2_5.gpai_models_used",
+          "General-purpose AI model(s) on the market used to generate it")
+    w.ask("art53.2_5.other_models_used", "Other AI models used to generate it, including your own")
 
     w.heading(3, "2.6 Other sources of data")
-    w.ask("Were data sources other than those in sections 2.1 to 2.5 used?", _YES_NO)
-    w.ask("Narrative description of those sources and data")
+    w.ask("art53.2_6.other_sources_used",
+          "Were data sources other than those in sections 2.1 to 2.5 used?", _YES_NO)
+    w.ask("art53.2_6.description", "Narrative description of those sources and data")
 
     w.heading(2, "3 Data processing aspects")
     w.heading(3, "3.1 Respect of reservation of rights from the text and data mining exception or limitation")
-    w.ask("Signatory to the Code of Practice for general-purpose AI models?", _YES_NO)
-    w.ask("Measures taken to respect reservations of rights before and during data collection")
+    w.ask("art53.3_1.code_of_practice_signatory",
+          "Signatory to the Code of Practice for general-purpose AI models?", _YES_NO)
+    w.ask("art53.3_1.rights_reservation_measures",
+          "Measures taken to respect reservations of rights before and during data collection")
 
     w.heading(3, "3.2 Removal of illegal content")
-    w.ask("General description of measures taken")
+    w.ask("art53.3_2.illegal_content_measures", "General description of measures taken")
 
     w.heading(3, "3.3 Other information (optional)")
-    w.ask("Other relevant information about data processing", "optional")
+    w.ask("art53.3_3.other_information", "Other relevant information about data processing",
+          "optional")
     return w
 
 
-def _eu_readme(target: str, annex: _Writer, art53: _Writer) -> str:
+def _eu_readme(target: str, annex: _Writer, art53: _Writer, *, provider: bool) -> str:
     w = _Writer()
-    _intro(w, "EU AI Act documentation pack", target)
+    _intro(w, "EU AI Act documentation pack", target, provider=provider)
     w.table(
         ["File", "What it is"],
         [
@@ -581,7 +718,23 @@ def _eu_readme(target: str, annex: _Writer, art53: _Writer) -> str:
     )
     filled = annex.filled + art53.filled
     todo = annex.todo + art53.todo
-    w.para(f"{filled} field(s) pre-filled from the scan, {todo} left as TODO for the provider.")
+    if provider:
+        provided = annex.provided + art53.provided
+        w.para(
+            f"{filled} field(s) pre-filled from the scan, {provided} provider-supplied "
+            f"from the answers file, {todo} left as TODO for the provider."
+        )
+    else:
+        w.para(f"{filled} field(s) pre-filled from the scan, {todo} left as TODO for the provider.")
+    both = annex.both + art53.both
+    if both:
+        w.heading(2, "Fields with both a scan-read and a provider-supplied value")
+        w.para(
+            "The documents show both values, the scan's first. Check whether they "
+            "agree, and correct the answers file or the model card if not."
+        )
+        w.lines.extend(f"- `{fid}`" for fid in both)
+    _filling_todos(w, "the answers a scan cannot read")
     w.para(
         "A file scan can read what the model files and their Hugging Face model "
         "card declare: identifiers, task, architecture, licence, declared "
@@ -598,12 +751,15 @@ def _eu_readme(target: str, annex: _Writer, art53: _Writer) -> str:
     return w.close()
 
 
-def build_eu_ai_act_pack(doc: Dict[str, Any], *, target: str) -> Dict[str, str]:
+def build_eu_ai_act_pack(
+    doc: Dict[str, Any], *, target: str, answers: Optional["Answers"] = None,
+) -> Dict[str, str]:
     """Return ``{filename: content}`` for the EU AI Act pack (SBOM excluded)."""
     facts = _collect(doc)
-    annex = _annex_xi(facts, target)
-    art53 = _art53(facts, target)
-    readme = _eu_readme(target, annex, art53)
+    fields = dict(answers.fields) if answers else {}
+    annex = _annex_xi(facts, target, fields)
+    art53 = _art53(facts, target, fields)
+    readme = _eu_readme(target, annex, art53, provider=bool(fields))
     return {
         ANNEX_XI_FILE: annex.close(),
         ART53_FILE: art53.close(),
@@ -617,16 +773,19 @@ def build_eu_ai_act_pack(doc: Dict[str, Any], *, target: str) -> Dict[str, str]:
 
 _SUPPORT_COLUMNS = [
     "bom_ref", "name", "type", "version", "sha256", "license",
-    "support_level", "end_of_support_date",
+    "support_level", "end_of_support_date", "support_source",
 ]
 
 
-def _support_csv(doc: Dict[str, Any]) -> str:
+def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"]) -> Tuple[str, int]:
+    """The support table, and how many components the answers file filled."""
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_SUPPORT_COLUMNS, lineterminator="\n")
     writer.writeheader()
+    entries = answers.components if answers else []
+    supplied = 0
     for c in _components(doc):
-        writer.writerow({
+        row = {
             "bom_ref": c.get("bom-ref") or "",
             "name": c.get("name") or "",
             "type": c.get("type") or "",
@@ -635,8 +794,19 @@ def _support_csv(doc: Dict[str, Any]) -> str:
             "license": ";".join(_licenses(c)),
             "support_level": TODO,
             "end_of_support_date": TODO,
-        })
-    return buf.getvalue()
+            "support_source": "",
+        }
+        matching = [e for e in entries if e.matches(c)]
+        for column in COMPONENT_VALUE_KEYS:
+            # First matching entry in file order that answers the column wins.
+            value = next((e.values[column] for e in matching if column in e.values), None)
+            if value is not None:
+                row[column] = value
+                row["support_source"] = SOURCE_PROVIDER
+        if row["support_source"]:
+            supplied += 1
+        writer.writerow(row)
+    return buf.getvalue(), supplied
 
 
 def build_fda_pack(
@@ -645,10 +815,12 @@ def build_fda_pack(
     target: str,
     vex_statements: Sequence[Any],
     vex_files: Sequence[str],
+    answers: Optional["Answers"] = None,
 ) -> Dict[str, str]:
     """Return ``{filename: content}`` for the FDA pack (SBOM and VEX excluded,
     since the CLI writes those with the same code `scan --vex` uses)."""
     comps = _components(doc)
+    support_csv, supplied = _support_csv(doc, answers)
     statuses = [getattr(s, "status", None) for s in vex_statements]
     affected = statuses.count("affected")
 
@@ -680,9 +852,20 @@ def build_fda_pack(
         "looked up in OSV unless the run was offline or used --no-osv."
     )
     w.heading(2, "What this pack cannot evidence")
+    if supplied:
+        support_line = (
+            f"- **Support level and end-of-support date** for each component: "
+            f"{supplied} of {len(comps)} component(s) in `{SUPPORT_FILE}` take them "
+            f"from the provider's answers file (`support_source` is "
+            f"{SOURCE_PROVIDER}); the rest are marked {TODO}."
+        )
+    else:
+        support_line = (
+            f"- **Support level and end-of-support date** for each component: "
+            f"`{SUPPORT_FILE}` marks both {TODO}."
+        )
     w.lines.extend([
-        f"- **Support level and end-of-support date** for each component: "
-        f"`{SUPPORT_FILE}` marks both {TODO}.",
+        support_line,
         "- **Supplier name** (an NTIA minimum element): the scan does not record "
         "a supplier for model files.",
         "- **Software outside the scanned target**, such as firmware, the "
@@ -690,9 +873,327 @@ def build_fda_pack(
         "- **Vulnerabilities without a CVE feed entry**, and CVEs in unpinned "
         "dependencies.",
     ])
+    _filling_todos(w, "each component's support level and end-of-support date")
     w.heading(2, "Sources")
     w.lines.append(f"- AIsbom guide to FDA §524B: {_GUIDE_FDA}")
     return {
-        SUPPORT_FILE: _support_csv(doc),
+        SUPPORT_FILE: support_csv,
         README_FILE: w.close(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Provider answers file (--answers)
+# ---------------------------------------------------------------------------
+
+ANSWERS_FORMAT_VERSION = 1
+
+COMPONENT_MATCH_KEYS = ("name", "version", "purl", "sha256", "bom_ref")
+COMPONENT_VALUE_KEYS = ("support_level", "end_of_support_date")
+_TOP_LEVEL_KEYS = ("version", "fields", "components")
+
+
+class AnswersError(ValueError):
+    """The answers file cannot be used. ``problems`` lists every reason."""
+
+    def __init__(self, problems: Sequence[str]):
+        self.problems = list(problems)
+        super().__init__("\n".join(self.problems))
+
+
+@dataclass
+class ComponentAnswer:
+    """Support data for every SBOM component matching all of ``match``."""
+
+    index: int
+    match: Dict[str, str]
+    values: Dict[str, str]
+
+    def matches(self, component: Dict[str, Any]) -> bool:
+        for key, wanted in self.match.items():
+            if key == "sha256":
+                have = (_sha256(component) or "").lower()
+                wanted = wanted.lower()
+            else:
+                have = str(component.get("bom-ref" if key == "bom_ref" else key) or "").strip()
+            if have != wanted:
+                return False
+        return True
+
+    def describe(self) -> str:
+        return ", ".join(f"{k}={v}" for k, v in self.match.items())
+
+
+@dataclass
+class Answers:
+    fields: Dict[str, str] = field(default_factory=dict)
+    components: List[ComponentAnswer] = field(default_factory=list)
+
+
+def _field_registry() -> List[_Field]:
+    """Every answerable field, in document order, derived from the builders
+    themselves so the ids, the docs and the template cannot drift apart."""
+    facts = _collect({})
+    out: List[_Field] = []
+    for name, writer in ((ANNEX_XI_FILE, _annex_xi(facts, "", {})),
+                         (ART53_FILE, _art53(facts, "", {}))):
+        for f in writer.fields:
+            f.doc = name
+            out.append(f)
+    return out
+
+
+def field_ids() -> List[str]:
+    """The stable id of every field an answers file can fill, in order."""
+    return [f.fid for f in _field_registry()]
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate keys instead of keeping the last."""
+
+
+def _construct_unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode,
+                              deep: bool = False) -> Dict[Any, Any]:
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError:  # unhashable key; construct_mapping reports it
+            continue
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def _scalar(value: Any) -> Optional[str]:
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, datetime.date):  # also covers datetime
+        return value.isoformat()
+    if isinstance(value, str):
+        text = value.replace("\r\n", "\n").strip()
+        return text or None
+    raise TypeError(type(value).__name__)
+
+
+def _normalise(value: Any) -> Optional[str]:
+    """An answer as text, or None when it is left empty."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        parts = [p for p in (_scalar(v) for v in value) if p]
+        return "; ".join(parts) or None
+    return _scalar(value)
+
+
+def _value_problem(where: str, value: Any) -> Optional[str]:
+    try:
+        _normalise(value)
+    except TypeError:
+        return (f"{where}: expected text, a number, a date, yes/no or a list of "
+                f"those, got {type(value).__name__}")
+    return None
+
+
+def load_answers(text: str) -> Answers:
+    """Parse and validate an answers file. Raises AnswersError listing every
+    problem; nothing in the file is silently ignored."""
+    try:
+        data = yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
+    except yaml.YAMLError as exc:
+        raise AnswersError([f"not valid YAML: {exc}"]) from None
+    if data is None:
+        return Answers()
+    if not isinstance(data, dict):
+        raise AnswersError([
+            "the file must be a YAML mapping with 'fields' and/or 'components' keys"
+        ])
+
+    problems: List[str] = []
+    for key in data:
+        if key not in _TOP_LEVEL_KEYS:
+            problems.append(
+                f"unknown top-level key '{key}' (expected: {', '.join(_TOP_LEVEL_KEYS)})")
+    version = data.get("version", ANSWERS_FORMAT_VERSION)
+    if version != ANSWERS_FORMAT_VERSION:
+        problems.append(
+            f"unsupported version {version!r}; this AIsbom reads version "
+            f"{ANSWERS_FORMAT_VERSION}")
+
+    answers = Answers()
+    known = field_ids()
+    raw_fields = data.get("fields")
+    if raw_fields is not None and not isinstance(raw_fields, dict):
+        problems.append("fields: must be a mapping of field id to answer")
+        raw_fields = None
+    for fid, value in (raw_fields or {}).items():
+        fid = str(fid)
+        if fid not in known:
+            guess = difflib.get_close_matches(fid, known, n=1)
+            hint = f"; did you mean '{guess[0]}'?" if guess else ""
+            problems.append(f"fields: unknown field id '{fid}' (field ids: {DOCS_URL}){hint}")
+            continue
+        problem = _value_problem(f"fields.{fid}", value)
+        if problem:
+            problems.append(problem)
+            continue
+        text_value = _normalise(value)
+        if text_value is not None:
+            answers.fields[fid] = text_value
+
+    raw_components = data.get("components")
+    if raw_components is not None and not isinstance(raw_components, list):
+        problems.append("components: must be a list of entries")
+        raw_components = None
+    for i, entry in enumerate(raw_components or []):
+        where = f"components[{i}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where}: must be a mapping with match keys and values")
+            continue
+        match: Dict[str, str] = {}
+        values: Dict[str, str] = {}
+        bad = False
+        for key, value in entry.items():
+            key = str(key)
+            if key not in COMPONENT_MATCH_KEYS + COMPONENT_VALUE_KEYS:
+                problems.append(
+                    f"{where}: unknown key '{key}' (match keys: "
+                    f"{', '.join(COMPONENT_MATCH_KEYS)}; values: "
+                    f"{', '.join(COMPONENT_VALUE_KEYS)})")
+                bad = True
+                continue
+            problem = _value_problem(f"{where}.{key}", value)
+            if problem:
+                problems.append(problem)
+                bad = True
+                continue
+            text_value = _normalise(value)
+            if text_value is None:
+                continue
+            (match if key in COMPONENT_MATCH_KEYS else values)[key] = text_value
+        if not match and not bad:
+            problems.append(
+                f"{where}: needs at least one match key ({', '.join(COMPONENT_MATCH_KEYS)})")
+            continue
+        if not bad:
+            answers.components.append(ComponentAnswer(index=i, match=match, values=values))
+
+    if problems:
+        raise AnswersError(problems)
+    return answers
+
+
+def unmatched_component_answers(doc: Dict[str, Any], answers: Answers) -> List[str]:
+    """Component entries that match nothing in this SBOM, described by their
+    match keys. A warning, not an error: hashes and versions change between
+    releases, and the file is meant to outlive any one of them."""
+    comps = _components(doc)
+    return [e.describe() for e in answers.components if not any(e.matches(c) for c in comps)]
+
+
+def verdict_words_in(answers: Answers) -> List[Tuple[str, str]]:
+    """(location, word) for every verdict word in the provider's own text."""
+    texts = list(answers.fields.items())
+    for e in answers.components:
+        texts.extend((f"components[{e.index}].{k}", v) for k, v in e.values.items())
+    hits = []
+    for where, text in texts:
+        for word in VERDICT_WORDS:
+            if re.search(rf"\b{re.escape(word)}\b", text, flags=re.IGNORECASE):
+                hits.append((where, word))
+    return hits
+
+
+def _yaml_str(value: Any) -> str:
+    # A JSON string is a valid YAML double-quoted scalar, and quoting every
+    # value keeps names like "a: b # c" intact.
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def answers_template(doc: Dict[str, Any]) -> str:
+    """A starter answers file: every field id with its label as a comment,
+    and one support entry per component this scan found."""
+    lines = [
+        "# AIsbom comply answers file",
+        f"# Generated by AIsbom, template version {TEMPLATE_VERSION}.",
+        "#",
+        "# Fill in what you can answer and leave the rest empty. Each answer is",
+        "# written into the pack as given and tagged (provider-supplied). A value",
+        "# the scan read is kept beside your answer, never replaced.",
+        "#",
+        "# How to write answers:",
+        "#   text                 annex_xi.1b.acceptable_use: See https://acme.example/aup",
+        "#   date                 annex_xi.1c.release_date: 2025-07-01",
+        "#   yes / no question    art53.2_1.used: yes",
+        "#   several values       art53.1_3.modalities: [Text, Image]",
+        "#   several lines        annex_xi.2b.training_methods: |",
+        "#                          First paragraph.",
+        "#",
+        "#                          Second paragraph, indented the same.",
+        "# Quote text that contains a colon followed by a space, or starts with",
+        "# a special character such as # [ { * & ! | > ' \" % @",
+        "#",
+        f"# Field ids and examples: {DOCS_URL}",
+        "#",
+        "#   aisbom comply <target> --framework <eu-ai-act|fda> --answers <this file>",
+        "",
+        f"version: {ANSWERS_FORMAT_VERSION}",
+        "",
+        "fields:",
+    ]
+    doc_name = heading = None
+    for f in _field_registry():
+        if f.doc != doc_name:
+            doc_name, heading = f.doc, None
+            lines.extend(["", f"  # ===== {f.doc} ====="])
+        if f.heading != heading:
+            heading = f.heading
+            lines.extend(["", f"  # {f.heading}"])
+        comment = f.label
+        if f.hint:
+            comment += f" ({f.hint})"
+        if f.scan:
+            comment += " [the scan pre-fills this when it can read it]"
+        lines.extend([f"  # {comment}", f"  {f.fid}:"])
+
+    lines.extend([
+        "",
+        f"# ===== {SUPPORT_FILE} (--framework fda) =====",
+        "# An entry fills a component's support level and end-of-support date when",
+        f"# every match key it gives agrees ({', '.join(COMPONENT_MATCH_KEYS)}).",
+        "# Drop `version` to keep an answer across upgrades. Components no entry",
+        "# matches stay TODO.",
+    ])
+    entries = []
+    seen = set()
+    for c in _components(doc):
+        name = c.get("name")
+        if not name:
+            continue
+        key = (str(name), str(c.get("version") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = [f"  - name: {_yaml_str(name)}"]
+        if c.get("version"):
+            entry.append(f"    version: {_yaml_str(c['version'])}")
+        sha = _sha256(c)
+        if sha:
+            entry.append(f"    # sha256: {sha}")
+        entry.extend(["    support_level:", "    end_of_support_date:"])
+        entries.extend(entry)
+    if entries:
+        lines.append("components:")
+        lines.extend(entries)
+    else:
+        lines.append("components: []")
+    return "\n".join(lines) + "\n"
