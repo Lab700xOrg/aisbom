@@ -11,9 +11,13 @@ Two frameworks:
 The rule every builder here follows: **a field is filled only from something
 the scan actually read, and says where it came from.** Everything else is a
 ``TODO (provider)`` placeholder. A regulator-facing document with a guessed
-value in it is worse than one with a visible gap, so nothing is inferred —
-not even values that look derivable, such as a parameter count from tensor
-shapes, which a sharded or quantised release would get wrong.
+value in it is worse than one with a visible gap. Where a value is derived
+rather than read, the derivation is narrow and labelled: a parameter count is
+summed only over a provably complete set of safetensors files, and an
+interpretation of a declared value (modality from the task, supplier from the
+repository owner) is tagged *AIsbom's mapping*. A declared value that is not
+the field's answer (model-card languages, CO2 emissions, the HF repository's
+creation date) gets its own "declared" row and leaves the field itself TODO.
 
 The builders read the serialized CycloneDX document rather than the scanner's
 raw results. That is the file the pack bundles as ``sbom.json``, so every
@@ -38,21 +42,62 @@ import io
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
 # Bump on every change to the wording or field mapping of a generated
 # document, so a pack in someone's submission folder can be traced to the
 # exact template that produced it.
-TEMPLATE_VERSION = "2026-11-15"
+TEMPLATE_VERSION = "2026-11-15.2"
 
 TODO = "TODO (provider)"
 
 SOURCE_HF = "Hugging Face model card"
+SOURCE_HF_REPO = "Hugging Face repository metadata"
+SOURCE_HF_PARAMETERS = "Hugging Face safetensors metadata"
 SOURCE_HEADER = "model file header"
 SOURCE_SCAN = "AIsbom scan"
+SOURCE_SCAN_PARAMETERS = "AIsbom scan of safetensors headers"
 SOURCE_PROVIDER = "provider-supplied"
+# Interpretive values: AIsbom's reading of a declared fact, not the fact itself.
+MAPPING = "AIsbom's mapping"
+SOURCE_MODALITY = f"{MAPPING} from the declared task"
+SOURCE_SUPPLIER_HF = f"Hugging Face repository owner ({MAPPING})"
+SOURCE_SUPPLIER_PYPI = f"PyPI author ({MAPPING})"
+
+# Input / output modality for the Hugging Face tasks whose modalities follow
+# from the task itself. A task missing here leaves both fields TODO rather
+# than guessing. Listed in docs/comply.md; extend both together.
+TASK_MODALITIES: Dict[str, Tuple[str, str]] = {
+    "fill-mask": ("text", "text"),
+    "text-generation": ("text", "text"),
+    "text2text-generation": ("text", "text"),
+    "text-classification": ("text", "text (class labels)"),
+    "token-classification": ("text", "text (per-token labels)"),
+    "zero-shot-classification": ("text", "text (class labels)"),
+    "question-answering": ("text", "text"),
+    "summarization": ("text", "text"),
+    "translation": ("text", "text"),
+    "sentence-similarity": ("text", "similarity scores"),
+    "feature-extraction": ("text", "numeric vectors (embeddings)"),
+    "table-question-answering": ("tables and text", "text"),
+    "image-classification": ("image", "text (class labels)"),
+    "object-detection": ("image", "bounding boxes with class labels"),
+    "image-segmentation": ("image", "segmentation masks"),
+    "image-to-text": ("image", "text"),
+    "image-to-image": ("image", "image"),
+    "text-to-image": ("text", "image"),
+    "zero-shot-image-classification": ("image and text", "text (class labels)"),
+    "visual-question-answering": ("image and text", "text"),
+    "automatic-speech-recognition": ("audio", "text"),
+    "audio-classification": ("audio", "text (class labels)"),
+    "text-to-speech": ("text", "audio"),
+    "text-to-audio": ("text", "audio"),
+}
+
+# A shard of a sharded safetensors release: `model-00002-of-00004.safetensors`.
+_SHARD = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.safetensors$")
 
 # Wording that reads as a regulatory verdict about the provider. AIsbom's own
 # text never uses it (the test suite checks every generated file); provider
@@ -217,6 +262,98 @@ class _Facts:
     licenses: List[Tuple[str, str]]
     libraries: List[Tuple[str, str]]
     formats: List[Tuple[str, str]]
+    base_models: List[Tuple[str, str]] = field(default_factory=list)
+    languages: List[Tuple[str, str]] = field(default_factory=list)
+    first_published: List[Tuple[str, str]] = field(default_factory=list)
+    parameter_counts: List[Tuple[str, str]] = field(default_factory=list)
+    input_modalities: List[Tuple[str, str]] = field(default_factory=list)
+    output_modalities: List[Tuple[str, str]] = field(default_factory=list)
+    hardware: List[Tuple[str, str]] = field(default_factory=list)
+    co2: List[Tuple[str, str]] = field(default_factory=list)
+    evaluations: List[Tuple[str, str]] = field(default_factory=list)
+
+
+def _card_props(component: Dict[str, Any], name: str) -> List[str]:
+    return [v for n, v in _props(_card(component).get("properties")) if n == name]
+
+
+def _co2_line(component: Dict[str, Any]) -> Optional[str]:
+    """`149.2 g CO2eq (source: codecarbon; training type: fine-tuning; …)`."""
+    emissions = _card_prop(component, "aisbom:hf:co2_eq_emissions")
+    if emissions is None:
+        return None
+    details = [
+        f"{label}: {value}"
+        for key, label in (("source", "source"), ("training_type", "training type"),
+                           ("geographical_location", "location"))
+        for value in [_card_prop(component, f"aisbom:hf:co2_eq_emissions:{key}")]
+        if value
+    ]
+    # The model-card spec gives `co2_eq_emissions` in grams.
+    line = f"{emissions} g CO2eq"
+    return f"{line} ({'; '.join(details)})" if details else line
+
+
+def _evaluations(component: Dict[str, Any]) -> List[str]:
+    metrics = _card(component).get("quantitativeAnalysis")
+    metrics = metrics.get("performanceMetrics") if isinstance(metrics, dict) else None
+    out: List[str] = []
+    for m in metrics if isinstance(metrics, list) else []:
+        if isinstance(m, dict) and m.get("type") and m.get("value") is not None:
+            line = f"{m['type']} {m['value']}"
+            out.append(f"{line} ({m['slice']})" if m.get("slice") else line)
+    return out
+
+
+def _int_prop(component: Dict[str, Any], name: str) -> Optional[int]:
+    values = _prop_values(component, name)
+    try:
+        value = int(values[0]) if len(values) == 1 else None
+    except ValueError:
+        return None
+    return value if value is not None and value >= 0 else None
+
+
+def _local_parameter_counts(models: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """Parameter counts summed from safetensors headers, only for complete sets.
+
+    A set is one unsharded `.safetensors` file, or every shard
+    `<stem>-0000k-of-0000N.safetensors` for k = 1..N. Any shard missing,
+    listed twice or without a readable count leaves that set out: a partial
+    sum would understate the model, and Annex XI 1(d) is pre-filled from this.
+    """
+    singles: List[Tuple[str, int]] = []
+    shards: Dict[Tuple[str, int], Dict[int, Optional[int]]] = {}
+    duplicated = set()
+    for m in models:
+        name = str(m.get("name") or "")
+        if not name.endswith(".safetensors"):
+            continue
+        count = _int_prop(m, "aisbom:safetensors:parameters")
+        shard = _SHARD.match(name)
+        if shard:
+            key = (shard["stem"], int(shard["total"]))
+            index = int(shard["index"])
+            if index in shards.setdefault(key, {}):
+                duplicated.add(key)
+            shards[key][index] = count
+        elif count is not None:
+            singles.append((name, count))
+
+    out = [(f"{count:,} ({name})", SOURCE_SCAN_PARAMETERS) for name, count in singles]
+    for (stem, total), found in shards.items():
+        complete = (
+            (stem, total) not in duplicated
+            and total > 0
+            and set(found) == set(range(1, total + 1))
+            and all(c is not None for c in found.values())
+        )
+        if complete:
+            out.append((
+                f"{sum(found.values()):,} ({stem}-*-of-{total:05d}.safetensors, {total} shards)",
+                SOURCE_SCAN_PARAMETERS,
+            ))
+    return out
 
 
 def _collect(doc: Dict[str, Any]) -> _Facts:
@@ -226,7 +363,25 @@ def _collect(doc: Dict[str, Any]) -> _Facts:
 
     repos, names, tasks, families, archs = [], [], [], [], []
     datasets, licenses, libraries, formats = [], [], [], []
+    bases, languages, published, hf_params = [], [], [], []
+    inputs, outputs, hardware, co2, evaluations = [], [], [], [], []
     for m in models:
+        for base in _card_props(m, "aisbom:hf:base_model"):
+            bases.append((base, SOURCE_HF))
+        for language in _card_props(m, "aisbom:hf:language"):
+            languages.append((language, SOURCE_HF))
+        published.append((_card_prop(m, "aisbom:hf:created_at"), SOURCE_HF_REPO))
+        total = _card_prop(m, "aisbom:hf:parameters_total")
+        if total and total.isdigit():
+            hf_params.append((f"{int(total):,}", SOURCE_HF_PARAMETERS))
+        task = _params(m).get("task")
+        if isinstance(task, str) and task in TASK_MODALITIES:
+            inputs.append((TASK_MODALITIES[task][0], SOURCE_MODALITY))
+            outputs.append((TASK_MODALITIES[task][1], SOURCE_MODALITY))
+        hardware.append((_card_prop(m, "aisbom:hf:co2_eq_emissions:hardware_used"), SOURCE_HF))
+        co2.append((_co2_line(m), SOURCE_HF))
+        for line in _evaluations(m):
+            evaluations.append((line, SOURCE_HF))
         repo = _card_prop(m, "aisbom:hf:repo_id")
         # Card values come from Hugging Face whenever the card names a repo;
         # without one, the only source the card builder has is the file header.
@@ -261,6 +416,15 @@ def _collect(doc: Dict[str, Any]) -> _Facts:
         licenses=_distinct(licenses),
         libraries=_distinct(libraries),
         formats=_distinct(formats),
+        base_models=_distinct(bases),
+        languages=_distinct(languages),
+        first_published=_distinct(published),
+        parameter_counts=_distinct(hf_params + _local_parameter_counts(models)),
+        input_modalities=_distinct(inputs),
+        output_modalities=_distinct(outputs),
+        hardware=_distinct(hardware),
+        co2=_distinct(co2),
+        evaluations=_distinct(evaluations),
     )
 
 
@@ -391,7 +555,8 @@ def _intro(w: _Writer, title: str, target: str, *, legend: bool = True,
         w.para(
             f"Values tagged with a source in italics were read by the scan. Fields "
             f"marked **{TODO}** need information a file scan cannot read; "
-            f"AIsbom leaves them blank rather than guess."
+            f"AIsbom leaves them blank rather than guess. Values tagged "
+            f"_{MAPPING}_ are AIsbom's reading of a declared value; check them."
         )
     if provider:
         w.para(
@@ -463,6 +628,10 @@ def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
 
     w.heading(3, "Point 1(c) — Date of release and methods of distribution")
     w.ask("annex_xi.1c.release_date", "Date of release")
+    w.fact("annex_xi.1c.hf_first_published", "First published on Hugging Face",
+           facts.first_published,
+           "when the repository appeared on Hugging Face, which is not necessarily "
+           "the release date")
     w.fact("annex_xi.1c.hf_repository",
            "Hugging Face repository the scanned files come from", facts.repos)
     w.ask("annex_xi.1c.distribution_methods", "Methods of distribution")
@@ -470,12 +639,15 @@ def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
     w.heading(3, "Point 1(d) — Architecture and number of parameters")
     w.fact("annex_xi.1d.architecture_family", "Architecture family", facts.families)
     w.fact("annex_xi.1d.model_architecture", "Model architecture", facts.architectures)
-    w.ask("annex_xi.1d.parameter_count", "Number of parameters",
-          "AIsbom does not derive this from tensor shapes")
+    w.fact("annex_xi.1d.parameter_count", "Number of parameters", facts.parameter_counts,
+           "pre-filled only from a complete set of safetensors weights; other "
+           "formats and partial sets are left to the provider")
 
     w.heading(3, "Point 1(e) — Modality and format of inputs and outputs")
-    w.ask("annex_xi.1e.input_modality", "Input modality and format")
-    w.ask("annex_xi.1e.output_modality", "Output modality and format")
+    w.fact("annex_xi.1e.input_modality", "Input modality and format",
+           facts.input_modalities, "add the input format (for example the tokenizer)")
+    w.fact("annex_xi.1e.output_modality", "Output modality and format",
+           facts.output_modalities)
 
     w.heading(3, "Point 1(f) — Licence")
     w.fact("annex_xi.1f.licence", "Licence", facts.licenses)
@@ -507,11 +679,16 @@ def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
     w.heading(3, "Point 2(d) — Computational resources used to train the model")
     w.ask("annex_xi.2d.compute", "Computational resources",
           "for example the number of floating point operations")
+    w.fact("annex_xi.2d.hardware_declared", "Training hardware declared in the model card",
+           facts.hardware)
     w.ask("annex_xi.2d.training_time", "Training time and other relevant training details")
 
     w.heading(3, "Point 2(e) — Energy consumption")
     w.ask("annex_xi.2e.energy", "Known or estimated energy consumption",
           "may be estimated from the computational resources in point 2(d)")
+    w.fact("annex_xi.2e.co2_declared", "CO2 emissions declared in the model card",
+           facts.co2, "emissions are not energy consumption; the energy field above "
+           "still needs the provider's figure")
 
     w.heading(2, "Section 2 — Additional information for models with systemic risk")
     w.para(
@@ -520,6 +697,9 @@ def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
     )
     w.heading(3, "Item 1 — Evaluation strategies and results")
     w.ask("annex_xi.s2_1.evaluation", "Evaluation strategies, criteria, metrics and results")
+    w.fact("annex_xi.s2_1.evaluation_declared",
+           "Evaluation results declared in the model card", facts.evaluations,
+           "self-reported in the card; the full list is in sbom.json")
     w.heading(3, "Item 2 — Adversarial testing and model adaptations")
     w.ask("annex_xi.s2_2.adversarial_testing",
           "Adversarial testing measures (for example red teaming), alignment and fine-tuning")
@@ -612,9 +792,9 @@ def _art53(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
            "replace with the versioned name you place on the market if it differs")
     w.fact("art53.1_2.model_card_link", "Model card link",
            [(f"https://huggingface.co/{repo}", src) for repo, src in facts.repos])
-    w.ask("art53.1_2.model_dependencies", "Model dependencies",
-          "if the model modifies or fine-tunes another general-purpose AI model, "
-          "name it and link its summary")
+    w.fact("art53.1_2.model_dependencies", "Model dependencies", facts.base_models,
+           "if the model modifies or fine-tunes another general-purpose AI model, "
+           "name it and link its summary")
     w.ask("art53.1_2.market_placement_date",
           "Date of placement of the model on the Union market")
 
@@ -625,6 +805,9 @@ def _art53(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
     w.ask("art53.1_3.content_types", "Types of content per modality")
     w.ask("art53.1_3.latest_acquisition_date", "Latest date of data acquisition or collection",
           "MM/YYYY, and whether training continues on new data")
+    w.fact("art53.1_3.languages_declared", "Languages declared in the model card",
+           facts.languages, "the languages the card lists, which are not necessarily "
+           "the languages of the training data")
     w.ask("art53.1_3.linguistic_characteristics",
           "Linguistic characteristics of the overall training data")
     w.ask("art53.1_3.other_characteristics",
@@ -771,20 +954,66 @@ def build_eu_ai_act_pack(
 # FDA §524B
 # ---------------------------------------------------------------------------
 
+# Columns are only ever appended, so a spreadsheet built on an earlier pack
+# keeps reading the columns it knows.
 _SUPPORT_COLUMNS = [
     "bom_ref", "name", "type", "version", "sha256", "license",
     "support_level", "end_of_support_date", "support_source",
+    "supplier", "supplier_source",
+    "end_of_support_lookup", "end_of_support_lookup_source",
 ]
 
 
-def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"]) -> Tuple[str, int]:
-    """The support table, and how many components the answers file filled."""
+def supplier_for(component: Dict[str, Any]) -> Tuple[str, str]:
+    """``(supplier, source)`` under AIsbom's supplier rule, or ``(TODO, why)``.
+
+    * A model: the Hugging Face repository owner, only when the card names no
+      base model or every base model sits in the owner's own namespace. A
+      fine-tune or re-upload of another organisation's model stays TODO, since
+      the uploader is then not plainly the supplier. Known gap: a re-upload
+      whose card declares no base model still gets the uploader.
+    * A package: the author its PyPI release declares.
+    """
+    if component.get("type") == _ML_COMPONENT_TYPE:
+        owner = _card_prop(component, "aisbom:hf:author")
+        if not owner:
+            return TODO, ""
+        foreign = [b for b in _card_props(component, "aisbom:hf:base_model")
+                   if b.split("/", 1)[0] != owner or "/" not in b]
+        if foreign:
+            return TODO, f"not filled: derived from {', '.join(foreign)}"
+        return owner, SOURCE_SUPPLIER_HF
+    authors = _prop_values(component, "aisbom:pypi:author")
+    if authors:
+        return authors[0], SOURCE_SUPPLIER_PYPI
+    return TODO, ""
+
+
+@dataclass
+class _SupportCounts:
+    supplied: int = 0
+    suppliers: int = 0
+    looked_up: int = 0
+
+
+def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"],
+                 eol_answers: Optional[Mapping[Tuple[str, str], Any]] = None,
+                 ) -> Tuple[str, _SupportCounts]:
+    """The support table, and how many components each source filled.
+
+    A provider answer always keeps the data cell. An endoflife.date date fills
+    ``end_of_support_date`` only when the provider gave none, and is always
+    recorded in the ``end_of_support_lookup`` columns, so a value the lookup
+    found is never lost and the date column stays one parseable date.
+    """
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_SUPPORT_COLUMNS, lineterminator="\n")
     writer.writeheader()
     entries = answers.components if answers else []
-    supplied = 0
+    eol_answers = eol_answers or {}
+    counts = _SupportCounts()
     for c in _components(doc):
+        supplier, supplier_source = supplier_for(c)
         row = {
             "bom_ref": c.get("bom-ref") or "",
             "name": c.get("name") or "",
@@ -795,7 +1024,21 @@ def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"]) -> Tuple[str
             "support_level": TODO,
             "end_of_support_date": TODO,
             "support_source": "",
+            "supplier": supplier,
+            "supplier_source": supplier_source,
+            "end_of_support_lookup": "",
+            "end_of_support_lookup_source": "",
         }
+        if supplier != TODO:
+            counts.suppliers += 1
+        lookup = None
+        if c.get("type") != _ML_COMPONENT_TYPE and c.get("name") and c.get("version"):
+            lookup = eol_answers.get((c["name"], c["version"]))
+        if lookup is not None:
+            counts.looked_up += 1
+            row["end_of_support_date"] = lookup.date
+            row["end_of_support_lookup"] = lookup.date
+            row["end_of_support_lookup_source"] = lookup.source
         matching = [e for e in entries if e.matches(c)]
         for column in COMPONENT_VALUE_KEYS:
             # First matching entry in file order that answers the column wins.
@@ -804,9 +1047,18 @@ def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"]) -> Tuple[str
                 row[column] = value
                 row["support_source"] = SOURCE_PROVIDER
         if row["support_source"]:
-            supplied += 1
+            counts.supplied += 1
         writer.writerow(row)
-    return buf.getvalue(), supplied
+    return buf.getvalue(), counts
+
+
+def eol_pins(doc: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """The ``(name, version)`` of every versioned non-model component."""
+    return [
+        (str(c["name"]), str(c["version"]))
+        for c in _components(doc)
+        if c.get("type") != _ML_COMPONENT_TYPE and c.get("name") and c.get("version")
+    ]
 
 
 def build_fda_pack(
@@ -816,11 +1068,20 @@ def build_fda_pack(
     vex_statements: Sequence[Any],
     vex_files: Sequence[str],
     answers: Optional["Answers"] = None,
+    eol_answers: Optional[Mapping[Tuple[str, str], Any]] = None,
+    eol_note: Optional[str] = None,
 ) -> Dict[str, str]:
     """Return ``{filename: content}`` for the FDA pack (SBOM and VEX excluded,
-    since the CLI writes those with the same code `scan --vex` uses)."""
+    since the CLI writes those with the same code `scan --vex` uses).
+
+    ``eol_answers`` maps a component's ``(name, version)`` to an endoflife.date
+    answer (``.date``, ``.source``); ``eol_note`` says why the lookup did not
+    run, or what failed, for the README. These are the one pre-fill not read
+    from ``sbom.json``: the lookup runs when the pack is built.
+    """
     comps = _components(doc)
-    support_csv, supplied = _support_csv(doc, answers)
+    support_csv, counts = _support_csv(doc, answers, eol_answers)
+    supplied = counts.supplied
     statuses = [getattr(s, "status", None) for s in vex_statements]
     affected = statuses.count("affected")
 
@@ -839,9 +1100,32 @@ def build_fda_pack(
         [
             [SBOM_FILE, f"CycloneDX 1.7 SBOM, {len(comps)} component(s)"],
             *[[name, "VEX for the SBOM's components"] for name in vex_files],
-            [SUPPORT_FILE, "One row per component, with support level and end-of-support date to fill in"],
+            [SUPPORT_FILE, "One row per component: supplier, support level and "
+                           "end-of-support date, pre-filled where a source exists"],
         ],
     )
+    w.heading(2, "Supplier and support data")
+    lookup_line = (
+        f"- **End-of-support dates:** {counts.looked_up} of {len(comps)} component(s) "
+        f"carry the date endoflife.date publishes for the release cycle of their "
+        f"pinned version (`end_of_support_lookup`, with the product and cycle in "
+        f"`end_of_support_lookup_source`). It fills `end_of_support_date` only "
+        f"where the answers file gave none. Packages endoflife.date does not "
+        f"track, and model files, stay {TODO}. These dates were looked up when "
+        f"this pack was built and are not in `{SBOM_FILE}`."
+    )
+    if eol_note:
+        lookup_line += f" Lookup: {eol_note}."
+    w.lines.extend([
+        f"- **Supplier** (an NTIA minimum element): {counts.suppliers} of "
+        f"{len(comps)} component(s) carry one under {MAPPING} (see "
+        f"`supplier_source`): a model's Hugging Face repository owner when its "
+        f"card names no base model from another namespace, a package's PyPI "
+        f"author. Check each one: a repository that re-uploads another "
+        f"organisation's model without naming it as the base model shows the "
+        f"uploader. The rest are marked {TODO}.",
+        lookup_line,
+    ])
     w.heading(2, "Vulnerability assessment")
     w.para(
         "FDA's guidance asks for a risk assessment of each known vulnerability "
@@ -854,20 +1138,21 @@ def build_fda_pack(
     w.heading(2, "What this pack cannot evidence")
     if supplied:
         support_line = (
-            f"- **Support level and end-of-support date** for each component: "
-            f"{supplied} of {len(comps)} component(s) in `{SUPPORT_FILE}` take them "
-            f"from the provider's answers file (`support_source` is "
+            f"- **Support level, and end-of-support dates endoflife.date does not "
+            f"cover:** {supplied} of {len(comps)} component(s) in `{SUPPORT_FILE}` "
+            f"take them from the provider's answers file (`support_source` is "
             f"{SOURCE_PROVIDER}); the rest are marked {TODO}."
         )
     else:
         support_line = (
-            f"- **Support level and end-of-support date** for each component: "
-            f"`{SUPPORT_FILE}` marks both {TODO}."
+            f"- **Support level, and end-of-support dates endoflife.date does not "
+            f"cover:** `{SUPPORT_FILE}` marks them {TODO}."
         )
     w.lines.extend([
         support_line,
-        "- **Supplier name** (an NTIA minimum element): the scan does not record "
-        "a supplier for model files.",
+        "- **A supplier the scan cannot attribute:** local model files with no "
+        "Hugging Face match, fine-tunes of another organisation's model, and "
+        "packages whose PyPI release names no author.",
         "- **Software outside the scanned target**, such as firmware, the "
         "operating system or application code.",
         "- **Vulnerabilities without a CVE feed entry**, and CVEs in unpinned "

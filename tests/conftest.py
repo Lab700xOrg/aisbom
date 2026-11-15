@@ -80,6 +80,23 @@ def _stub_pypi_network(monkeypatch):
     monkeypatch.setattr("aisbom.pypi._default_session", lambda: _OfflinePyPI())
 
 
+class _OfflineEol:
+    """Stands in for the HTTP session inside aisbom.eol: every call fails."""
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("endoflife.date is not reachable from the test suite")
+
+
+@pytest.fixture(autouse=True)
+def _stub_eol_network(monkeypatch):
+    """Keep `comply --framework fda` from ever reaching endoflife.date.
+
+    Same shape as `_stub_pypi_network`: tests that inject a fake session are
+    unaffected; one that forgets sees the degraded path (dates stay TODO).
+    """
+    monkeypatch.setattr("aisbom.eol._default_session", lambda: _OfflineEol())
+
+
 @pytest.fixture(autouse=True)
 def _stub_hf_file_index(monkeypatch):
     """Keep local-file HF matching from ever reaching huggingface.co.

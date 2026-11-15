@@ -132,6 +132,11 @@ def build_bom(results: Dict[str, Any]) -> Bom:
                 name=pypi.LICENSE_SOURCE_PROPERTY,
                 value=dep.get("license_source") or pypi.LICENSE_SOURCE,
             ))
+        # The author the release declares, kept as a property rather than the
+        # standard `supplier` field: whether the author is the supplier is a
+        # rule `aisbom comply` applies, not something PyPI states.
+        if dep.get("author"):
+            lib.properties.add(Property(name=pypi.AUTHOR_PROPERTY, value=dep["author"]))
         bom.components.add(lib)
 
     return bom

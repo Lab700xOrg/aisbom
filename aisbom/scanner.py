@@ -5,7 +5,7 @@ import zipfile
 import zlib
 import struct
 import hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path, PurePosixPath
 from pip_requirements_parser import RequirementsFile
 from aisbom import pickle_containers as pc
@@ -1649,6 +1649,9 @@ class DeepScanner:
                     "dtypes": dtypes,
                     "header_keys": list(header_json.keys()),
                 }
+                parameters = self._safetensors_parameters(tensor_entries)
+                if parameters is not None:
+                    meta["details"]["parameters"] = parameters
         except Exception as e:
             meta["error"] = str(e)
         finally:
@@ -1669,6 +1672,29 @@ class DeepScanner:
                 f"{meta.get('error') or 'header shorter than 8 bytes'}",
             ))
         return self._finalize_inspection(meta, local_path or name)
+
+    @staticmethod
+    def _safetensors_parameters(tensor_entries: Dict[str, Any]) -> Optional[int]:
+        """Sum of every tensor's shape product, or None if any shape is unusable.
+
+        All-or-nothing on purpose: skipping one malformed entry would record a
+        count that is silently low, and `aisbom comply` pre-fills the Annex XI
+        parameter count from this.
+        """
+        if not tensor_entries:
+            return None
+        total = 0
+        for entry in tensor_entries.values():
+            shape = entry.get("shape") if isinstance(entry, dict) else None
+            if not isinstance(shape, list):
+                return None
+            product = 1
+            for dim in shape:
+                if isinstance(dim, bool) or not isinstance(dim, int) or dim < 0:
+                    return None
+                product *= dim
+            total += product
+        return total
 
     @staticmethod
     def _read_gguf_window(f, is_remote: bool) -> bytes:

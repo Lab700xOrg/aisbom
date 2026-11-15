@@ -143,6 +143,9 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
         header_keys = details.get("header_keys") or []
         if header_keys:
             props.append(("aisbom:safetensors:header_keys", _csv(header_keys)))
+        parameters = details.get("parameters")
+        if parameters is not None:
+            props.append(("aisbom:safetensors:parameters", str(parameters)))
 
     elif fmt == "gguf":
         architecture = details.get("architecture")

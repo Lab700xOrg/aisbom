@@ -67,11 +67,16 @@ LICENSE_SOURCE = "pypi"
 # Names where a dependency's license came from, so a consumer can tell a
 # registry declaration apart from one AIsbom read out of the artifact itself.
 LICENSE_SOURCE_PROPERTY = "aisbom:license:source"
+# The author the release declares. A declaration, not a supplier assertion:
+# `aisbom comply` decides whether to offer it as the supplier.
+AUTHOR_PROPERTY = "aisbom:pypi:author"
 
 CACHE_FILENAME = "pypi_license_cache.json"
 RESOLVED_TTL_SECONDS = 30 * 24 * 60 * 60
 UNRESOLVED_TTL_SECONDS = 24 * 60 * 60
-_CACHE_SCHEMA = 1
+# 2: entries also carry the declared author. Schema-1 entries have none, and
+# reusing them would hide the author for up to the resolved TTL.
+_CACHE_SCHEMA = 2
 
 REQUEST_TIMEOUT_SECONDS = 5
 LOOKUP_BUDGET_SECONDS = 15
@@ -83,6 +88,7 @@ _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 # Free text longer than this is a license *text*, not a declaration of one.
 _MAX_NAME_LENGTH = 64
 _MAX_EXPRESSION_LENGTH = 512
+_MAX_AUTHOR_LENGTH = 100
 
 _DEFAULT_CACHE_DIR = object()
 
@@ -259,6 +265,50 @@ def normalize_license(info: Any) -> Optional[ResolvedLicense]:
     return None
 
 
+_DISPLAY_NAME = re.compile(r'^\s*"?([^"<>@,]+?)"?\s*<[^>]+>')
+
+
+def _author_name(value: Any) -> Optional[str]:
+    text = _single_line(value, _MAX_AUTHOR_LENGTH)
+    if text is None or "@" in text or text.casefold() in _PLACEHOLDERS:
+        return None
+    return text
+
+
+def _email_display_name(value: Any) -> Optional[str]:
+    """`Jane Doe` from `Jane Doe <jane@x>, Other <o@x>`: the first display name."""
+    if not isinstance(value, str):
+        return None
+    match = _DISPLAY_NAME.match(value)
+    return _author_name(match.group(1)) if match else None
+
+
+def normalize_author(info: Any) -> Optional[str]:
+    """The author a PyPI ``info`` object declares, or None. Never raises.
+
+    Tried in order: ``author``, ``maintainer``, then the display name in
+    ``author_email`` / ``maintainer_email`` (where PEP 621 builds put it). An
+    email address alone is not a name and resolves nothing.
+    """
+    if not isinstance(info, Mapping):
+        return None
+    for key in ("author", "maintainer"):
+        name = _author_name(info.get(key))
+        if name:
+            return name
+    for key in ("author_email", "maintainer_email"):
+        name = _email_display_name(info.get(key))
+        if name:
+            return name
+    return None
+
+
+@dataclass(frozen=True)
+class _Release:
+    license: Optional[ResolvedLicense]
+    author: Optional[str]
+
+
 # --------------------------------------------------------------------------
 # Cache
 # --------------------------------------------------------------------------
@@ -292,23 +342,28 @@ class _Cache:
         except (AttributeError, TypeError, KeyError, ValueError):
             return False
 
-    def get(self, key: str) -> Tuple[bool, Optional[ResolvedLicense]]:
-        """(hit, license). A hit with no license is a cached unknown."""
+    def get(self, key: str) -> Tuple[bool, Optional[_Release]]:
+        """(hit, release). A hit with nothing declared is a cached unknown."""
         entry = self.entries.get(key)
         if not self._fresh(entry):
             return False, None
+        author = entry.get("author")
+        if author is not None and not isinstance(author, str):
+            return False, None
         value = entry.get("license")
         if value is None:
-            return True, None
+            return True, _Release(None, author)
         if isinstance(value, str) and isinstance(entry.get("is_spdx"), bool):
-            return True, ResolvedLicense(value, entry["is_spdx"])
+            return True, _Release(ResolvedLicense(value, entry["is_spdx"]), author)
         return False, None
 
-    def put(self, key: str, resolved: Optional[ResolvedLicense]) -> None:
+    def put(self, key: str, release: _Release) -> None:
+        resolved = release.license
         self.entries[key] = {
             "fetched_at": self.now,
             "license": resolved.value if resolved else None,
             "is_spdx": resolved.is_spdx if resolved else False,
+            "author": release.author,
         }
         self.dirty = True
 
@@ -442,7 +497,7 @@ def resolve_dependency_licenses(
     cache = _Cache(Path(directory) if directory else None,
                    time.time() if now is None else now)
 
-    answers: Dict[Tuple[str, str], Optional[ResolvedLicense]] = {}
+    answers: Dict[Tuple[str, str], Optional[_Release]] = {}
     failures: Dict[Tuple[str, str], str] = {}
     try:
         uncached = []
@@ -458,8 +513,9 @@ def resolve_dependency_licenses(
                 session if session is not None else _default_session(), budget_seconds
             )
 
-            def fetch(pin: Tuple[str, str]) -> Optional[ResolvedLicense]:
-                return normalize_license(client.release_info(*pin))
+            def fetch(pin: Tuple[str, str]) -> _Release:
+                info = client.release_info(*pin)
+                return _Release(normalize_license(info), normalize_author(info))
 
             with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(uncached))) as pool:
                 futures = {pin: pool.submit(fetch, pin) for pin in uncached}
@@ -482,7 +538,13 @@ def resolve_dependency_licenses(
         if pin in failures:
             result.failed += 1
             continue
-        resolved = answers.get(pin)
+        release = answers.get(pin)
+        if release is None:
+            continue
+        if release.author:
+            dep["author"] = release.author
+            dep["author_source"] = LICENSE_SOURCE
+        resolved = release.license
         if resolved is None:
             continue
         dep["license"] = resolved.value

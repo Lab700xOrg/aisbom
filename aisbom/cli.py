@@ -30,6 +30,7 @@ import uuid
 from .version_check import check_latest_version
 from . import hf_match
 from . import loop_state
+from . import eol
 from . import offline
 from . import osv
 from . import pypi
@@ -1651,6 +1652,23 @@ class ComplyFramework(str, Enum):
     FDA = "fda"
 
 
+def _lookup_end_of_support(doc: dict, opted_out: bool) -> tuple[dict, str | None]:
+    """endoflife.date answers for the SBOM's dependencies, and a README note
+    saying why the lookup did not run or what failed. Never raises."""
+    if offline.is_offline():
+        return {}, "skipped (--offline)"
+    if opted_out or eol.disabled_by_env():
+        return {}, "skipped (--no-eol-lookup)"
+    pins = comply_mod.eol_pins(doc)
+    if not pins:
+        return {}, None
+    result = eol.lookup_end_of_support(pins)
+    if result.error:
+        console.print(f"[yellow]⚠ {result.error}; those components stay TODO.[/yellow]",
+                      highlight=False)
+    return result.answers, result.error
+
+
 @app.command()
 def comply(
     target: str = typer.Argument(
@@ -1688,6 +1706,15 @@ def comply(
             "When TARGET is a directory, do not ask huggingface.co for the model "
             "card of local model files matched to their repo. "
             "AISBOM_NO_HF_LOOKUP=1 does the same."
+        ),
+    ),
+    no_eol_lookup: bool = typer.Option(
+        False,
+        "--no-eol-lookup",
+        help=(
+            "For --framework fda, do not ask endoflife.date for the end-of-support "
+            "date of each pinned dependency (sends package names only). "
+            "AISBOM_NO_EOL_LOOKUP=1 does the same."
         ),
     ),
     offline_mode: bool = typer.Option(
@@ -1818,12 +1845,15 @@ def comply(
             schema_version="1.7",
             osv_enabled=not (no_osv or osv.disabled_by_env() or offline.is_offline()),
         )
+        eol_answers, eol_note = _lookup_end_of_support(doc, no_eol_lookup)
         pack = comply_mod.build_fda_pack(
             doc,
             target=target,
             vex_statements=statements,
             vex_files=vex_names,
             answers=answers,
+            eol_answers=eol_answers,
+            eol_note=eol_note,
         )
         title = "FDA §524B pack"
         for entry in comply_mod.unmatched_component_answers(doc, answers or comply_mod.Answers()):

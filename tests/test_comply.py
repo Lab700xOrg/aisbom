@@ -210,8 +210,9 @@ def test_a_card_free_scan_leaves_model_facts_as_todo():
     assert comply.TODO in model_id
 
 
-def test_parameter_count_is_never_prefilled():
-    """The scan cannot read it reliably, so it is always left to the provider."""
+def test_parameter_count_is_not_prefilled_without_a_complete_source():
+    """No HF total and no counted safetensors set: left to the provider.
+    The filled cases are in tests/test_comply_scan_fields.py."""
     annex = _eu(_hf_sbom())[comply.ANNEX_XI_FILE]
     body = _section(annex, "### Point 1(d)", "### Point 1(e)")
     params_line = next(line for line in body.splitlines() if "Number of parameters" in line)
