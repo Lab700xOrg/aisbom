@@ -94,11 +94,14 @@ Two sources, shown side by side when both exist:
   how much of the repository the scan read.
 - **AIsbom scan of safetensors headers**: each safetensors file's header lists
   every tensor's shape; `aisbom:safetensors:parameters` is the sum of their
-  products, recorded only when every entry has a well-formed shape. `comply`
-  adds these up only over a complete set: a single unsharded `.safetensors`
-  file, or every shard `<stem>-0000k-of-0000N.safetensors` for k = 1..N, each
-  with a readable count. A missing, duplicated or unreadable shard leaves that
-  set out.
+  products, recorded only when every entry has a well-formed shape. A count is
+  used only for a complete set: a single unsharded `.safetensors` file, or
+  every shard `<stem>-0000k-of-0000N.safetensors` for k = 1..N **in the same
+  directory**, each with a readable count. The scanner decides this, since it
+  sees directories, and writes `aisbom:safetensors:set_parameters` and
+  `set_shards` on each shard of a complete set; `comply` never re-derives it
+  from component names. A missing, duplicated or unreadable shard, or shards
+  split across directories, leaves the set out.
 
 Other weight formats (GGUF, pickle, ONNX) are never counted.
 
@@ -157,14 +160,15 @@ machine-readable way to record the per-vulnerability assessment it asks for.
 
 ### End of support
 
-For every versioned dependency, `comply --framework fda` asks
+For every exact `==` pin in requirements.txt, `comply --framework fda` asks
 [endoflife.date](https://endoflife.date) (`GET /api/v1/products/<name>`,
 package names only) for the product of the same name. A product is used only
 when it lists the package's own PyPI purl (`pkg:pypi/<name>`). The pinned
 version is matched to the release cycle that equals it or prefixes it at a
 dot (`1.26.4` → `1.26`, never `1.2`), and that cycle's end-of-life date is
 written. Untracked packages, versions outside every cycle, cycles with no
-announced date, and model files stay TODO. The lookup is skipped under
+announced date, unpinned requirements (a `>=` lower bound is not what is
+installed), and model files stay TODO. The lookup is skipped under
 `--offline` / `AISBOM_OFFLINE=1` and `--no-eol-lookup`, and a failure never
 stops the pack; the README says when it did not run.
 

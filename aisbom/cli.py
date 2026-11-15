@@ -1652,21 +1652,27 @@ class ComplyFramework(str, Enum):
     FDA = "fda"
 
 
-def _lookup_end_of_support(doc: dict, opted_out: bool) -> tuple[dict, str | None]:
-    """endoflife.date answers for the SBOM's dependencies, and a README note
-    saying why the lookup did not run or what failed. Never raises."""
+def _lookup_end_of_support(dependencies: list, opted_out: bool) -> tuple[dict, str | None]:
+    """endoflife.date answers keyed by dependency bom-ref, for exact pins only,
+    and a README note saying why the lookup did not run or what failed.
+    Never raises."""
     if offline.is_offline():
         return {}, "skipped (--offline)"
     if opted_out or eol.disabled_by_env():
         return {}, "skipped (--no-eol-lookup)"
-    pins = comply_mod.eol_pins(doc)
-    if not pins:
+    targets = comply_mod.eol_targets(dependencies)
+    if not targets:
         return {}, None
-    result = eol.lookup_end_of_support(pins)
+    result = eol.lookup_end_of_support([(name, version) for _, name, version in targets])
     if result.error:
         console.print(f"[yellow]⚠ {result.error}; those components stay TODO.[/yellow]",
                       highlight=False)
-    return result.answers, result.error
+    answers = {
+        ref: result.answers[(name, version)]
+        for ref, name, version in targets
+        if (name, version) in result.answers
+    }
+    return answers, result.error
 
 
 @app.command()
@@ -1845,7 +1851,8 @@ def comply(
             schema_version="1.7",
             osv_enabled=not (no_osv or osv.disabled_by_env() or offline.is_offline()),
         )
-        eol_answers, eol_note = _lookup_end_of_support(doc, no_eol_lookup)
+        eol_answers, eol_note = _lookup_end_of_support(
+            results.get("dependencies", []), no_eol_lookup)
         pack = comply_mod.build_fda_pack(
             doc,
             target=target,

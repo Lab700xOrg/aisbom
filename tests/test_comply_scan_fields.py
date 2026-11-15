@@ -120,11 +120,14 @@ def test_parameter_count_stays_todo_with_no_source():
     assert comply.TODO in _line(_annex(_hf_sbom()), "Number of parameters")
 
 
-def _safetensors(name, params=None):
+def _safetensors(name, params=None, set_total=None, set_shards=None):
     props = [{"name": "aisbom:format", "value": "safetensors"},
              {"name": "aisbom:risk", "value": "LOW"}]
     if params is not None:
         props.append({"name": "aisbom:safetensors:parameters", "value": str(params)})
+    if set_total is not None:
+        props += [{"name": "aisbom:safetensors:set_parameters", "value": str(set_total)},
+                  {"name": "aisbom:safetensors:set_shards", "value": str(set_shards)}]
     return {"type": "machine-learning-model", "name": name,
             "bom-ref": f"artifact-x-{name}", "properties": props}
 
@@ -139,40 +142,31 @@ def test_a_single_unsharded_file_is_counted():
     assert comply.SOURCE_SCAN_PARAMETERS in line
 
 
-def test_a_complete_shard_set_is_summed():
+def test_a_shard_set_the_scanner_marked_complete_is_shown_once():
     line = _params_line(
-        _safetensors("model-00001-of-00003.safetensors", 100),
-        _safetensors("model-00002-of-00003.safetensors", 200),
-        _safetensors("model-00003-of-00003.safetensors", 300),
+        _safetensors("model-00001-of-00002.safetensors", 100, 300, 2),
+        _safetensors("model-00002-of-00002.safetensors", 200, 300, 2),
     )
-    assert "600 (model-*-of-00003.safetensors, 3 shards)" in line
+    assert "300 (model-*-of-00002.safetensors, 2 shards)" in line
+    assert line.count("300 (") == 1
 
 
-def test_a_partial_shard_set_is_never_counted():
-    """Two of three shards read: summing them would understate the model."""
+def test_remote_shard_names_with_a_directory_are_read_by_basename():
     line = _params_line(
-        _safetensors("model-00001-of-00003.safetensors", 100),
-        _safetensors("model-00003-of-00003.safetensors", 300),
-    )
-    assert comply.TODO in line
-    assert "400" not in line
+        _safetensors("sub/model-00001-of-00001.safetensors", 7, 7, 1))
+    assert "7 (model-*-of-00001.safetensors, 1 shards)" in line
 
 
-def test_a_shard_without_a_readable_count_spoils_the_set():
+def test_shards_the_scanner_did_not_mark_are_never_summed():
+    """Per-file counts on shards are not enough: names are basenames for a
+    local scan, so `a/…-00001-of-00002` and `b/…-00002-of-00002` would look
+    complete. Only the scanner, which sees directories, can mark a set."""
     line = _params_line(
-        _safetensors("model-00001-of-00002.safetensors", 100),
-        _safetensors("model-00002-of-00002.safetensors"),
-    )
-    assert comply.TODO in line
-
-
-def test_a_shard_listed_twice_spoils_the_set():
-    line = _params_line(
-        _safetensors("model-00001-of-00002.safetensors", 100),
         _safetensors("model-00001-of-00002.safetensors", 100),
         _safetensors("model-00002-of-00002.safetensors", 200),
     )
     assert comply.TODO in line
+    assert "300" not in line
 
 
 def test_an_unsharded_file_without_a_count_is_not_counted():
@@ -338,7 +332,7 @@ def _fda_eol(doc, answers=None, note=None, eol=None):
     )
 
 
-_TORCH_EOL = {("torch", "2.10.0"): _Eol("2027-01-31", "endoflife.date torch 2.10")}
+_TORCH_EOL = {"dependency-0-torch": _Eol("2027-01-31", "endoflife.date torch 2.10")}
 
 
 def test_lookup_date_fills_end_of_support_and_is_recorded():
@@ -361,7 +355,7 @@ def test_a_provider_date_keeps_the_cell_and_the_lookup_stays_visible():
 
 
 def test_model_files_never_take_a_lookup_date():
-    eol = {("weights|v2.pt", ""): _Eol("2027-01-31", "x")}
+    eol = {"artifact-0-weights|v2.pt": _Eol("2027-01-31", "x")}
     row = _rows(_fda_eol(_local_sbom(), eol=eol))["weights|v2.pt"]
     assert row["end_of_support_date"] == comply.TODO
     assert row["end_of_support_lookup"] == ""
@@ -379,8 +373,15 @@ def test_the_readme_says_why_the_lookup_did_not_run():
     assert "not in `sbom.json`" in readme
 
 
-def test_eol_pins_are_the_versioned_non_model_components():
-    assert comply.eol_pins(_local_sbom()) == [("torch", "2.10.0")]
+def test_eol_targets_are_exact_pins_only_keyed_by_bom_ref():
+    """`numpy>=2.2.0` is recorded as version 2.2.0 but is not what is
+    installed; matching it to the 2.2 cycle would be a guess."""
+    deps = [
+        {"name": "torch", "version": "2.10.0", "pinned": True},
+        {"name": "numpy", "version": "2.2.0", "pinned": False},
+        {"name": "requests", "version": "unknown", "pinned": False},
+    ]
+    assert comply.eol_targets(deps) == [("dependency-0-torch", "torch", "2.10.0")]
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +404,7 @@ def _fda_cli(tmp_path, monkeypatch, *flags, lookup=None):
 
     monkeypatch.setattr(eol, "lookup_end_of_support", fake_lookup)
     src = _restricted_tree(tmp_path)
-    (src / "requirements.txt").write_text("torch==2.10.0\n")
+    (src / "requirements.txt").write_text("torch==2.10.0\nnumpy>=2.2.0\n")
     out = tmp_path / "pack"
     result = CliRunner().invoke(app, ["comply", str(src), "--framework", "fda",
                                       "--output-dir", str(out), *flags])
@@ -413,11 +414,13 @@ def _fda_cli(tmp_path, monkeypatch, *flags, lookup=None):
 
 def test_cli_fills_end_of_support_from_the_lookup(tmp_path, monkeypatch):
     calls, out, _ = _fda_cli(tmp_path, monkeypatch, "--no-osv")
+    # The unpinned numpy>=2.2.0 is never looked up.
     assert calls == [[("torch", "2.10.0")]]
     rows = {r["name"]: r for r in csv.DictReader(io.StringIO(
         (out / comply.SUPPORT_FILE).read_text()))}
     assert rows["torch"]["end_of_support_date"] == "2027-01-31"
     assert rows["torch"]["end_of_support_lookup_source"] == "endoflife.date torch 2.10"
+    assert rows["numpy"]["end_of_support_date"] == comply.TODO
 
 
 @pytest.mark.parametrize("flags, env, note", [

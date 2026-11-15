@@ -1,5 +1,6 @@
 import os
 import json
+import posixpath
 import re
 import zipfile
 import zlib
@@ -28,6 +29,10 @@ from aisbom.safety import (
 # Constants
 PYTORCH_EXTENSIONS = {'.pt', '.pth', '.bin'}
 SAFETENSORS_EXTENSION = '.safetensors'
+# One shard of a sharded safetensors release: `model-00002-of-00004.safetensors`.
+_SAFETENSORS_SHARD = re.compile(
+    r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.safetensors$"
+)
 GGUF_EXTENSION = '.gguf'
 KERAS_EXTENSIONS = {'.keras', '.h5', '.hdf5'}
 ONNX_EXTENSION = '.onnx'
@@ -460,6 +465,7 @@ class DeepScanner:
                         "NotAFileOrDirectory",
                     )
 
+        self._mark_complete_safetensors_sets()
         return {
             "artifacts": self.artifacts,
             "dependencies": self.dependencies,
@@ -467,6 +473,39 @@ class DeepScanner:
             "hf_model_card": self.hf_model_card,
             "artifact_paths": [self._local_paths.get(i) for i in range(len(self.artifacts))],
         }
+
+    def _mark_complete_safetensors_sets(self) -> None:
+        """Record a set-wide parameter count on every shard of a complete set.
+
+        A set is the shards `<stem>-0000k-of-0000N.safetensors` for k = 1..N in
+        one directory. Only the scanner can decide this: component names are
+        basenames for local scans, so two unrelated model directories holding
+        one half each would look complete to anything reading the SBOM. A
+        shard missing, listed twice or without a count leaves the set unmarked.
+        """
+        groups: Dict[tuple, Dict[int, List[Dict[str, Any]]]] = {}
+        for index, art in enumerate(self.artifacts):
+            name = str(art.get("name") or "")
+            shard = _SAFETENSORS_SHARD.match(posixpath.basename(name))
+            if art.get("framework") != "SafeTensors" or not shard:
+                continue
+            local = self._local_paths.get(index)
+            directory = str(local.parent) if local is not None else posixpath.dirname(name)
+            key = (directory, shard["stem"], int(shard["total"]))
+            groups.setdefault(key, {}).setdefault(int(shard["index"]), []).append(art)
+        for (_, _, total), found in groups.items():
+            arts = [a for listed in found.values() for a in listed]
+            counts = [(a.get("details") or {}).get("parameters") for a in arts]
+            if (
+                total < 1
+                or set(found) != set(range(1, total + 1))
+                or any(len(listed) != 1 for listed in found.values())
+                or any(c is None for c in counts)
+            ):
+                continue
+            for art in arts:
+                art["details"]["set_parameters"] = sum(counts)
+                art["details"]["set_shards"] = total
 
     def _remote_artifact_name(self, url: str) -> str:
         """Component name for a remote artifact.

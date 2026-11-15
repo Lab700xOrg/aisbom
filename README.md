@@ -771,7 +771,7 @@ When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3
 
 ### endoflife.date lookups (`comply --framework fda` only)
 
-When `aisbom comply --framework fda` finds versioned dependencies, AIsbom asks the public endoflife.date API for each distinct **package name** (`https://endoflife.date/api/v1/products/<name>`) to fill end-of-support dates in `component-support.csv`. Versions are matched on your machine and are not sent, and neither are file paths, model names, hashes, findings, or identifiers. `aisbom scan` never makes this request. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-eol-lookup`, `AISBOM_NO_EOL_LOOKUP=1` or `--offline` does. Nothing is cached.
+When `aisbom comply --framework fda` finds exact `requirements.txt` pins, AIsbom asks the public endoflife.date API for each distinct **package name** (`https://endoflife.date/api/v1/products/<name>`) to fill end-of-support dates in `component-support.csv`. Versions are matched on your machine and are not sent, and neither are file paths, model names, hashes, findings, or identifiers. `aisbom scan` never makes this request. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-eol-lookup`, `AISBOM_NO_EOL_LOOKUP=1` or `--offline` does. Nothing is cached.
 
 ### Hugging Face model-card lookups (local scans)
 

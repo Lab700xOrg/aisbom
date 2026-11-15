@@ -40,6 +40,7 @@ import datetime
 import difflib
 import io
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -317,40 +318,29 @@ def _int_prop(component: Dict[str, Any], name: str) -> Optional[int]:
 def _local_parameter_counts(models: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
     """Parameter counts summed from safetensors headers, only for complete sets.
 
-    A set is one unsharded `.safetensors` file, or every shard
-    `<stem>-0000k-of-0000N.safetensors` for k = 1..N. Any shard missing,
-    listed twice or without a readable count leaves that set out: a partial
-    sum would understate the model, and Annex XI 1(d) is pre-filled from this.
+    A set is one unsharded `.safetensors` file (its own count), or a sharded
+    release the scanner marked complete with `aisbom:safetensors:set_parameters`.
+    Completeness is never re-derived here from component names: those are
+    basenames for local scans, so shards from two unrelated directories would
+    look like one complete set. A partial sum would understate the model, and
+    Annex XI 1(d) is pre-filled from this.
     """
-    singles: List[Tuple[str, int]] = []
-    shards: Dict[Tuple[str, int], Dict[int, Optional[int]]] = {}
-    duplicated = set()
+    out: List[Tuple[str, str]] = []
     for m in models:
-        name = str(m.get("name") or "")
+        name = posixpath.basename(str(m.get("name") or ""))
         if not name.endswith(".safetensors"):
             continue
-        count = _int_prop(m, "aisbom:safetensors:parameters")
         shard = _SHARD.match(name)
-        if shard:
-            key = (shard["stem"], int(shard["total"]))
-            index = int(shard["index"])
-            if index in shards.setdefault(key, {}):
-                duplicated.add(key)
-            shards[key][index] = count
-        elif count is not None:
-            singles.append((name, count))
-
-    out = [(f"{count:,} ({name})", SOURCE_SCAN_PARAMETERS) for name, count in singles]
-    for (stem, total), found in shards.items():
-        complete = (
-            (stem, total) not in duplicated
-            and total > 0
-            and set(found) == set(range(1, total + 1))
-            and all(c is not None for c in found.values())
-        )
-        if complete:
+        if shard is None:
+            count = _int_prop(m, "aisbom:safetensors:parameters")
+            if count is not None:
+                out.append((f"{count:,} ({name})", SOURCE_SCAN_PARAMETERS))
+            continue
+        total = _int_prop(m, "aisbom:safetensors:set_parameters")
+        shards = _int_prop(m, "aisbom:safetensors:set_shards")
+        if total is not None and shards:
             out.append((
-                f"{sum(found.values()):,} ({stem}-*-of-{total:05d}.safetensors, {total} shards)",
+                f"{total:,} ({shard['stem']}-*-of-{shards:05d}.safetensors, {shards} shards)",
                 SOURCE_SCAN_PARAMETERS,
             ))
     return out
@@ -997,7 +987,7 @@ class _SupportCounts:
 
 
 def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"],
-                 eol_answers: Optional[Mapping[Tuple[str, str], Any]] = None,
+                 eol_answers: Optional[Mapping[str, Any]] = None,
                  ) -> Tuple[str, _SupportCounts]:
     """The support table, and how many components each source filled.
 
@@ -1031,9 +1021,11 @@ def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"],
         }
         if supplier != TODO:
             counts.suppliers += 1
+        # Keyed on the dependency's bom-ref, so only components the caller
+        # looked up as exact pins can match (see `eol_targets`).
         lookup = None
-        if c.get("type") != _ML_COMPONENT_TYPE and c.get("name") and c.get("version"):
-            lookup = eol_answers.get((c["name"], c["version"]))
+        if c.get("type") != _ML_COMPONENT_TYPE and c.get("bom-ref"):
+            lookup = eol_answers.get(c["bom-ref"])
         if lookup is not None:
             counts.looked_up += 1
             row["end_of_support_date"] = lookup.date
@@ -1052,12 +1044,19 @@ def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"],
     return buf.getvalue(), counts
 
 
-def eol_pins(doc: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """The ``(name, version)`` of every versioned non-model component."""
+def eol_targets(dependencies: Sequence[Dict[str, Any]]) -> List[Tuple[str, str, str]]:
+    """``(bom_ref, name, version)`` for every exact pin among a scan's dependencies.
+
+    Read from the scanner's dependency list, not the SBOM: the SBOM records
+    `numpy>=2.2.0` as version 2.2.0 and drops whether it was pinned, and a
+    lower bound would be matched to a release cycle the install may have left.
+    """
+    from .modelcard import dependency_bom_ref
+
     return [
-        (str(c["name"]), str(c["version"]))
-        for c in _components(doc)
-        if c.get("type") != _ML_COMPONENT_TYPE and c.get("name") and c.get("version")
+        (dependency_bom_ref(index, dep), str(dep["name"]), str(dep["version"]))
+        for index, dep in enumerate(dependencies)
+        if dep.get("pinned") and dep.get("name") and dep.get("version")
     ]
 
 
@@ -1068,13 +1067,13 @@ def build_fda_pack(
     vex_statements: Sequence[Any],
     vex_files: Sequence[str],
     answers: Optional["Answers"] = None,
-    eol_answers: Optional[Mapping[Tuple[str, str], Any]] = None,
+    eol_answers: Optional[Mapping[str, Any]] = None,
     eol_note: Optional[str] = None,
 ) -> Dict[str, str]:
     """Return ``{filename: content}`` for the FDA pack (SBOM and VEX excluded,
     since the CLI writes those with the same code `scan --vex` uses).
 
-    ``eol_answers`` maps a component's ``(name, version)`` to an endoflife.date
+    ``eol_answers`` maps a dependency's ``bom-ref`` to an endoflife.date
     answer (``.date``, ``.source``); ``eol_note`` says why the lookup did not
     run, or what failed, for the README. These are the one pre-fill not read
     from ``sbom.json``: the lookup runs when the pack is built.
