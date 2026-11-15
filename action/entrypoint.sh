@@ -16,19 +16,26 @@
 #   $8  platform-url         (optional override; blank → default in helper)
 #   $9  fail-on-platform-error  (default "false")
 #   $10 share                (default "false" — opt-in hosted share link)
+#   $11 fail-on-scan-error   (default "false" — becomes "true" at the next
+#                              major release)
 #
 # Bash (not POSIX sh) is required for the PIPESTATUS array — we need the
 # scan's exit code, not tee's, to honor fail-on-risk correctly.
 #
 # Exit codes:
-#   0 — Scan succeeded OR scan reported risks but fail-on-risk is false.
-#   1 — share: true was combined with AISBOM_OFFLINE (refused before scanning).
+#   0 — Scan succeeded, OR scan reported risks but fail-on-risk is false, OR
+#       the scan errored but fail-on-scan-error is false (a warning
+#       annotation is emitted instead).
+#   1 — share: true was combined with AISBOM_OFFLINE (refused before
+#       scanning), OR the scan exited with anything other than 0 or 2 AND
+#       fail-on-scan-error is true.
 #   2 — Scan reported CRITICAL findings AND fail-on-risk is true.
 #   3 — Platform upload failed AND fail-on-platform-error is true.
 #
-# 2 takes precedence over 3 when both apply: a dangerous model is the signal
-# the user's required check should report, not a failed upload. The upload is
-# attempted before either gate, so a CRITICAL repo still reaches the dashboard.
+# Precedence when several apply: 2, then 1, then 3. A dangerous model is the
+# signal the user's required check should report first; a scan that could not
+# read everything comes next; a failed upload is plumbing. The upload is
+# attempted before every gate, so a CRITICAL repo still reaches the dashboard.
 #
 # Comment-posting failures NEVER fail the job (logged but tolerated so the
 # user fixes their `permissions:` block, not the scan).
@@ -45,6 +52,7 @@ INPUT_TOKEN="${7:-}"
 INPUT_PLATFORM_URL="${8:-}"
 INPUT_FAIL_ON_PLATFORM_ERROR="${9:-false}"
 INPUT_SHARE="${10:-false}"
+INPUT_FAIL_ON_SCAN_ERROR="${11:-false}"
 
 # Pass the token through to post_comment.py via a clean underscore-only env
 # var. We never echo $GH_TOKEN — GitHub already masks it in the docker-run
@@ -74,9 +82,9 @@ if [ -n "${INPUT_TOKEN}" ]; then
 fi
 
 # `AISBOM_OFFLINE=1` in the step env forbids network access and `share: true`
-# requires it, so the CLI refuses the pair with exit 1. Step 4 only re-raises
-# exit 2, so without this the job would pass — and an `sbom.json` already in
-# the workspace would be commented on and uploaded as if freshly scanned.
+# requires it, so the CLI refuses the pair with exit 1. That is a
+# configuration mistake rather than a scan error, so it fails the job whatever
+# `fail-on-scan-error` says, and before any scan runs.
 if [ -n "${AISBOM_OFFLINE:-}" ] && [ "${INPUT_SHARE}" = "true" ]; then
     echo "[aisbom-action] share: true cannot be combined with AISBOM_OFFLINE: sharing uploads the SBOM to aisbom.io. Remove one of them."
     exit 1
@@ -91,6 +99,16 @@ else
     # the exact kind of overclaim this input exists to correct.
     echo "[aisbom-action] Sharing is off (share: false, the default): the SBOM is not uploaded to aisbom.io and the share-url output will be empty. Set share: true to publish a hosted viewer link. (Anonymous telemetry is separate and still on; set AISBOM_NO_TELEMETRY=1 to disable it.)"
 fi
+
+# Remove this run's output paths before scanning. The comment and the upload
+# below both key off "does the output file exist", so a file left by a
+# previous step or committed to the repo would otherwise be commented on and
+# uploaded as this run's result whenever the scan fails before writing. The
+# VEX siblings go too, or stale exploitability statements could ride along
+# with a fresh SBOM. Only the paths the scan itself writes are touched; the
+# naming mirrors `vex_paths_for` in platform_upload.py.
+OUTPUT_STEM="${OUTPUT_FILE%.json}"
+rm -f -- "${OUTPUT_FILE}" "${OUTPUT_STEM}.openvex.json" "${OUTPUT_STEM}.vex.cdx.json"
 
 echo "::group::aisbom scan output"
 set -o pipefail
@@ -175,6 +193,23 @@ fi
 if [ "${FAIL_ON_RISK}" = "true" ] && [ "${SCAN_EXIT}" -eq 2 ]; then
     echo "[aisbom-action] CRITICAL risks detected; failing the job (fail-on-risk=true)."
     exit 2
+fi
+
+# Step 5 — Scan errors. `aisbom scan` exits 1 when it could not do the whole
+# job: a directory that doesn't exist, a file it couldn't parse, an unreadable
+# model file such as a git-LFS pointer stub from a checkout without
+# `git lfs pull`. Any exit other than 0 and 2 (a crash, a missing binary) is
+# treated the same way. These used to end the job green with nothing said.
+#
+# Opt-in for now so no existing job changes result on a minor release; the
+# default becomes "true" at the next major. Until then the warning annotation
+# makes the failure visible on the run summary instead of silent.
+if [ "${SCAN_EXIT}" -ne 0 ] && [ "${SCAN_EXIT}" -ne 2 ]; then
+    if [ "${INPUT_FAIL_ON_SCAN_ERROR}" = "true" ]; then
+        echo "::error title=aisbom scan error::aisbom scan exited ${SCAN_EXIT}: some files could not be scanned. See the scan output above. Failing the job (fail-on-scan-error=true)."
+        exit 1
+    fi
+    echo "::warning title=aisbom scan error::aisbom scan exited ${SCAN_EXIT}: some files could not be scanned, so this run is not a clean result. See the scan output above. Set fail-on-scan-error: true to fail the job; it becomes the default in the next major release."
 fi
 
 # Honour fail-on-platform-error even when the helper exited before its own

@@ -48,6 +48,10 @@ inputs:
     description: 'Default false. When true, the generated SBOM is uploaded to aisbom.io to mint a publicly-readable hosted viewer link, retained 30 days, and that link is added to the PR comment and exposed as the `share-url` output. Leave unset and no request is made to aisbom.io.'
     required: false
     default: 'false'
+  fail-on-scan-error:
+    description: 'Default false. When true, the job fails when `aisbom scan` exits 1: a directory that does not exist, a file it could not parse, or an unreadable model file such as a git-LFS pointer stub from a checkout without `git lfs pull`. When false, the job passes with a warning annotation. The default becomes true in the next major release.'
+    required: false
+    default: 'false'
 
 outputs:
   sbom-path:
@@ -76,3 +80,4 @@ runs:
     - ${{ inputs.fail-on-platform-error }}
     # Appended, not inserted: argv positions 1-9 are load-bearing and must not shift.
     - ${{ inputs.share }}
+    - ${{ inputs.fail-on-scan-error }}
