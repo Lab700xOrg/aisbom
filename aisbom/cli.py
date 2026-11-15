@@ -512,6 +512,17 @@ def _vex_paths(output: str) -> tuple[str, str]:
     return f"{stem}.openvex.json", f"{stem}.vex.cdx.json"
 
 
+def _comply_pack_files(framework: "ComplyFramework") -> list[str]:
+    """Every file name `aisbom comply` writes into its output folder."""
+    names = [comply_mod.SBOM_FILE, comply_mod.README_FILE]
+    if framework == ComplyFramework.FDA:
+        names += [Path(p).name for p in _vex_paths(comply_mod.SBOM_FILE)]
+        names.append(comply_mod.SUPPORT_FILE)
+    else:
+        names += [comply_mod.ANNEX_XI_FILE, comply_mod.ART53_FILE]
+    return names
+
+
 def _emit_vex(
     *,
     sbom_json: str,
@@ -1730,7 +1741,22 @@ def comply(
         _flush_telemetry_threads(telemetry_threads)
         raise typer.Exit(code=1)
 
-    # Check the provider's files before spending a scan on them.
+    # Check the provider's files before spending a scan on them. Neither may
+    # be a file the pack is about to write: the run would overwrite the
+    # answers, or clobber a pack file with the template.
+    out = Path(output_dir or f"aisbom-comply-{framework.value}")
+    pack_files = {(out / name).resolve(): name for name in _comply_pack_files(framework)}
+    for flag, path in (("--answers", answers_file),
+                       ("--write-answers-template", write_answers_template)):
+        if path and Path(path).resolve() in pack_files:
+            console.print(
+                f"[bold red]✖ {flag} {path}[/bold red] is the pack's own "
+                f"{pack_files[Path(path).resolve()]}, which this run writes. "
+                "Choose a path outside the pack's files."
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
+
     answers = None
     if answers_file:
         try:
@@ -1775,7 +1801,6 @@ def comply(
     sbom_json = build_cyclonedx_json(results, "1.7")
     doc = json.loads(sbom_json)
 
-    out = Path(output_dir or f"aisbom-comply-{framework.value}")
     out.mkdir(parents=True, exist_ok=True)
     sbom_path = out / comply_mod.SBOM_FILE
     sbom_path.write_text(sbom_json)
@@ -1819,7 +1844,19 @@ def comply(
     for name in written:
         console.print(f"  [dim]•[/dim] {name}")
     if write_answers_template:
-        Path(write_answers_template).write_text(comply_mod.answers_template(doc))
+        # Exclusive create: a file that appeared during the scan is not ours
+        # to overwrite either.
+        try:
+            with open(write_answers_template, "x", encoding="utf-8") as fh:
+                fh.write(comply_mod.answers_template(doc))
+        except FileExistsError:
+            console.print(
+                f"[bold red]✖ Not overwriting[/bold red] {write_answers_template}: it "
+                "appeared while the pack was being built. The pack is written; "
+                "rerun with another template path."
+            )
+            _flush_telemetry_threads(telemetry_threads)
+            raise typer.Exit(code=1)
         console.print(
             f"[bold green]✔ Answers template written to[/bold green] {write_answers_template}. "
             "Fill it in and pass it back with --answers."

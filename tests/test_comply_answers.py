@@ -462,6 +462,63 @@ def test_cli_closing_line_skips_the_hint_once_answers_are_used(tmp_path):
     assert "--write-answers-template" not in " ".join(result.stdout.split())
 
 
+@pytest.mark.parametrize("framework,name", [
+    ("eu-ai-act", "sbom.json"),
+    ("eu-ai-act", comply.ANNEX_XI_FILE),
+    ("fda", comply.SUPPORT_FILE),
+    ("fda", "sbom.openvex.json"),
+])
+def test_cli_refuses_a_template_path_that_is_a_pack_file(tmp_path, framework, name):
+    out = tmp_path / "pack"
+    result = runner.invoke(app, [
+        "comply", str(_restricted_tree(tmp_path)), "--framework", framework,
+        "--output-dir", str(out), "--offline",
+        "--write-answers-template", str(out / "sub" / ".." / name),
+    ])
+    assert result.exit_code == 1
+    assert name in " ".join(result.stdout.split())
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("framework", ["eu-ai-act", "fda"])
+def test_guarded_file_list_matches_what_the_pack_writes(tmp_path, framework):
+    from aisbom import cli as cli_mod
+
+    result, out = _run(tmp_path, framework=framework)
+    assert result.exit_code == 0, result.stdout
+    written = {p.name for p in out.iterdir()}
+    assert written == set(cli_mod._comply_pack_files(cli_mod.ComplyFramework(framework)))
+
+
+def test_cli_does_not_overwrite_a_template_that_appears_mid_run(tmp_path, monkeypatch):
+    from aisbom import cli as cli_mod
+
+    template = tmp_path / "comply.yaml"
+    real = cli_mod.comply_mod.build_eu_ai_act_pack
+
+    def _racing(*a, **kw):
+        template.write_text("# written by someone else\n")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cli_mod.comply_mod, "build_eu_ai_act_pack", _racing)
+    result, _ = _run(tmp_path, "--write-answers-template", str(template))
+    assert result.exit_code == 1
+    assert template.read_text() == "# written by someone else\n"
+
+
+def test_cli_refuses_an_answers_file_the_pack_would_overwrite(tmp_path):
+    out = tmp_path / "pack"
+    out.mkdir()
+    answers = out / comply.README_FILE
+    answers.write_text(_EU_ANSWERS)
+    result = runner.invoke(app, [
+        "comply", str(_restricted_tree(tmp_path)), "--framework", "eu-ai-act",
+        "--output-dir", str(out), "--offline", "--answers", str(answers),
+    ])
+    assert result.exit_code == 1
+    assert answers.read_text() == _EU_ANSWERS
+
+
 def test_cli_writes_a_template_and_refuses_to_overwrite_one(tmp_path):
     template = tmp_path / "comply.yaml"
     result, _ = _run(tmp_path, "--write-answers-template", str(template))
