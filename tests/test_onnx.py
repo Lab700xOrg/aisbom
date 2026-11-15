@@ -466,7 +466,7 @@ def test_onnx_files_are_resolved_from_a_hugging_face_repo(monkeypatch):
     """The dispatch arm is unreachable for `hf://` unless the resolver lists it."""
     import aisbom.remote as remote
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         class Resp:
             status_code = 200
             headers = {}
@@ -568,7 +568,7 @@ def test_remote_onnx_is_scanned(monkeypatch, tmp_path):
         tmp_path / "remote.onnx", external_location="../../escape.bin"
     ).read_bytes()
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = (headers or {}).get("Range", "bytes=0-0")
         start, _, end = rng.split("=")[1].partition("-")
         start = int(start)

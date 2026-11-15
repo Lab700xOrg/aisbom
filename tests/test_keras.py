@@ -475,7 +475,7 @@ def test_keras_files_are_resolved_from_a_hugging_face_repo(monkeypatch, filename
     """
     import aisbom.remote as remote
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         class Resp:
             status_code = 200
             headers = {}
@@ -574,7 +574,7 @@ def test_remote_keras_lambda_is_detected(monkeypatch, tmp_path):
 
     content = create_mock_keras_zip(tmp_path / "remote.keras", with_lambda=True).read_bytes()
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = (headers or {}).get("Range", "bytes=0-0")
         start, _, end = rng.split("=")[1].partition("-")
         start = int(start)

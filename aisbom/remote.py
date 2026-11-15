@@ -46,24 +46,50 @@ except ImportError:  # Fallback stub to allow offline/tests when requests missin
     requests = _RequestsStub()
 
 
+# (connect, read) seconds for every request that decides what gets scanned:
+# each file-listing page and each byte-range read. `requests` applies the read
+# timeout per socket read, not to the whole response, so a slow but moving
+# transfer is never cut off; only a connection that stops sending is. An honest
+# 1,000-entry listing page answers in well under a second, so a minute of
+# silence is a stall. Without any timeout a stalled HF API held a CI scan
+# forever. Deliberately longer than the model-card cap below: that call is
+# enrichment and is meant to give up first.
+HF_REQUEST_TIMEOUT = (10, 60)
+
+
 class RemoteStream:
     """
     Minimal seekable, readable stream backed by HTTP Range requests.
     Supports read, seek, tell, and context manager usage.
+
+    ``fetch_error`` holds the first network failure a request raised. The
+    inspectors catch every exception while parsing, so a stall part-way
+    through a file would otherwise reach the scanner as "could not parse";
+    the scanner reads this after inspection to report it as a fetch failure.
     """
 
     def __init__(self, url: str, session: Optional[requests.Session] = None):
         self.url = url
         self.session = session or requests
         self.pos = 0
+        self.fetch_error: Optional[BaseException] = None
         self.size = self._fetch_size()
+
+    def _get(self, range_header: str):
+        headers = {"Range": range_header}
+        headers.update(_auth_headers(self.url))
+        try:
+            resp = self.session.get(self.url, headers=headers, timeout=HF_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except Exception as exc:
+            if self.fetch_error is None:
+                self.fetch_error = exc
+            raise
+        return resp
 
     def _fetch_size(self) -> int:
         # Use a range request to learn total size from Content-Range header
-        headers = {"Range": "bytes=0-0"}
-        headers.update(_auth_headers(self.url))
-        resp = self.session.get(self.url, headers=headers)
-        resp.raise_for_status()
+        resp = self._get("bytes=0-0")
         content_range = resp.headers.get("Content-Range")
         if content_range and "/" in content_range:
             try:
@@ -85,10 +111,7 @@ class RemoteStream:
         else:
             end = min(self.pos + size - 1, self.size - 1)
 
-        headers = {"Range": f"bytes={self.pos}-{end}"}
-        headers.update(_auth_headers(self.url))
-        resp = self.session.get(self.url, headers=headers)
-        resp.raise_for_status()
+        resp = self._get(f"bytes={self.pos}-{end}")
         data = resp.content
         self.pos += len(data)
         return data
@@ -201,7 +224,9 @@ def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
         # holds for every page: a listing that fails halfway is not a smaller
         # repo. A successful listing with no supported files still returns
         # an empty list, which is correct.
-        resp = requests.get(url, headers=_auth_headers(url))
+        # A timeout raises like any other fetch failure: a stalled page is
+        # not an empty one.
+        resp = requests.get(url, headers=_auth_headers(url), timeout=HF_REQUEST_TIMEOUT)
         resp.raise_for_status()
         page = resp.json()
         if not isinstance(page, list):
@@ -247,6 +272,77 @@ def hf_repo_relative_path(url: str, repo_id: str) -> Optional[str]:
     if not url.startswith(prefix):
         return None
     return unquote(url[len(prefix) :]) or None
+
+
+_HF_WEB_HOSTS = frozenset({"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"})
+
+# First path segments of huggingface.co pages that are not `<owner>/<repo>`.
+_HF_NON_REPO_ROOTS = frozenset({
+    "api", "blog", "chat", "collections", "docs", "enterprise", "join",
+    "learn", "login", "models", "new", "organizations", "papers", "posts",
+    "pricing", "search", "settings", "tasks",
+})
+
+
+def rewrite_hf_web_url(target: str):
+    """Map a huggingface.co *web page* URL onto something the scanner can read.
+
+    Returns ``(new_target, problem)``:
+
+    * ``(None, None)``: not an HF page URL (an ``hf://`` slug, a local path,
+      another host, or a ``/resolve/`` file URL that already works). Leave it.
+    * ``(new_target, None)``: an exact equivalent. A repo page or its
+      ``tree/main`` root is the whole repo at main, which is what ``hf://``
+      reads. A ``blob/<rev>/<path>`` page is that file at that revision, which
+      is what the same URL with ``resolve`` in place of ``blob`` serves.
+    * ``(None, problem)``: an HF page with no exact equivalent. A branch or
+      subfolder tree is a different set of files from "every file at main",
+      so following it as the repo would scan something the user did not
+      name. ``problem`` says what to pass instead.
+
+    Before this, every one of these URLs found no file, reported no error and
+    exited 0, which is a false all-clear.
+    """
+    if not isinstance(target, str) or not target.startswith(("http://", "https://")):
+        return None, None
+    parsed = urlparse(target)
+    if (parsed.hostname or "").lower() not in _HF_WEB_HOSTS:
+        return None, None
+
+    parts = [p for p in parsed.path.split("/") if p]
+    if parts and parts[0] in ("datasets", "spaces"):
+        kind = parts[0][:-1]
+        return None, (
+            f"{target} is a Hugging Face {kind} page; aisbom scans model repos "
+            "only. Pass a model repo as hf://<owner>/<repo>."
+        )
+    if (
+        len(parts) < 2
+        or parts[0] in _HF_NON_REPO_ROOTS
+        or not all(_REPO_SEGMENT_RE.match(s) for s in parts[:2])
+    ):
+        return None, (
+            f"{target} is not a Hugging Face model repo page. Pass a model "
+            "repo as hf://<owner>/<repo>, or a file's /resolve/ URL."
+        )
+
+    repo = f"{parts[0]}/{parts[1]}"
+    rest = parts[2:]
+    if not rest or rest == ["tree", "main"]:
+        return f"hf://{repo}", None
+    if rest[0] == "resolve":
+        return None, None
+    if rest[0] == "blob" and len(rest) >= 3:
+        # Swap the one segment and keep the rest of the path byte-for-byte,
+        # percent-encoding included. The host is normalised so the token
+        # gate (exact huggingface.co match) still applies.
+        return f"https://{_HF_HOST}/{repo}/resolve/{'/'.join(rest[1:])}", None
+    return None, (
+        f"{target} is a Hugging Face page that cannot be scanned exactly: an "
+        "hf:// target reads every file in a repo at main, not a branch or a "
+        f"subfolder. Scan the whole repo with hf://{repo}, or pass a file's "
+        "/resolve/ URL."
+    )
 
 
 # The model-card fetch is deliberately capped well below the file-listing

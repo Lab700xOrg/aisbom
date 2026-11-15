@@ -215,7 +215,7 @@ def _serve(monkeypatch, content: bytes, url: str):
         def raise_for_status(self):
             return None
 
-    def fake_get(request_url, headers=None):
+    def fake_get(request_url, headers=None, timeout=None):
         rng = (headers or {}).get("Range", "bytes=0-0")
         start, _, end = rng.split("=")[1].partition("-")
         start = int(start)

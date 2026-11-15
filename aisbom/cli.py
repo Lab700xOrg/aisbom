@@ -34,6 +34,7 @@ from . import eol
 from . import offline
 from . import osv
 from . import pypi
+from . import remote
 from . import telemetry
 import requests
 
@@ -146,6 +147,17 @@ def _classify_target(target: str) -> str:
     if target.startswith("http://"):
         return "http"
     return "local"
+
+
+def _note_target_rewrite(scanner: DeepScanner) -> None:
+    """Say so when a Hugging Face page URL is scanned as its exact equivalent.
+
+    stderr only, so `--output -` and JSON consumers see nothing new; the user
+    still learns which form to put in their pipeline next time.
+    """
+    original = getattr(scanner, "rewritten_from", None)
+    if original:
+        err_console.print(f"[dim]Scanning {original} as {scanner.root_path}[/dim]")
 
 
 def _refuse_remote_target_offline(target: str) -> None:
@@ -373,7 +385,17 @@ def _format_fetch_error(exc: BaseException, url: str) -> str:
             f"Authentication failed for {name}; the model appears to be private "
             "or gated. Set HF_TOKEN with a token that has read access."
         )
-    if status in ("timeout", "connection_error"):
+    if status == "timeout":
+        # Its own wording: "network error" sends people to check a firewall,
+        # when a timeout is usually a slow or stalled server.
+        connect, read = remote.HF_REQUEST_TIMEOUT
+        return (
+            f"Timed out waiting for {host} (no response within {read}s, or no "
+            f"connection within {connect}s). The server may be stalled; retry "
+            "later. In CI, also check that egress allows HTTPS to "
+            "huggingface.co and its LFS CDN."
+        )
+    if status == "connection_error":
         return (
             f"Network error reaching {host}. In CI, check that egress/firewall "
             "allows HTTPS to huggingface.co and its LFS CDN."
@@ -800,6 +822,7 @@ def scan(
     # 1. Run the Logic
     try:
         scanner = DeepScanner(target, strict_mode=strict, lint=lint)
+        _note_target_rewrite(scanner)
         if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://") or target.startswith("hf://")):
             with console.status("[cyan]Resolving remote repository...[/cyan]"):
                 results = scanner.scan()
@@ -1387,6 +1410,7 @@ def _scan_whole_target(
     )
     try:
         scanner = DeepScanner(target, strict_mode=strict, lint=False)
+        _note_target_rewrite(scanner)
         with progress.status("[cyan]Scanning...[/cyan]"):
             results = scanner.scan()
     except Exception as exc:

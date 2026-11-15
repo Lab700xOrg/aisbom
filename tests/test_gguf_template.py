@@ -548,7 +548,7 @@ def test_remote_gguf_template_is_detected(monkeypatch, tmp_path):
     ).read_bytes()
     requests_made = []
 
-    def fake_get(url, headers=None):
+    def fake_get(url, headers=None, timeout=None):
         rng = (headers or {}).get("Range", "bytes=0-0")
         requests_made.append(rng)
         start, _, end = rng.split("=")[1].partition("-")

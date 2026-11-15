@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+> **A URL target that nothing scans now exits `1` instead of `0`.** `aisbom scan https://example.com/bundle.zip`, or any URL whose extension no scanner claims, found no file, reported no error and passed as a clean scan. It now fails with `Unsupported file type`, as a named local file already did. **A pipeline that scans such a URL today will start failing.** The URL was never examined.
+
+### New
+
+- **Hugging Face page URLs are scanned.** Pasting a model's web address used to find nothing and exit `0`. Now:
+  - `https://huggingface.co/<owner>/<repo>` and `…/tree/main` are scanned as `hf://<owner>/<repo>`.
+  - `…/blob/<revision>/<path>` is scanned as the file at `…/resolve/<revision>/<path>`.
+
+  A dim line on stderr says which target was scanned, so you can put that form in your pipeline. Pages with no exact equivalent exit `1` with the target to use instead. These are a branch or a subfolder (`tree/dev`, `tree/main/onnx`), a dataset or Space, or anything else that isn't a model repo. An `hf://` target reads every file at `main`, so following a branch or subfolder page would scan files you didn't name. `cli_error` telemetry reports a refused page as `UnsupportedHFPageURL`. The URL and repo id are never sent.
+
+### Fixed
+
+- **A stalled Hugging Face API no longer hangs a scan.** The `hf://` file listing and the range reads for each file now time out after 10 seconds without a connection or 60 seconds without data. A timeout fails the scan with exit `1` and a message that says it timed out, instead of waiting forever. The limit applies to silence, not to total time, so a slow transfer that keeps sending is never cut off.
+- **A network failure part-way through a file is reported as a fetch failure.** It used to be reported as a file that could not be parsed, with the raw exception text.
+- **A query string no longer hides a URL's extension.** `https://…/model.safetensors?download=true` was skipped as an unknown file type. It is now scanned.
+
 ## 1.7.0 — 2026-10-25
 
 > **Scans now contact PyPI by default.** When a scan finds exact `requirements.txt` pins such as `transformers==5.13.1`, it requests each pinned package name and version from `pypi.org` to read that release's declared license. Nothing else is sent. The GitHub Action and `aisbom score` do the same.
