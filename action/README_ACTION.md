@@ -35,6 +35,7 @@ That's it. The Action will:
 1. Scan the `models/` directory in your PR head.
 2. Post or update a markdown comment on the PR summarizing findings, rendered from the SBOM on the runner.
 3. Fail the job (exit 2) if any CRITICAL findings were detected, unless you set `fail-on-risk: false`.
+4. Add a warning annotation if the scan could not read everything, such as a missing directory or a git-LFS pointer stub. Set `fail-on-scan-error: true` to fail the job (exit 1) instead.
 
 On that default, **your SBOM is not uploaded anywhere** — the scan, the SBOM and the comment are all produced on the runner. Two inputs, both off by default, send it somewhere: `share:` uploads it to `aisbom.io` for a public viewer link, and `token:` posts it to your dashboard at `app.aisbom.io`. Anonymous telemetry — event names and severity counts, never the SBOM — is separate and on by default. See [Data flow & privacy](#data-flow--privacy).
 
@@ -74,6 +75,7 @@ When there are no CRITICAL or HIGH findings, the comment collapses to a one-line
 | `platform-url` | `https://app.aisbom.io` | Override for the platform webhook URL. Only meaningful when `token` is set. |
 | `fail-on-platform-error` | `false` | Default false. When true, a failed upload fails the CI job. |
 | `share` | `false` | Upload the SBOM to `aisbom.io` for a **publicly-readable** hosted viewer link, retained 30 days, added to the PR comment and exposed as `share-url`. Off by default: leave it unset and no request reaches `aisbom.io`. |
+| `fail-on-scan-error` | `false` | Fail the job when `aisbom scan` exits 1: a directory that doesn't exist, a file it couldn't parse, or an unreadable model file. When false the job passes with a warning annotation. **The default becomes `true` in the next major release.** |
 
 ## Outputs
 
@@ -139,6 +141,10 @@ Three known causes, all distinguishable from the Action's own log output:
 2. **The PR comes from a fork.** GitHub restricts `${{ github.token }}` to **read-only** on `pull_request` events from forked repositories, regardless of what your `permissions:` block requests. The scan runs and the SBOM is produced; the comment post fails with a permission error in the log. This is a GitHub security policy, not a configuration issue — there is no safe way around it with the default token.
 
 3. **The workflow is missing `permissions: pull-requests: write`.** The log shows `Could not post PR comment … Check the workflow has pull-requests: write permission` (you may also see GitHub's "Resource not accessible by integration"). Fix: add the Permissions block shown above. The job still succeeds — the Action never fails your CI over a comment-permission issue.
+
+### Why does the run show an "aisbom scan error" warning?
+
+The scan exited 1, so part of the target was not scanned and the result is not a clean bill of health. The scan output group in the log names the cause. One cause to check first is a model file that is a git-LFS pointer stub: the workflow checked out the repo without fetching LFS objects. Fix it with `lfs: true` on `actions/checkout`, or a `git lfs pull` step before the scan. Set `fail-on-scan-error: true` to make this fail the job.
 
 **Re-runs create duplicate comments** — please file an issue. The marker-based idempotency is meant to be unbreakable, but if you're seeing duplicates we want to know.
 

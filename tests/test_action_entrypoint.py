@@ -44,13 +44,23 @@ BASE_ARGS = [
 # `aisbom scan` returns when it finds a CRITICAL artifact. The scan still writes
 # its SBOM and VEX files in that case, so the entrypoint's ordering around the
 # exit code is observable rather than hypothetical.
+#
+# `AISBOM_WRITES_SBOM=1` makes the stub write the `--output` file, standing in
+# for a scan that produced an SBOM. The entrypoint deletes any pre-existing
+# output file before scanning, so a file planted in the workspace beforehand
+# models a *stale* SBOM, not a fresh one.
 AISBOM_STUB = """#!/bin/bash
 printf '%s\\n' "$@" > "${AISBOM_ARGV_FILE}"
 echo "AIsbom scanning ${2:-.}"
+prev=""
 for arg in "$@"; do
     if [ "${arg}" = "--share" ]; then
         echo "Shareable link: __VIEWER_URL__"
     fi
+    if [ "${prev}" = "--output" ] && [ "${AISBOM_WRITES_SBOM:-0}" = "1" ]; then
+        echo '{"components": [], "fresh": true}' > "${arg}"
+    fi
+    prev="${arg}"
 done
 exit "${AISBOM_EXIT:-0}"
 """
@@ -72,8 +82,11 @@ exit "${PYTHON_EXIT:-0}"
 class EntrypointRun:
     """Captured result of one entrypoint.sh invocation."""
 
-    def __init__(self, proc, scan_argv, github_output, scan_log, python_argv, python_invocations=()):
+    def __init__(
+        self, proc, scan_argv, github_output, scan_log, python_argv, python_invocations=(), workspace=None
+    ):
         self.proc = proc
+        self.workspace = workspace
         self.scan_argv = scan_argv
         self.github_output = github_output
         self.scan_log = scan_log
@@ -106,20 +119,25 @@ def run_entrypoint(
     args: list[str],
     *,
     create_sbom: bool = False,
+    stale_files: tuple[str, ...] = (),
     scan_exit: int = 0,
     python_exit: int = 0,
     extra_env: dict[str, str] | None = None,
 ) -> EntrypointRun:
-    """Execute entrypoint.sh with stubbed `aisbom` and `python` on PATH."""
+    """Execute entrypoint.sh with stubbed `aisbom` and `python` on PATH.
+
+    ``create_sbom`` means the scan writes its SBOM. ``stale_files`` are planted
+    in the workspace *before* the run, as a previous step or checkout would.
+    """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     _write_stub(bindir / "aisbom", AISBOM_STUB)
     _write_stub(bindir / "python", PYTHON_STUB)
 
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    if create_sbom:
-        (workspace / "sbom.json").write_text('{"components": []}')
+    workspace.mkdir(exist_ok=True)
+    for name in stale_files:
+        (workspace / name).write_text('{"components": [], "stale": true}')
 
     scan_argv = tmp_path / "scan-argv.txt"
     python_argv = tmp_path / "python-argv.txt"
@@ -138,6 +156,7 @@ def run_entrypoint(
         "AISBOM_SCAN_LOG": str(scan_log),
         "AISBOM_EXIT": str(scan_exit),
         "PYTHON_EXIT": str(python_exit),
+        "AISBOM_WRITES_SBOM": "1" if create_sbom else "0",
         **(extra_env or {}),
     }
 
@@ -157,6 +176,7 @@ def run_entrypoint(
         python_invocations=(
             python_invocations.read_text().splitlines() if python_invocations.exists() else []
         ),
+        workspace=workspace,
     )
 
 
@@ -394,7 +414,7 @@ class TestOfflineMode:
 
     def test_offline_with_share_fails_before_scanning(self, tmp_path):
         run = run_entrypoint(
-            tmp_path, [*TOKEN_ARGS, "true"], create_sbom=True, extra_env=self.OFFLINE
+            tmp_path, [*TOKEN_ARGS, "true"], stale_files=("sbom.json",), extra_env=self.OFFLINE
         )
         assert run.proc.returncode == 1
         assert run.scan_argv == [], "the scan must not run"
@@ -408,3 +428,138 @@ class TestOfflineMode:
         assert run.proc.returncode == 0
         assert run.scan_argv[0] == "scan"
         assert run.ran_script("post_comment.py")
+
+
+def _args(share="false", fail_on_scan_error=None, base=BASE_ARGS):
+    """Argv as action.yml passes it; `fail-on-scan-error` is appended as $11.
+
+    ``None`` omits $11 entirely, as an older action.yml would.
+    """
+    args = [*base, share]
+    if fail_on_scan_error is not None:
+        args.append(fail_on_scan_error)
+    return args
+
+
+class TestStaleOutputIsNeverReported:
+    """A file left in the workspace must never stand in for this run's scan.
+
+    The comment and the upload both key off "does the output file exist". When
+    the scan failed before writing, a `sbom.json` from a previous step or a
+    committed file was commented on and uploaded as if freshly scanned.
+    """
+
+    def test_stale_sbom_is_removed_when_the_scan_writes_nothing(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, _args(base=TOKEN_ARGS), stale_files=("sbom.json",), scan_exit=1
+        )
+        assert not (run.workspace / "sbom.json").exists()
+        assert run.python_invocations == [], "a stale SBOM must not be commented or uploaded"
+        assert "No SBOM file" in run.proc.stdout
+
+    def test_stale_vex_documents_are_removed_too(self, tmp_path):
+        """VEX siblings would otherwise ride along with a fresh SBOM's upload."""
+        stale = ("sbom.json", "sbom.openvex.json", "sbom.vex.cdx.json")
+        run = run_entrypoint(tmp_path, _args(base=TOKEN_ARGS), stale_files=stale, scan_exit=1)
+        for name in stale:
+            assert not (run.workspace / name).exists(), name
+
+    def test_files_other_than_the_outputs_are_left_alone(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, _args(), stale_files=("sbom.json", "other.json"), scan_exit=1
+        )
+        assert (run.workspace / "other.json").exists()
+
+    def test_fresh_sbom_replaces_a_stale_one(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path, _args(), stale_files=("sbom.json",), create_sbom=True
+        )
+        assert '"fresh": true' in (run.workspace / "sbom.json").read_text()
+        assert run.ran_script("post_comment.py")
+
+    def test_custom_output_file_is_the_one_removed(self, tmp_path):
+        args = _args()
+        args[1] = "out/report.json"
+        (tmp_path / "workspace" / "out").mkdir(parents=True)
+        # Plant files by hand: the custom path lives in a subdirectory.
+        (tmp_path / "workspace" / "out" / "report.json").write_text("{}")
+        (tmp_path / "workspace" / "out" / "report.openvex.json").write_text("{}")
+        run = run_entrypoint(tmp_path, args, scan_exit=1)
+        assert not (run.workspace / "out" / "report.json").exists()
+        assert not (run.workspace / "out" / "report.openvex.json").exists()
+
+
+class TestFailOnScanError:
+    """CLI exit 1 (a typo'd directory, a parse error, an unreadable model file
+    such as a git-LFS pointer stub) used to end the job green. It is now
+    reported as a warning annotation by default and fails the job when
+    `fail-on-scan-error: true`. The default flips at the next major release.
+    """
+
+    def test_scan_error_passes_by_default_with_a_warning(self, tmp_path):
+        run = run_entrypoint(tmp_path, _args(), scan_exit=1)
+        assert run.proc.returncode == 0
+        assert "::warning" in run.proc.stdout
+        assert "fail-on-scan-error" in run.proc.stdout
+
+    def test_scan_error_passes_when_input_omitted(self, tmp_path):
+        """An older action.yml passing ten args keeps today's job result."""
+        run = run_entrypoint(tmp_path, _args(fail_on_scan_error=None), scan_exit=1)
+        assert run.proc.returncode == 0
+
+    def test_scan_error_fails_the_job_when_asked(self, tmp_path):
+        run = run_entrypoint(tmp_path, _args(fail_on_scan_error="true"), scan_exit=1)
+        assert run.proc.returncode == 1
+        assert "::error" in run.proc.stdout
+
+    @pytest.mark.parametrize("value", ["", "TRUE", "yes", "1", "false"])
+    def test_only_exact_true_enables_it(self, tmp_path, value):
+        run = run_entrypoint(tmp_path, _args(fail_on_scan_error=value), scan_exit=1)
+        assert run.proc.returncode == 0
+
+    @pytest.mark.parametrize("scan_exit", [3, 126, 127])
+    def test_other_nonzero_exits_count_as_scan_errors(self, tmp_path, scan_exit):
+        """A crashed or missing CLI is not a clean scan either."""
+        run = run_entrypoint(tmp_path, _args(fail_on_scan_error="true"), scan_exit=scan_exit)
+        assert run.proc.returncode == 1
+
+    def test_clean_scan_emits_no_warning(self, tmp_path):
+        run = run_entrypoint(tmp_path, _args(fail_on_scan_error="true"), create_sbom=True)
+        assert run.proc.returncode == 0
+        assert "::warning" not in run.proc.stdout
+        assert "::error" not in run.proc.stdout
+
+    def test_critical_exit_still_wins(self, tmp_path):
+        """Exit 2 is unchanged and keeps precedence."""
+        run = run_entrypoint(
+            tmp_path, _args(fail_on_scan_error="true"), create_sbom=True, scan_exit=2
+        )
+        assert run.proc.returncode == 2
+
+    def test_critical_with_fail_on_risk_off_is_not_a_scan_error(self, tmp_path):
+        args = _args(fail_on_scan_error="true")
+        args[5] = "false"  # fail-on-risk
+        run = run_entrypoint(tmp_path, args, create_sbom=True, scan_exit=2)
+        assert run.proc.returncode == 0
+
+    def test_scan_error_wins_over_a_failed_upload(self, tmp_path):
+        """A scan that wrote an SBOM but exited 1 (an unreadable file among
+        readable ones) still uploads; the scan error is the job's result."""
+        args = _args(fail_on_scan_error="true", base=TOKEN_ARGS)
+        args[8] = "true"  # fail-on-platform-error
+        run = run_entrypoint(
+            tmp_path, args, create_sbom=True, scan_exit=1, python_exit=3
+        )
+        assert run.ran_script("platform_upload.py")
+        assert run.proc.returncode == 1
+
+    def test_scan_error_with_sbom_still_comments_and_uploads(self, tmp_path):
+        run = run_entrypoint(
+            tmp_path,
+            _args(fail_on_scan_error="true", base=TOKEN_ARGS),
+            create_sbom=True,
+            scan_exit=1,
+        )
+        assert run.ran_script("post_comment.py")
+        assert run.ran_script("platform_upload.py")
+        assert run.proc.returncode == 1
