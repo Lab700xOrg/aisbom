@@ -70,6 +70,9 @@ packaging = ">=24,<27"
 # Already installed for every user via spdx-tools; declared because the CLI
 # now imports it directly.
 pyyaml = ">=6.0,<7.0"
+# Builds dependency purls. Already installed for every user via
+# cyclonedx-python-lib (same range); declared because the CLI imports it.
+packageurl-python = ">=0.11,<2"
 
 [tool.poetry.dependencies.requests]
 version = "^2.32.3"

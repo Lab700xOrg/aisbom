@@ -293,9 +293,11 @@ def test_deep_scanner_detects_artifacts_and_dependencies(tmp_path):
     assert artifacts["mock_restricted.safetensors"]["legal_status"].startswith("LEGAL RISK")
     assert artifacts["mock_restricted.safetensors"]["license"] != "Unknown"
 
-    deps = {d["name"]: d["version"] for d in results["dependencies"]}
-    assert deps["torch"] == "2.1.0"
-    assert deps["requests"] == "2.0"
+    deps = {d["name"]: d for d in results["dependencies"]}
+    assert deps["torch"]["version"] == "2.1.0"
+    # A range names no installed version; its bound is not recorded as one.
+    assert deps["requests"]["version"] == "unknown"
+    assert deps["requests"]["specifier"] == ">=2.0"
 
 
 def test_deep_scanner_strict_mode_marks_unknown_imports(tmp_path):

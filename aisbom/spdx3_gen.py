@@ -45,6 +45,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .dependency import dependency_purl, specifier_comment
 from .spdx_gen import _sanitize, _sha256_or_none, _tool_version
 
 # The released 3.0.1 context. The schema pins this as a `const`, so it is not
@@ -176,8 +177,13 @@ class SPDX3Generator:
 
         fingerprint = {
             "artifacts": artifacts,
+            # A range leaves the version unknown, so `numpy>=1.0` and
+            # `numpy>=2.0` would otherwise fingerprint the same. The specifier
+            # is appended only when present, so a scan without ranges keeps
+            # the namespace earlier versions gave it.
             "dependencies": [
                 [dep.get("name"), dep.get("version")]
+                + ([dep["specifier"]] if dep.get("specifier") else [])
                 for dep in results.get("dependencies", [])
             ],
             "datasets": _all_card_datasets(results),
@@ -303,16 +309,26 @@ class SPDX3Generator:
     def _software_package(self, dep: Dict[str, Any]) -> Dict[str, Any]:
         name = dep.get("name", "unknown-lib")
         version = dep.get("version", "unknown")
-        return {
+        pkg: Dict[str, Any] = {
             "type": "software_Package",
             "spdxId": self._claim_id(
                 self._iri(f"Lib-{_sanitize(name)}-{_sanitize(version)}")
             ),
             "creationInfo": _CREATION_INFO_REF,
             "name": name,
-            "software_packageVersion": version,
-            "software_primaryPurpose": "library",
         }
+        # Same rule as the 2.3 export: a version only for an exact pin, a
+        # purl alongside it, and a range kept in the comment.
+        if version != "unknown":
+            pkg["software_packageVersion"] = version
+        purl = dependency_purl(dep)
+        if purl:
+            pkg["software_packageUrl"] = purl
+        pkg["software_primaryPurpose"] = "library"
+        comment = specifier_comment(dep)
+        if comment:
+            pkg["comment"] = comment
+        return pkg
 
     def _relationship(self, fragment: str, source: str, rel_type: str,
                       targets: List[str]) -> Dict[str, Any]:

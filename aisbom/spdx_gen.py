@@ -18,10 +18,13 @@ from spdx_tools.spdx.model import (
     SpdxNoAssertion,
     SpdxNone,
     Checksum,
-    ChecksumAlgorithm
+    ChecksumAlgorithm,
+    ExternalPackageRef,
+    ExternalPackageRefCategory,
 )
 from spdx_tools.spdx.writer.json import json_writer
 
+from .dependency import dependency_purl, specifier_comment
 from .properties import _format_for
 
 # A SHA256 hexdigest, as produced by ``DeepScanner._calculate_hash``. The
@@ -201,22 +204,30 @@ class SPDX2Generator:
         """Map library dependency to SPDX Package."""
         name = dep.get("name", "unknown-lib")
         version = dep.get("version", "unknown")
-        # Versions reach here straight off a requirements specifier, so they
-        # can carry characters an SPDXID may not (``2.0.*``); and the same pin
-        # listed in two requirements files would otherwise claim one ID twice.
+        # Versions can carry characters an SPDXID may not (``0.19.0+cu118``);
+        # and the same pin listed in two requirements files would otherwise
+        # claim one ID twice.
         spdx_id = self._claim_id(
             f"SPDXRef-Lib-{_sanitize(name)}-{_sanitize(version)}"
         )
 
+        # The scanner records a version only for an exact pin. `versionInfo`
+        # is optional in SPDX 2.3, so a non-pin omits it rather than asserting
+        # the placeholder "unknown" (or a range bound) as the version.
+        purl = dependency_purl(dep)
         pkg = Package(
             name=name,
             spdx_id=spdx_id,
-            version=version,
+            version=None if version == "unknown" else version,
             download_location=SpdxNoAssertion(),
             files_analyzed=False,
             license_concluded=SpdxNoAssertion(),
             license_declared=_declared_license(dep),
-            copyright_text=SpdxNoAssertion()
+            copyright_text=SpdxNoAssertion(),
+            external_references=[ExternalPackageRef(
+                ExternalPackageRefCategory.PACKAGE_MANAGER, "purl", purl
+            )] if purl else [],
+            comment=specifier_comment(dep),
         )
 
         self.packages.append(pkg)
