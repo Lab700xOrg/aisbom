@@ -321,7 +321,7 @@ def test_deep_scanner_flags_legacy_pt_when_not_zip(tmp_path):
     scanner = DeepScanner(tmp_path)
     results = scanner.scan()
     art = {a["name"]: a for a in results["artifacts"]}[legacy.name]
-    # Until #131 this asserted LOW / "Python Path Config", which is what the
+    # Until unreadable files became errors this asserted LOW / "Python Path Config", which is what the
     # test's own name said it should not be: text in a `.pt` is a corrupt
     # download or a saved error page, and nothing produces a text `.pt` path
     # config. The path-config classification is now `.pth`-only and validated
@@ -482,7 +482,7 @@ def test_cli_scan_share_yes_uploads_and_prints_url(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Slice #56 — cli_error telemetry enrichment (http_status / token_present /
+# cli_error telemetry enrichment (http_status / token_present /
 # target_type). The diagnostic must make auth vs firewall vs typo
 # distinguishable in GA4 without ever leaking a URL, repo id, token, or body.
 # ---------------------------------------------------------------------------
@@ -620,14 +620,14 @@ def test_cli_error_payload_leaks_no_token_url_or_body(monkeypatch):
         "target_type",
         "consecutive_failures",
     }
-    # The loop-detector dimension (#99) is a bucketed count, never raw data.
+    # The loop-detector dimension is a bucketed count, never raw data.
     assert captured[0]["consecutive_failures"] in (
         [str(n) for n in range(1, 10)] + ["10+"]
     )
 
 
 # ---------------------------------------------------------------------------
-# #58 — Reactive status-aware fetch-failure messages (no traceback)
+# Reactive status-aware fetch-failure messages (no traceback)
 # ---------------------------------------------------------------------------
 
 from aisbom.cli import _format_fetch_error
@@ -764,7 +764,7 @@ def _shard_error(i: int, exc: BaseException) -> dict:
 
 def test_sharded_identical_fetch_failures_print_one_deduped_line(monkeypatch):
     # 12 shards, all 401: one ✖ line naming the first shard + a count,
-    # not 12 near-identical lines (verification feedback on #99).
+    # not 12 near-identical lines (verification feedback).
     errors = [_shard_error(i, _http_error(401)) for i in range(1, 13)]
     monkeypatch.setattr(cli_module, "DeepScanner", _scanner_multi_failing(errors))
 
@@ -795,7 +795,7 @@ def test_mixed_failure_modes_print_one_line_each(monkeypatch):
 
 
 def test_sharded_failures_still_emit_one_cli_error_per_file(monkeypatch):
-    # Display is deduped; telemetry emission stays per-file (#58 semantics).
+    # Display is deduped; telemetry emission stays per-file.
     captured = _capture_cli_error(monkeypatch)
     errors = [_shard_error(i, _http_error(401)) for i in range(1, 13)]
     monkeypatch.setattr(cli_module, "DeepScanner", _scanner_multi_failing(errors))

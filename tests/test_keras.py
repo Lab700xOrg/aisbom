@@ -332,7 +332,7 @@ def test_unreadable_keras_file_records_an_error_not_a_crash(tmp_path):
     art = results["artifacts"][0]
 
     assert "CRITICAL" not in art["risk_level"]
-    # Since #131 this test's name is finally true: an empty file records an
+    # Now that unreadable files are errors, this test's name is true: an empty file records an
     # actual error rather than a Keras-labelled artifact with no verdict.
     assert art["framework"] is None
     assert art["unreadable_type"] == "EmptyFile"
@@ -394,7 +394,8 @@ def test_unrecognized_container_with_no_signature_stays_unknown(tmp_path):
     results = DeepScanner(str(tmp_path)).scan()
     art = results["artifacts"][0]
 
-    # #131 gave this verdict its consequence. `UNKNOWN (...)` was honest but
+    # Making unreadable files errors gave this verdict its consequence.
+    # `UNKNOWN (...)` was honest but
     # scored 0 in the CLI's `_risk_score` — below LOW — so an unreadable file
     # exited 0 and rated safer than a clean model.
     assert art["risk_level"] == "UNKNOWN (Unrecognized Format)"
@@ -429,7 +430,7 @@ def test_config_larger_than_the_read_budget_is_not_called_clean(tmp_path, monkey
 
 
 def test_truncated_config_is_not_cleared_in_vex_either(tmp_path, monkeypatch):
-    """The same "not called clean" rule, end to end through VEX (#113).
+    """The same "not called clean" rule, end to end through VEX.
 
     Found on a live target rather than a fixture: `hf://google-bert/
     bert-base-uncased` ships a `tf_model.h5` whose config exceeds the read

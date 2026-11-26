@@ -5,7 +5,7 @@ of `DeepScanner.scan()` used it as its only discovery mechanism, so a target
 that was a regular file — or a path that did not exist at all — walked nothing,
 recorded no error, and produced a clean `exit 0`. A malicious `.pt` named
 directly on the command line reported "No AI models found" while the identical
-file scanned via its parent directory was correctly CRITICAL (#125).
+file scanned via its parent directory was correctly CRITICAL.
 
 That is the worst possible failure mode for a CI gate: the tool reports success
 and emits a well-formed SBOM asserting zero components. These tests pin the

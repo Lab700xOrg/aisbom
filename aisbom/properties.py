@@ -71,7 +71,7 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
     if legal:
         props.append(("aisbom:legal", str(legal)))
 
-    # A file no parser could read (#131). Emitted before the format branch
+    # A file no parser could read. Emitted before the format branch
     # because such an artifact deliberately carries no `framework` — the label
     # is an assertion that that format's parser succeeded — so it returns below
     # without any `aisbom:format`. The marker is what keeps the component

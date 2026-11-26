@@ -277,7 +277,7 @@ def _lib_package(data, name):
 
 
 def test_a_pypi_resolved_spdx_license_is_declared():
-    """#129: the license PyPI declares is the package's *declared* license. The
+    """The license PyPI declares is the package's *declared* license. The
     concluded license stays NOASSERTION — nobody reviewed it."""
     data = _generate(dependencies=[{
         "name": "torch", "version": "2.13.0", "license": "BSD-3-Clause AND MIT",

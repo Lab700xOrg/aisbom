@@ -1,4 +1,4 @@
-"""Tests for CycloneDX 1.7 ML-BOM `modelCard` generation (#111).
+"""Tests for CycloneDX 1.7 ML-BOM `modelCard` generation.
 
 Three layers, because the splice bypasses the library's type checks:
 

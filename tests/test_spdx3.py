@@ -1,4 +1,4 @@
-"""SPDX 3.0 AI Profile export (#112).
+"""SPDX 3.0 AI Profile export.
 
 Every generated document is validated against the *official* SPDX 3.0.1 JSON
 schema bundled at ``tests/schemas/spdx-3.0.1-schema.json``. That schema sets

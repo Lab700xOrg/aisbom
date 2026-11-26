@@ -70,7 +70,7 @@ class _OfflinePyPI:
 
 @pytest.fixture(autouse=True)
 def _stub_pypi_network(monkeypatch):
-    """Keep the default-on license lookup (#129) from ever reaching pypi.org.
+    """Keep the default-on license lookup from ever reaching pypi.org.
 
     Same shape as `_stub_osv_network`: only the default session is replaced,
     so tests that inject a fake PyPI are unaffected, and a scan that forgets

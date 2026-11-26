@@ -1,6 +1,6 @@
 """Build the CycloneDX document from a completed scan.
 
-Extracted from ``cli.scan`` (#114) so that ``aisbom score`` can grade a scan
+Extracted from ``cli.scan`` so that ``aisbom score`` can grade a scan
 target directly — scoring a directory or an ``hf://`` slug means producing a
 document to score, and duplicating the construction in two places is how the
 two drift apart. ``scan`` and ``score`` now emit byte-identical documents from
@@ -46,7 +46,7 @@ def _tool_component() -> Component:
     """AIsbom's self-identification for ``metadata.tools``.
 
     An SBOM that does not say what produced it fails the NTIA minimum
-    elements — and, since #114, AIsbom's own completeness grade. Emitting it
+    elements — and AIsbom's own completeness grade. Emitting it
     is purely additive: no existing field changes value.
     """
     return Component(
@@ -72,7 +72,7 @@ def build_bom(results: Dict[str, Any]) -> Bom:
             # random string on every run, which nothing downstream can rely on
             # and which cannot be computed ahead of serialization — so the
             # modelCard splice would have no identifier to join on and would
-            # fall back to matching by basename, which collides (#111).
+            # fall back to matching by basename, which collides.
             bom_ref=bom_ref_for(art_index, art),
             description=(
                 f"Risk: {art['risk_level']} | Framework: {art['framework']} | "
@@ -85,7 +85,7 @@ def build_bom(results: Dict[str, Any]) -> Bom:
         # `!= 'hash_error'` guard let `remote_unhashed` through as a SHA-256
         # digest — which made every hf:// SBOM fail CycloneDX validation, at
         # 1.6 as well as 1.7. Reuses spdx_gen's predicate, which already had to
-        # solve this for SPDX (#101), rather than blacklisting sentinel names:
+        # solve this for SPDX, rather than blacklisting sentinel names:
         # a sentinel added later would silently reintroduce the bug.
         digest = _sha256_or_none(art.get("hash"))
         if digest:
@@ -106,7 +106,7 @@ def build_bom(results: Dict[str, Any]) -> Bom:
         version = dep.get("version")
         # `version: "unknown"` was a placeholder carrying no more information
         # than an absent field, and it cost the completeness grade real points
-        # for nothing (#114). Omitting it is safe: `diff.SBOMDiff` already
+        # for nothing. Omitting it is safe: `diff.SBOMDiff` already
         # reads `component.get("version", "unknown")`, so an absent field and
         # the literal string compare equal and no drift is reported.
         lib = Component(
@@ -114,10 +114,10 @@ def build_bom(results: Dict[str, Any]) -> Bom:
             version=None if version == "unknown" else version,
             type=ComponentType.LIBRARY,
             # Stable for the same reason as the model components: a CVE-keyed
-            # VEX statement (#128) addresses this component by bom-ref.
+            # VEX statement addresses this component by bom-ref.
             bom_ref=dependency_bom_ref(dep_index, dep),
         )
-        # The license PyPI declares for this exact pin (#129). It goes straight
+        # The license PyPI declares for this exact pin. It goes straight
         # into `licenses[]`: for a library nothing downstream turns that field
         # into a verdict (the platform's risk and drift counts read models
         # only, and `aisbom diff` reads the description), so third-party tools
@@ -145,7 +145,7 @@ def build_bom(results: Dict[str, Any]) -> Bom:
 def build_cyclonedx_json(results: Dict[str, Any], schema_version: str = "1.7") -> str:
     """Serialize a scan's results as a CycloneDX JSON document.
 
-    ML-BOM enrichment (#111) applies to 1.7 only. ``modelCard`` exists from
+    ML-BOM enrichment applies to 1.7 only. ``modelCard`` exists from
     CycloneDX 1.5 on, but 1.5/1.6 output is what older platform receivers and
     third-party tools were pinned against, so asking for an older schema
     version keeps giving the document shape those consumers expect.

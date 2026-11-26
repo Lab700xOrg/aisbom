@@ -38,7 +38,7 @@ _ML_COMPONENT_TYPE = "machine-learning-model"
 
 # HF metadata worth carrying that has no home in the typed `modelParameters`
 # block. Each maps a key in the API payload to an `aisbom:hf:*` property name,
-# matching the namespacing convention in `aisbom.properties` (#28/#54).
+# matching the namespacing convention in `aisbom.properties`.
 #
 # `downloads` and `likes` are deliberately absent: they change hourly, and an
 # SBOM that differs between two scans of an unchanged model produces phantom
@@ -363,7 +363,7 @@ def dependency_bom_ref(index: int, dep: Dict[str, Any]) -> str:
 
     Left to the library this is a fresh random string on every run, which is
     what `bom_ref_for` exists to avoid for models. Dependencies need the same
-    once a VEX statement addresses one (#128): the CVE statement and the SBOM
+    once a VEX statement addresses one: the CVE statement and the SBOM
     component are written separately and must join on this value. The index
     keeps the same package listed in two requirements files distinct.
     """

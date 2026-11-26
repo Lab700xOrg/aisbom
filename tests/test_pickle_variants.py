@@ -215,7 +215,7 @@ def test_unreadable_codec_is_named_not_called_clean(tmp_path, magic, label):
 
 @pytest.mark.parametrize("magic,label", [(b"\x04\x22\x4d\x18", "lz4"), (b"\x28\xb5\x2f\xfd", "zstd")])
 def test_unreadable_codec_is_not_cleared_in_vex_either(tmp_path, magic, label):
-    """The "different answer from clean" rule, end to end through VEX (#113).
+    """The "different answer from clean" rule, end to end through VEX.
 
     Raised by review on PR #99: the container is named and reported unscanned,
     but the marker `_classify` reads was only set for a *truncated* stream, so

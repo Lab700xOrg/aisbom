@@ -56,7 +56,7 @@ def _telemetry_disabled() -> bool:
     """All-paths short-circuit. Opt-out always wins; default state is enabled."""
     if os.getenv("AISBOM_NO_TELEMETRY"):
         return True
-    # `--offline` / AISBOM_OFFLINE promises no network at all (#129).
+    # `--offline` / AISBOM_OFFLINE promises no network at all.
     if offline.is_offline():
         return True
     return False

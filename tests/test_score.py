@@ -1,4 +1,4 @@
-"""Tests for `aisbom score` — AIBOM completeness/quality grading (#114)."""
+"""Tests for `aisbom score` — AIBOM completeness/quality grading."""
 
 import json
 
@@ -180,7 +180,7 @@ def test_model_components_are_not_penalised_for_having_no_version():
 
 
 def test_hf_license_property_is_credited_and_named():
-    """#111 routes HF licenses to a property, not licenses[] — crediting it
+    """HF licenses are routed to a property, not licenses[] — crediting it
     stops the grade punishing users for a decision they cannot influence."""
     doc = _minimal_sbom()
     doc["components"] = [{

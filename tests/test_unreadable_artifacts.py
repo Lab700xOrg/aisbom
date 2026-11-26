@@ -1,8 +1,8 @@
-"""Unparseable model files are errors, not clean LOW-risk artifacts (#131).
+"""Unparseable model files are errors, not clean LOW-risk artifacts.
 
 `LOW` is an assertion: AIsbom opened the artifact and found nothing dangerous.
 For a file no parser ever read, the honest output is "could not read this", and
-collapsing the two is the #125 failure in a different place — something never
+collapsing the two is the unusable-target failure in a different place — something never
 examined passing a CI gate.
 
 Before this change, six distinct corruption shapes all graded clean and exited
@@ -408,7 +408,7 @@ def test_clean_tree_still_exits_0(tmp_path):
 
 
 def test_score_refuses_to_grade_an_unreadable_scan(tmp_path):
-    """AC#5 — the #114 partial-scan gate keys off results["errors"], so it
+    """The score's partial-scan gate keys off results["errors"], so it
     starts firing for local corruption and not only remote fetch failures."""
     (tmp_path / "random.safetensors").write_bytes(b"\x91\x3f" * 100)
     result = runner.invoke(app, ["score", str(tmp_path)])

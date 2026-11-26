@@ -1,11 +1,11 @@
-"""Observability for unusable scan targets (aisbom-ops #126).
+"""Observability for unusable scan targets.
 
-#125 made a missing path, a broken symlink, or a named file no scanner claims
+An earlier change made a missing path, a broken symlink, or a named file no scanner claims
 fail the scan (exit 1) instead of passing clean. It did not make that failure
 *visible*: a target error reached no `cli_error` emit site, was counted in the
 misleadingly-named `parse_error_count`, and — worst — called
 `loop_state.record_success`, so a cron job pointed at a typo'd path reset the
-stale-loop counter (#99) on every single run.
+stale-loop counter on every single run.
 
 These tests pin the three fixes and the privacy position that constrains them:
 the event carries a closed-set synthetic `error_type`, never the path, the
@@ -229,7 +229,7 @@ def test_cli_scan_reports_target_error_count(cli_env):
     runner.invoke(app, ["scan", _missing_target(cli_env["tmp"])])
     (scan,) = _scans(cli_env["events"])
     assert scan["target_error_count"] == "1"
-    # Additive: parse_error_count keeps its pre-#126 meaning (all errors).
+    # Additive: parse_error_count keeps its original meaning (all errors).
     assert scan["parse_error_count"] == "1"
 
 

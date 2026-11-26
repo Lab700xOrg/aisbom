@@ -220,7 +220,7 @@ def resolve_huggingface_repo(repo_id: str) -> HFRepoListing:
         # Let fetch failures propagate (no broad swallow): a 401/403 on a
         # private/gated repo, a 404 typo, or a network error must surface to
         # the scanner as a real error with a status-aware hint — returning []
-        # here is what produced the silent "0 artifacts found" (#58). This
+        # here is what produced the silent "0 artifacts found". This
         # holds for every page: a listing that fails halfway is not a smaller
         # repo. A successful listing with no supported files still returns
         # an empty list, which is correct.
@@ -438,7 +438,7 @@ def fetch_huggingface_model_card(
     Unlike :func:`resolve_huggingface_repo`, every failure here is swallowed and
     returns ``None``. That asymmetry is intentional and is the whole contract:
     the file listing decides *what gets scanned*, so losing it silently would
-    hide a malicious model (#58). This call only decides whether the SBOM
+    hide a malicious model. This call only decides whether the SBOM
     carries a richer ``modelCard`` block. A gated repo, a rate limit, an API
     outage, or a network blip must degrade to an SBOM without that block —
     never to a failed scan or a new exit code. Callers get ``None`` and omit

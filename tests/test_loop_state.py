@@ -1,6 +1,6 @@
 """Unit tests for aisbom.loop_state — the consecutive-failure loop detector.
 
-Parent: aisbom-ops #99 (CLI stale-loop nudge). The module persists a local,
+CLI stale-loop nudge. The module persists a local,
 privacy-neutral consecutive-failure counter in ~/.aisbom/loop_state.json so
 `aisbom scan` can warn an operator whose automated scans fail identically
 run after run. State is local-only UX state (no network), so it is written
@@ -138,7 +138,7 @@ def _http_error(status: int) -> requests.exceptions.HTTPError:
 
 
 class _FetchFailingScanner:
-    """DeepScanner stub returning a structured fetch failure (the #58 shape)."""
+    """DeepScanner stub returning a structured fetch failure."""
 
     _exc: BaseException
 
