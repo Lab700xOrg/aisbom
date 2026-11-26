@@ -2778,24 +2778,24 @@ class DeepScanner:
             req_file = RequirementsFile.from_file(path)
             for req in req_file.requirements:
                 if req.name:
-                    version = "unknown"
                     specs = list(req.specifier) if req.specifier else []
-                    if specs:
-                        version = specs[0].version
                     # Only a single `==`/`===` without a wildcard names the
-                    # version actually installed. `version` above is also set
-                    # for `>=2.0`, so the OSV lookup keys on this flag
-                    # rather than on whether a version string exists.
+                    # version actually installed. A range such as `>=2.0`
+                    # names no version at all, so it is kept as `specifier`
+                    # rather than having its bound recorded as the version.
                     pinned = (
                         len(specs) == 1
                         and specs[0].operator in ("==", "===")
                         and "*" not in specs[0].version
                     )
-                    self.dependencies.append({
+                    dep = {
                         "name": req.name,
-                        "version": version,
+                        "version": specs[0].version if pinned else "unknown",
                         "type": "library",
                         "pinned": pinned,
-                    })
+                    }
+                    if specs and not pinned:
+                        dep["specifier"] = str(req.specifier)
+                    self.dependencies.append(dep)
         except Exception as e:
             self.errors.append({"file": str(path), "error": str(e)})

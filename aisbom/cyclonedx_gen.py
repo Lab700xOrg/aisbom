@@ -23,6 +23,7 @@ from cyclonedx.model.component import Component, ComponentType
 from cyclonedx.output.json import JsonV1Dot5, JsonV1Dot6, JsonV1Dot7
 
 from . import pypi
+from .dependency import SPECIFIER_PROPERTY, dependency_package_url
 from .modelcard import bom_ref_for, dependency_bom_ref, inject_model_cards
 from .properties import build_component_properties
 from .spdx_gen import _sha256_or_none
@@ -116,7 +117,12 @@ def build_bom(results: Dict[str, Any]) -> Bom:
             # Stable for the same reason as the model components: a CVE-keyed
             # VEX statement addresses this component by bom-ref.
             bom_ref=dependency_bom_ref(dep_index, dep),
+            purl=dependency_package_url(dep),
         )
+        # A range is not a version (the scanner leaves `version` unknown for
+        # it), but what the requirements file asked for is still worth keeping.
+        if dep.get("specifier"):
+            lib.properties.add(Property(name=SPECIFIER_PROPERTY, value=dep["specifier"]))
         # The license PyPI declares for this exact pin. It goes straight
         # into `licenses[]`: for a library nothing downstream turns that field
         # into a verdict (the platform's risk and drift counts read models
