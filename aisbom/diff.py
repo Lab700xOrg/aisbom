@@ -164,7 +164,10 @@ class SBOMDiff:
                 # Hash
                 old_hash = self._get_hash(old_c)
                 new_hash = self._get_hash(new_c)
-                if old_hash != new_hash and old_hash and new_hash:
+                # Compare digests as the rename pairing does: hex case is not
+                # a different file, so `A…` vs `a…` is not drift.
+                same_digest = (self._get_sha256(old_c) or old_hash) == (self._get_sha256(new_c) or new_hash)
+                if not same_digest and old_hash and new_hash:
                     # Only flag drift if both have hashes (avoid flagging 'added hash' as drift, though maybe we should?)
                     # Requirement says "Model Hash Drift".
                     diff.hash_diff = (old_hash, new_hash)

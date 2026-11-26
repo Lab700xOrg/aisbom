@@ -151,6 +151,13 @@ def test_same_hash_rename_is_reported_as_renamed(tmp_path):
     assert res.hash_drifted is False
 
 
+def test_rename_whose_digest_differs_only_in_case_is_not_hash_drift(tmp_path):
+    res = _diff(tmp_path, [_comp("model.pt", "A" * 64)], [_comp("a/model.pt", "a" * 64)])
+    assert res.changed[0].renamed_from == "model.pt"
+    assert res.changed[0].hash_diff is None
+    assert res.hash_drifted is False
+
+
 def test_rename_that_escalates_still_raises_risk(tmp_path):
     res = _diff(
         tmp_path,
