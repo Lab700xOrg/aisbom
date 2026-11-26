@@ -13,7 +13,7 @@ the scan actually read, and says where it came from.** Everything else is a
 ``TODO (provider)`` placeholder. A regulator-facing document with a guessed
 value in it is worse than one with a visible gap. Where a value is derived
 rather than read, the derivation is narrow and labelled: a parameter count is
-summed only over a provably complete set of safetensors files, and an
+summed only over a provably complete set of safetensors or GGUF files, and an
 interpretation of a declared value (modality from the task, supplier from the
 repository owner) is tagged *AIsbom's mapping*. A declared value that is not
 the field's answer (model-card languages, CO2 emissions, the HF repository's
@@ -50,7 +50,7 @@ import yaml
 # Bump on every change to the wording or field mapping of a generated
 # document, so a pack in someone's submission folder can be traced to the
 # exact template that produced it.
-TEMPLATE_VERSION = "2026-11-15.2"
+TEMPLATE_VERSION = "2026-11-26"
 
 TODO = "TODO (provider)"
 
@@ -60,6 +60,7 @@ SOURCE_HF_PARAMETERS = "Hugging Face safetensors metadata"
 SOURCE_HEADER = "model file header"
 SOURCE_SCAN = "AIsbom scan"
 SOURCE_SCAN_PARAMETERS = "AIsbom scan of safetensors headers"
+SOURCE_SCAN_GGUF_PARAMETERS = "AIsbom scan of GGUF headers"
 SOURCE_PROVIDER = "provider-supplied"
 # Interpretive values: AIsbom's reading of a declared fact, not the fact itself.
 MAPPING = "AIsbom's mapping"
@@ -99,6 +100,7 @@ TASK_MODALITIES: Dict[str, Tuple[str, str]] = {
 
 # A shard of a sharded safetensors release: `model-00002-of-00004.safetensors`.
 _SHARD = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.safetensors$")
+_GGUF_SHARD = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$")
 
 # Wording that reads as a regulatory verdict about the provider. AIsbom's own
 # text never uses it (the test suite checks every generated file); provider
@@ -315,34 +317,44 @@ def _int_prop(component: Dict[str, Any], name: str) -> Optional[int]:
     return value if value is not None and value >= 0 else None
 
 
-def _local_parameter_counts(models: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
-    """Parameter counts summed from safetensors headers, only for complete sets.
+_PARAMETER_FORMATS = (
+    # extension, property namespace, shard pattern, source label
+    (".safetensors", "aisbom:safetensors", _SHARD, SOURCE_SCAN_PARAMETERS),
+    (".gguf", "aisbom:gguf", _GGUF_SHARD, SOURCE_SCAN_GGUF_PARAMETERS),
+)
 
-    A set is one unsharded `.safetensors` file (its own count), or a sharded
-    release the scanner marked complete with `aisbom:safetensors:set_parameters`.
-    Completeness is never re-derived here from component names: those are
-    basenames for local scans, so shards from two unrelated directories would
-    look like one complete set. A partial sum would understate the model, and
-    Annex XI 1(d) is pre-filled from this.
+
+def _local_parameter_counts(models: Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """Parameter counts summed from safetensors or GGUF headers, only for complete sets.
+
+    A set is one unsharded file (its own count), or a sharded release the
+    scanner marked complete with `<ns>:set_parameters`. Completeness is never
+    re-derived here from component names: those are basenames for local scans,
+    so shards from two unrelated directories would look like one complete set.
+    A GGUF whose header says it is one split of several (`aisbom:gguf:split_count`
+    above 1) is never counted on its own, whatever it is named. A partial sum
+    would understate the model, and Annex XI 1(d) is pre-filled from this.
     """
     out: List[Tuple[str, str]] = []
     for m in models:
         name = posixpath.basename(str(m.get("name") or ""))
-        if not name.endswith(".safetensors"):
-            continue
-        shard = _SHARD.match(name)
-        if shard is None:
-            count = _int_prop(m, "aisbom:safetensors:parameters")
-            if count is not None:
-                out.append((f"{count:,} ({name})", SOURCE_SCAN_PARAMETERS))
-            continue
-        total = _int_prop(m, "aisbom:safetensors:set_parameters")
-        shards = _int_prop(m, "aisbom:safetensors:set_shards")
-        if total is not None and shards:
-            out.append((
-                f"{total:,} ({shard['stem']}-*-of-{shards:05d}.safetensors, {shards} shards)",
-                SOURCE_SCAN_PARAMETERS,
-            ))
+        for ext, ns, pattern, source in _PARAMETER_FORMATS:
+            if not name.endswith(ext):
+                continue
+            shard = pattern.match(name)
+            if shard is None:
+                count = _int_prop(m, f"{ns}:parameters")
+                split_count = _int_prop(m, f"{ns}:split_count")
+                if count is not None and (split_count is None or split_count <= 1):
+                    out.append((f"{count:,} ({name})", source))
+                continue
+            total = _int_prop(m, f"{ns}:set_parameters")
+            shards = _int_prop(m, f"{ns}:set_shards")
+            if total is not None and shards:
+                out.append((
+                    f"{total:,} ({shard['stem']}-*-of-{shards:05d}{ext}, {shards} shards)",
+                    source,
+                ))
     return out
 
 
@@ -630,7 +642,9 @@ def _annex_xi(facts: _Facts, target: str, answers: Dict[str, str]) -> _Writer:
     w.fact("annex_xi.1d.architecture_family", "Architecture family", facts.families)
     w.fact("annex_xi.1d.model_architecture", "Model architecture", facts.architectures)
     w.fact("annex_xi.1d.parameter_count", "Number of parameters", facts.parameter_counts,
-           "pre-filled only from a complete set of safetensors weights; other "
+           "pre-filled only from a complete set of safetensors or GGUF weights; "
+           "a GGUF count includes every tensor stored in the file, so it can exceed "
+           "the model card where shared weights were written out twice; other "
            "formats and partial sets are left to the provider")
 
     w.heading(3, "Point 1(e) — Modality and format of inputs and outputs")

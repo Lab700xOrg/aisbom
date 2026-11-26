@@ -34,6 +34,11 @@ _SAFETENSORS_SHARD = re.compile(
     r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.safetensors$"
 )
 GGUF_EXTENSION = '.gguf'
+# One file of a split GGUF release, as llama.cpp's gguf-split names them:
+# `model-00002-of-00004.gguf`.
+_GGUF_SHARD = re.compile(
+    r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$"
+)
 KERAS_EXTENSIONS = {'.keras', '.h5', '.hdf5'}
 ONNX_EXTENSION = '.onnx'
 
@@ -253,14 +258,19 @@ GGUF_CHAT_TEMPLATE_KEY = "tokenizer.chat_template"
 GGUF_METADATA_WINDOW = 16 * 1024 * 1024
 
 # Remote reads are HTTP Range requests, so a remote scan starts with a small
-# window and widens once if the metadata block did not fit. Two requests at
-# worst, against one request per field if the stream were walked directly.
+# window and widens once if the metadata block, or the tensor-info block after
+# it, did not fit. Two requests at worst, against one request per field if the
+# stream were walked directly.
 GGUF_REMOTE_FIRST_WINDOW = 1 * 1024 * 1024
 GGUF_REMOTE_MAX_WINDOW = 16 * 1024 * 1024
 
 # Array contents are never retained — only the element type and count — but a
 # declared count still has to be sanity-bounded before it is trusted.
 GGUF_MAX_ARRAY_ELEMENTS = 50_000_000
+# ggml tensors have at most four dimensions (GGML_MAX_DIMS).
+GGUF_MAX_TENSOR_DIMS = 4
+# A tensor whose element count does not fit in int64 cannot be real.
+GGUF_MAX_TENSOR_ELEMENTS = 2 ** 63 - 1
 # How much of a bare (non-ZIP) candidate is disassembled. The same bound the
 # ZIP path already uses for its pickle member.
 PICKLE_MAX_SCAN_BYTES = 10 * 1024 * 1024
@@ -504,6 +514,7 @@ class DeepScanner:
                     )
 
         self._mark_complete_safetensors_sets()
+        self._mark_complete_gguf_sets()
         return {
             "artifacts": self.artifacts,
             "dependencies": self.dependencies,
@@ -521,21 +532,49 @@ class DeepScanner:
         one half each would look complete to anything reading the SBOM. A
         shard missing, listed twice or without a count leaves the set unmarked.
         """
+        self._mark_complete_sets("SafeTensors", _SAFETENSORS_SHARD)
+
+    def _mark_complete_gguf_sets(self) -> None:
+        """The same rule for llama.cpp split GGUF files.
+
+        Each split also records its own position in its header (`split.no`,
+        zero-based, and `split.count`). A shard whose header disagrees with
+        its file name leaves the set unmarked rather than trusting either.
+        """
+        def header_agrees(art: Dict[str, Any], index: int, total: int) -> bool:
+            details = art.get("details") or {}
+            count, number = details.get("split_count"), details.get("split_no")
+            return (count is None or count == total) and (number is None or number == index - 1)
+
+        self._mark_complete_sets("GGUF", _GGUF_SHARD, header_agrees)
+
+    def _mark_complete_sets(self, framework: str, pattern, agrees=None) -> None:
+        """Mark every complete `<stem>-0000k-of-0000N` set of one framework.
+
+        ``agrees(art, index, total)``, when given, vetoes a shard whose own
+        header contradicts its name; a vetoed shard leaves its set unmarked.
+        """
         groups: Dict[tuple, Dict[int, List[Dict[str, Any]]]] = {}
+        rejected = set()
         for index, art in enumerate(self.artifacts):
             name = str(art.get("name") or "")
-            shard = _SAFETENSORS_SHARD.match(posixpath.basename(name))
-            if art.get("framework") != "SafeTensors" or not shard:
+            shard = pattern.match(posixpath.basename(name))
+            if art.get("framework") != framework or not shard:
                 continue
             local = self._local_paths.get(index)
             directory = str(local.parent) if local is not None else posixpath.dirname(name)
-            key = (directory, shard["stem"], int(shard["total"]))
-            groups.setdefault(key, {}).setdefault(int(shard["index"]), []).append(art)
-        for (_, _, total), found in groups.items():
+            number, total = int(shard["index"]), int(shard["total"])
+            key = (directory, shard["stem"], total)
+            groups.setdefault(key, {}).setdefault(number, []).append(art)
+            if agrees is not None and not agrees(art, number, total):
+                rejected.add(key)
+        for key, found in groups.items():
+            total = key[2]
             arts = [a for listed in found.values() for a in listed]
             counts = [(a.get("details") or {}).get("parameters") for a in arts]
             if (
-                total < 1
+                key in rejected
+                or total < 1
                 or set(found) != set(range(1, total + 1))
                 or any(len(listed) != 1 for listed in found.values())
                 or any(c is None for c in counts)
@@ -1823,7 +1862,7 @@ class DeepScanner:
             return buf  # the whole file already fits
 
         probe = DeepScanner._parse_gguf_metadata(buf)
-        if not probe["truncated"]:
+        if not DeepScanner._gguf_tensor_info(buf, probe)["truncated"]:
             return buf
 
         f.seek(0)
@@ -1858,6 +1897,7 @@ class DeepScanner:
             return result
 
         result["version"] = struct.unpack('<I', buf[4:8])[0]
+        result["tensor_count"] = struct.unpack('<Q', buf[8:16])[0]
         kv_count = struct.unpack('<Q', buf[16:24])[0]
         result["kv_count"] = kv_count
 
@@ -1944,7 +1984,67 @@ class DeepScanner:
                 result["truncated"] = True
                 return result
 
+        # Where the tensor-info block starts; only known once every pair was read.
+        result["end"] = pos
         return result
+
+    @staticmethod
+    def _parse_gguf_tensor_info(buf: bytes, offset: int, tensor_count: int) -> Dict[str, Any]:
+        """Sum the element counts of the tensor-info records starting at ``offset``.
+
+        Each record is name (string) | n_dims (u32) | dims (u64 x n_dims) |
+        ggml type (u32) | data offset (u64). The dims are logical element
+        counts, so a quantised file still gives the model's parameter count.
+
+        All-or-nothing, like the safetensors count: ``parameters`` is None
+        unless every declared record was read and well-formed, because
+        `aisbom comply` pre-fills Annex XI 1(d) from it and a partial sum
+        would understate the model. ``truncated`` says the records ran past
+        the buffer, so a remote read knows whether a wider window could help.
+        """
+        result: Dict[str, Any] = {"parameters": None, "truncated": False}
+        if tensor_count < 1:
+            return result
+        total = 0
+        pos = offset
+        try:
+            for _ in range(tensor_count):
+                if pos + 8 > len(buf):
+                    raise _GGUFTruncated()
+                name_len = struct.unpack('<Q', buf[pos:pos + 8])[0]
+                pos += 8
+                if name_len > len(buf) - pos:
+                    raise _GGUFTruncated()
+                pos += name_len
+                if pos + 4 > len(buf):
+                    raise _GGUFTruncated()
+                n_dims = struct.unpack('<I', buf[pos:pos + 4])[0]
+                pos += 4
+                if n_dims > GGUF_MAX_TENSOR_DIMS:
+                    return result  # malformed, not truncated
+                if pos + 8 * n_dims + 12 > len(buf):
+                    raise _GGUFTruncated()
+                elements = 1
+                for dim in struct.unpack(f'<{n_dims}Q', buf[pos:pos + 8 * n_dims]):
+                    elements *= dim
+                if elements > GGUF_MAX_TENSOR_ELEMENTS:
+                    return result
+                total += elements
+                pos += 8 * n_dims + 12  # dims, then ggml type and data offset
+        except (_GGUFTruncated, struct.error):
+            result["truncated"] = True
+            return result
+        result["parameters"] = total
+        return result
+
+    @staticmethod
+    def _gguf_tensor_info(buf: bytes, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Tensor-info result for a parsed metadata block, or a truncated one."""
+        if parsed["truncated"] or "end" not in parsed:
+            return {"parameters": None, "truncated": True}
+        return DeepScanner._parse_gguf_tensor_info(
+            buf, parsed["end"], parsed.get("tensor_count", 0)
+        )
 
     @staticmethod
     def _gguf_template_risk_label(threats: List[str]) -> str:
@@ -2055,6 +2155,16 @@ class DeepScanner:
             extracted_meta["kv_parsed"] = parsed["pairs_read"]
             if parsed["truncated"]:
                 extracted_meta["metadata_truncated"] = True
+
+            # Parameter count from the tensor-info block, and the split facts
+            # that decide whether this file alone is the whole model.
+            parameters = self._gguf_tensor_info(buf, parsed)["parameters"]
+            if parameters is not None:
+                extracted_meta["parameters"] = parameters
+            for key, field in (("split.count", "split_count"), ("split.no", "split_no")):
+                value = kv.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    extracted_meta[field] = value
 
             # 5. The chat templates. These are Jinja templates that run on every
             # inference request, so they are inspected as strings — never

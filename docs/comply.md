@@ -4,7 +4,7 @@ Every field `aisbom comply` writes, and where its value comes from. A field
 with no scan source is always written as `TODO (provider)`. A field with a
 scan source falls back to `TODO (provider)` when the scan found nothing for
 it, unless the provider's [answers file](#answers-file---answers) fills it.
-Template version: `2026-11-15.2` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
+Template version: `2026-11-26` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
 
 Sources, as tagged in the generated documents:
 
@@ -23,6 +23,9 @@ Sources, as tagged in the generated documents:
 - **AIsbom scan of safetensors headers**: a parameter count summed from the
   tensor shapes of a complete set of safetensors files
   (`aisbom:safetensors:parameters`, see [Number of parameters](#number-of-parameters)).
+- **AIsbom scan of GGUF headers**: a parameter count summed from the
+  tensor-info block of a complete set of GGUF files
+  (`aisbom:gguf:parameters`, see [Number of parameters](#number-of-parameters)).
 - **endoflife.date**: end-of-support dates looked up when an FDA pack is
   built (see [FDA §524B](#fda-524b)). The only source not stored in `sbom.json`.
 
@@ -48,7 +51,7 @@ Regulation (EU) 2024/1689, Article 53(1)(a) and Annex XI.
 | 1(c) | Methods of distribution | TODO |
 | 1(d) | Architecture family | `modelParameters.architectureFamily` |
 | 1(d) | Model architecture | `modelParameters.modelArchitecture` |
-| 1(d) | Number of parameters | `aisbom:hf:parameters_total`, and/or the sum of `aisbom:safetensors:parameters` over a complete set ([rule](#number-of-parameters)) |
+| 1(d) | Number of parameters | `aisbom:hf:parameters_total`, and/or the sum of `aisbom:safetensors:parameters` or `aisbom:gguf:parameters` over a complete set ([rule](#number-of-parameters)) |
 | 1(e) | Input / output modality and format (*AIsbom's mapping*) | `modelParameters.task` through the [task table](#modality-from-the-task) |
 | 1(f) | Licence | component `licenses[]`, then `aisbom:hf:license` |
 | 2(a) | Library declared in the model card | `aisbom:hf:library_name` |
@@ -87,7 +90,7 @@ is TODO.
 
 ### Number of parameters
 
-Two sources, shown side by side when both exist:
+Up to three sources, shown side by side when more than one exists:
 
 - **Hugging Face safetensors metadata**: the total Hugging Face computes
   server-side across every safetensors file in the repository. Independent of
@@ -102,8 +105,30 @@ Two sources, shown side by side when both exist:
   `set_shards` on each shard of a complete set; `comply` never re-derives it
   from component names. A missing, duplicated or unreadable shard, or shards
   split across directories, leaves the set out.
+- **AIsbom scan of GGUF headers**: a GGUF file's tensor-info block, which
+  follows its metadata, lists every tensor's dimensions.
+  `aisbom:gguf:parameters` is the sum of their products, recorded only when
+  every record the header declares was read and well-formed. The dimensions
+  are element counts, so a quantised file gives the same count as the
+  unquantised one. The same completeness rule applies: one file, or every
+  split `<stem>-0000k-of-0000N.gguf` for k = 1..N in the same directory
+  (`aisbom:gguf:set_parameters`, `set_shards`). A file whose header says it
+  is one split of several (`aisbom:gguf:split_count` above 1) is never
+  counted on its own, whatever its name, and a split whose header
+  (`split.no`, `split.count`) disagrees with its file name leaves its set
+  out.
 
-Other weight formats (GGUF, pickle, ONNX) are never counted.
+  The count covers every tensor stored in the file. It can exceed the model
+  card's figure when a converter wrote a shared weight out twice:
+  Qwen2.5-0.5B-Instruct ties its input and output embeddings (494,032,768
+  parameters), and its GGUF stores the output embedding as a separate tensor
+  (630,167,424).
+
+  The tensor-info block is read only inside the same bounded window as the
+  metadata: the first 16 MB of a local file; for a remote file 1 MB, widened
+  once to 16 MB. A block that does not fit leaves the count out.
+
+Other weight formats (pickle, ONNX) are never counted.
 
 ### Modality from the task
 
