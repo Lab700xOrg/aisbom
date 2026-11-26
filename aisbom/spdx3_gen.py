@@ -177,8 +177,13 @@ class SPDX3Generator:
 
         fingerprint = {
             "artifacts": artifacts,
+            # A range leaves the version unknown, so `numpy>=1.0` and
+            # `numpy>=2.0` would otherwise fingerprint the same. The specifier
+            # is appended only when present, so a scan without ranges keeps
+            # the namespace earlier versions gave it.
             "dependencies": [
                 [dep.get("name"), dep.get("version")]
+                + ([dep["specifier"]] if dep.get("specifier") else [])
                 for dep in results.get("dependencies", [])
             ],
             "datasets": _all_card_datasets(results),

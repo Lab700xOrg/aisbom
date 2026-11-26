@@ -238,6 +238,37 @@ def test_spdx3_exact_pin_has_version_and_purl(tmp_path):
     assert "comment" not in pkg
 
 
+def test_spdx3_namespace_distinguishes_different_ranges(tmp_path):
+    """Both ranges leave the version unknown, so the content-derived
+    namespace has to see the specifier or two different scans share one
+    document identity."""
+    def namespace(spec):
+        dep = {"name": "numpy", "version": "unknown", "pinned": False,
+               "specifier": spec}
+        doc = _spdx3({"artifacts": [], "errors": [], "dependencies": [dep]})
+        return next(e for e in doc["@graph"] if e.get("type") == "SpdxDocument")["spdxId"]
+
+    assert namespace(">=1.0") != namespace(">=2.0")
+
+
+def test_spdx3_namespace_unchanged_without_specifiers():
+    """Adding the specifier must not move namespaces for scans with none:
+    this is the namespace main produced for the same input."""
+    from aisbom.spdx3_gen import SPDX3Generator
+
+    results = {"artifacts": [], "errors": [], "dependencies": [
+        {"name": "torch", "version": "2.14.1", "pinned": True},
+        {"name": "numpy", "version": "unknown", "pinned": False},
+    ]}
+    import hashlib
+    expected = hashlib.sha256(json.dumps({
+        "artifacts": [],
+        "dependencies": [["torch", "2.14.1"], ["numpy", "unknown"]],
+        "datasets": [],
+    }, sort_keys=True).encode()).hexdigest()[:32]
+    assert SPDX3Generator()._content_namespace(results).endswith(expected)
+
+
 def test_spdx3_mixed_specifiers_validate(tmp_path):
     from jsonschema import Draft202012Validator
 
