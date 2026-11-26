@@ -1,8 +1,11 @@
 import json
+from collections import Counter
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 import re
+
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 @dataclass
 class ComponentDiff:
@@ -12,6 +15,9 @@ class ComponentDiff:
     risk_diff: Optional[Tuple[str, str]] = None
     legal_status_diff: Optional[Tuple[str, str]] = None
     license_diff: Optional[Tuple[str, str]] = None
+    # The component's name in the old SBOM when it was matched by hash rather
+    # than by name, i.e. the same file under a new name.
+    renamed_from: Optional[str] = None
 
 @dataclass
 class DiffResult:
@@ -77,24 +83,76 @@ class SBOMDiff:
             return "UNKNOWN"
         return val
 
+    def _get_sha256(self, component: dict) -> Optional[str]:
+        """The component's SHA-256 as lower-case hex, or None.
+
+        Only a real 64-hex digest counts. Remote scans share a
+        ``remote_unhashed`` placeholder, which identifies nothing.
+        """
+        digest = (self._get_hash(component) or "").strip()
+        return digest.lower() if _SHA256_RE.fullmatch(digest) else None
+
+    def _pair_renames(self, removed: List[dict], added: List[dict]) -> Dict[str, dict]:
+        """New name -> old component, for files that kept their bytes but not their name.
+
+        A removed and an added component pair when they carry the same SHA-256
+        and that digest occurs exactly once on each side. Local scans name
+        nested files by their path relative to the scan target, so a baseline
+        made when every name was a basename would otherwise show each nested
+        model as removed and re-added. A digest shared by two components on
+        either side is ambiguous and pairs nothing.
+        """
+        old_counts = Counter(filter(None, map(self._get_sha256, removed)))
+        new_counts = Counter(filter(None, map(self._get_sha256, added)))
+        old_by_hash = {
+            self._get_sha256(c): c for c in removed
+            if self._get_sha256(c) and old_counts[self._get_sha256(c)] == 1
+        }
+        pairs = {}
+        for c in added:
+            digest = self._get_sha256(c)
+            if digest and new_counts[digest] == 1 and digest in old_by_hash:
+                pairs[c["name"]] = old_by_hash[digest]
+        return pairs
+
     def compare(self) -> DiffResult:
         old_comps = {c["name"]: c for c in self.old_data.get("components", [])}
         new_comps = {c["name"]: c for c in self.new_data.get("components", [])}
 
+        renamed_from = self._pair_renames(
+            [c for n, c in old_comps.items() if n not in new_comps],
+            [c for n, c in new_comps.items() if n not in old_comps],
+        )
+        paired_old = {id(c) for c in renamed_from.values()}
+        # Digests that were already CRITICAL in the baseline. An added CRITICAL
+        # with one of these is not a new finding, even when it can't pair
+        # one-to-one (one old file whose bytes now sit at two paths).
+        old_critical = {
+            d for c in self.old_data.get("components", [])
+            if self._get_risk(c) == "CRITICAL" and (d := self._get_sha256(c))
+        }
+
         result = DiffResult()
 
         for name in new_comps:
-            if name not in old_comps:
+            old_c = old_comps.get(name) or renamed_from.get(name)
+            if old_c is None:
                 result.added.append(new_comps[name])
                 # Check if added component is CRITICAL
-                if self._get_risk(new_comps[name]) == "CRITICAL":
+                if (
+                    self._get_risk(new_comps[name]) == "CRITICAL"
+                    and self._get_sha256(new_comps[name]) not in old_critical
+                ):
                     result.risk_increased = True
             else:
                 # Compare
-                old_c = old_comps[name]
                 new_c = new_comps[name]
                 diff = ComponentDiff(name=name)
                 has_change = False
+
+                if name not in old_comps:
+                    diff.renamed_from = old_c["name"]
+                    has_change = True
 
                 # Version
                 old_ver = old_c.get("version", "unknown")
@@ -150,7 +208,7 @@ class SBOMDiff:
                     result.changed.append(diff)
 
         for name in old_comps:
-            if name not in new_comps:
+            if name not in new_comps and id(old_comps[name]) not in paired_old:
                 result.removed.append(old_comps[name])
 
         return result

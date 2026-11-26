@@ -7,7 +7,7 @@ import zlib
 import struct
 import hashlib
 from typing import List, Dict, Any, Optional
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from pip_requirements_parser import RequirementsFile
 from aisbom import pickle_containers as pc
 from aisbom import protobuf_reader as pb
@@ -344,6 +344,18 @@ class _GGUFTruncated(Exception):
     """The GGUF metadata block ran past the end of the buffer we read."""
 
 
+def local_artifact_name(root: PurePath, path: PurePath) -> str:
+    """Component name for a file found by walking the local directory ``root``.
+
+    The file's path relative to ``root``, with forward slashes on every OS, so
+    `a/model.pt` and `b/model.pt` are two components rather than two
+    `model.pt`. A file directly inside ``root`` keeps its bare filename, so
+    baselines made when every name was a basename still match it. Folders
+    above ``root`` are never part of the name.
+    """
+    return path.relative_to(root).as_posix()
+
+
 class DeepScanner:
     def __init__(self, root_path: str, strict_mode: bool = False, lint: bool = False):
         self.root_path = root_path
@@ -461,7 +473,9 @@ class DeepScanner:
                     if full_path.is_file():
                         # A tree legitimately contains non-model files; an
                         # unclaimed file here is normal and stays silent.
-                        self._dispatch_local_file(full_path)
+                        self._dispatch_local_file(
+                            full_path, name=local_artifact_name(root, full_path)
+                        )
             elif root.is_file():
                 # A single file is a first-class target: README documents
                 # `aisbom scan model.pkl --strict` and `aisbom scan model.pt
@@ -577,17 +591,23 @@ class DeepScanner:
             return [target]
         return []
 
-    def _dispatch_local_file(self, full_path: Path) -> bool:
+    def _dispatch_local_file(self, full_path: Path, name: str | None = None) -> bool:
         """Inspect one local file by extension.
 
         Shared by the directory walk and the single-file target path so the
         two cannot drift apart. Returns True if an inspector claimed
         the file; callers decide whether declining it is noteworthy.
+
+        ``name`` overrides the component name the inspector chose (the
+        basename). The directory walk passes the path relative to the scan
+        target; a single-file target keeps the basename.
         """
         before = len(self.artifacts)
         claimed = self._inspect_local_file(full_path)
         for index in range(before, len(self.artifacts)):
             self._local_paths[index] = full_path
+            if name is not None:
+                self.artifacts[index]["name"] = name
         return claimed
 
     def _inspect_local_file(self, full_path: Path) -> bool:

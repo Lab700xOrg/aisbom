@@ -2041,6 +2041,11 @@ def diff(
              # For now, if no status diff, we leave it as "-" to indicate STABLE risk level, but details show the change.
              pass
 
+        if change.renamed_from:
+            # Same bytes under a new name, matched by SHA-256. Informational:
+            # a rename alone never fails the diff.
+            details.append(f"from: {change.renamed_from}")
+
         if change.license_diff:
             old_l, new_l = change.license_diff
             details.append(f"Lic: {old_l} -> {new_l}")
@@ -2059,7 +2064,18 @@ def diff(
                 # If risk ALSO increased, append it
                 sec_risk_disp += "\n[bold red]INTEGRITY FAIL[/bold red]"
         
-        table.add_row(change.name, "Modified", "DRIFT", sec_risk_disp, legal_risk_disp, ", ".join(details))
+        only_renamed = change.renamed_from and not (
+            change.version_diff or change.hash_diff or change.risk_diff
+            or change.legal_status_diff or change.license_diff
+        )
+        table.add_row(
+            change.name,
+            "Renamed" if change.renamed_from else "Modified",
+            "RENAMED" if only_renamed else "DRIFT",
+            sec_risk_disp,
+            legal_risk_disp,
+            ", ".join(details),
+        )
 
     if result.added or result.removed or result.changed:
         console.print(table)
