@@ -1,4 +1,4 @@
-"""OSV lookup for pinned requirements.txt dependencies — CVE-keyed VEX (#128).
+"""OSV lookup for pinned requirements.txt dependencies — CVE-keyed VEX.
 
 The finding-class statements in :mod:`aisbom.vex` describe content inside model
 files, which has no CVE. The ``requirements.txt`` pins in the same scan are the
@@ -14,7 +14,7 @@ Contract
 malformed response, a record OSV cannot return, an exhausted time budget —
 degrades to *no CVE statements* plus a reason string. Nothing here raises into
 the CLI, changes an exit code, or touches the model findings. This is the same
-asymmetry as the HF model-card fetch (#111), and it is what keeps the
+asymmetry as the HF model-card fetch, and it is what keeps the
 air-gapped workflow working with no flag at all. A partial answer is treated as
 no answer: a document listing some of a dependency's advisories reads as the
 complete list, which is worse than an honest omission.

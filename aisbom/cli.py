@@ -43,7 +43,7 @@ app = typer.Typer()
 # plain f-strings. Without it, things like "aisbom 1.0.3" or "v1.6" get
 # partial cyan coloring that looks like markup bugs.
 console = Console(highlight=False)
-# Fetch-failure messages (#58) go to stderr so they don't pollute piped stdout
+# Fetch-failure messages go to stderr so they don't pollute piped stdout
 # (SBOM JSON, markdown) and survive `aisbom scan … > out.json`.
 err_console = Console(stderr=True, highlight=False)
 
@@ -161,7 +161,7 @@ def _note_target_rewrite(scanner: DeepScanner) -> None:
 
 
 def _refuse_remote_target_offline(target: str) -> None:
-    """A remote target has to be downloaded, which --offline forbids (#129).
+    """A remote target has to be downloaded, which --offline forbids.
 
     Refused before scanning rather than left to fail as a fetch error: the
     user asked for no network, and a fetch attempt would be exactly that.
@@ -176,7 +176,7 @@ def _refuse_remote_target_offline(target: str) -> None:
 
 
 def _resolve_dependency_licenses(results: dict, out: Console) -> None:
-    """Fill in PyPI-declared licenses for exact requirements.txt pins (#129).
+    """Fill in PyPI-declared licenses for exact requirements.txt pins.
 
     Default-on, best-effort by contract: a failure costs those dependencies
     their license and prints why, and nothing else about the run changes.
@@ -270,7 +270,7 @@ def _token_present() -> str:
 def _scan_error_payload(exc: BaseException, target: str) -> dict:
     """Build the `cli_error` telemetry payload for a scan-path failure.
 
-    Single source of truth for the event shape (parent #55) so every emit
+    Single source of truth for the event shape so every emit
     site — the top-level `except` and the per-target fetch-failure path —
     sends exactly the same low-cardinality keys and never a URL, repo id,
     hostname, or response body.
@@ -284,14 +284,14 @@ def _scan_error_payload(exc: BaseException, target: str) -> dict:
     }
 
 
-# `http_status` stand-in for failures that never touched the network (#126).
+# `http_status` stand-in for failures that never touched the network.
 # A distinct token rather than an HTTP code or "other", so the loop fingerprint
 # and the GA4 dimension can never confuse it with a real fetch bucket.
 NO_HTTP_STATUS = "none"
 
 
 def _target_error_payload(err: dict, target: str) -> dict:
-    """Build the `cli_error` payload for an unusable local scan target (#126).
+    """Build the `cli_error` payload for an unusable local scan target.
 
     A target error has no exception, so `_scan_error_payload` doesn't fit.
     `error_type` is the scanner's closed-set reason code; the error's `file`
@@ -308,7 +308,7 @@ def _target_error_payload(err: dict, target: str) -> dict:
 
 
 def _maybe_print_loop_warning(count: int, http_status: str) -> None:
-    """Stale-loop nudge (#99): warn once the same failure repeats N runs.
+    """Stale-loop nudge: warn once the same failure repeats N runs.
 
     Printed to stderr only, after the per-file error messages, so CI log
     parsers and `--output` consumers are unaffected. The upgrade line rides
@@ -360,7 +360,7 @@ def _maybe_print_loop_warning(count: int, http_status: str) -> None:
 def _format_fetch_error(exc: BaseException, url: str) -> str:
     """Status-aware, traceback-free message for a fetch failure.
 
-    Reactive (parent #55, #58): we make the request, then adapt the wording to
+    Reactive: we make the request, then adapt the wording to
     the *observed* status — the message never claims a cause it can't see. Auth
     branches additionally split on whether a token was present, so a gated repo
     with no token and a bad/insufficient token get different remediation.
@@ -583,7 +583,7 @@ def _emit_vex(
     statements = derive_statements(artifacts, baseline)
 
     # CVE-keyed statements for exact requirements.txt pins join the same
-    # document (#128). Best-effort by contract: a failed lookup costs these
+    # document. Best-effort by contract: a failed lookup costs these
     # statements and prints why, and nothing else about the run changes.
     osv_result = None
     if osv_enabled and dependencies:
@@ -832,7 +832,7 @@ def scan(
         # Safety net for unexpected scan crashes. Per-target *fetch* failures are
         # caught inside the scanner now (recorded as structured errors, no
         # traceback); anything reaching here is genuinely unexpected. Crashes
-        # still feed the loop detector (#99) — a repeating crash is a loop too.
+        # still feed the loop detector — a repeating crash is a loop too.
         payload = _scan_error_payload(e, target)
         crash_count = loop_state.record_failure(
             payload["error_type"], payload["http_status"], payload["target_type"]
@@ -864,7 +864,7 @@ def scan(
     if fail_on_risk and highest_risk >= 3:
         exit_code = 2
 
-    # Reactive fetch-failure handling (#58). The scanner caught these per-target
+    # Reactive fetch-failure handling. The scanner caught these per-target
     # and kept going, so other targets still rendered above. For each one, print
     # a clean status-aware message to stderr (no traceback) and emit a cli_error
     # carrying the same diagnostic buckets as the top-level except — so a single
@@ -872,13 +872,13 @@ def scan(
     # (context) below. Intentional; see the slice notes.
     fetch_failures = [e for e in results['errors'] if e.get('fetch_failure')]
     target_errors = [e for e in results['errors'] if e.get('target_error')]
-    # Files a model extension claimed that no parser could read (#131). Split
+    # Files a model extension claimed that no parser could read. Split
     # out here, ahead of telemetry, so the count and subtypes ride into
     # `cli_scan` alongside the target-error split.
     unreadable = [e for e in results['errors'] if e.get('unreadable')]
-    # Loop detection (#99) works at scan granularity ("N runs in a row"): the
+    # Loop detection works at scan granularity ("N runs in a row"): the
     # first failure's fingerprint represents the invocation — a fetch failure
-    # if there is one, else a target error (#126: a cron job on a typo'd path
+    # if there is one, else a target error (a cron job on a typo'd path
     # is the textbook stale loop, and used to *reset* the counter every run).
     # A scan with neither breaks any recorded loop for this target class.
     if fetch_failures:
@@ -897,7 +897,7 @@ def scan(
     # Sharded models fail one-per-shard with near-identical messages (12
     # shards → 12 lines differing only in filename). Group by status bucket
     # and print each distinct failure mode once, naming the first file and
-    # counting the rest. Telemetry below stays per-file (#58 semantics).
+    # counting the rest. Telemetry below stays per-file.
     failures_by_status: dict[str, list[dict]] = {}
     for err in fetch_failures:
         status = _classify_http_status(err.get('exception'))
@@ -935,11 +935,12 @@ def scan(
         "scan_duration_ms": str(scan_duration_ms),
         "file_count": str(len(results.get("artifacts", []))),
         # Counts every error, target errors included — kept as-is so existing
-        # GA4 history stays comparable. `target_error_count` (#126) is the
+        # GA4 history stays comparable. `target_error_count` is the
         # split that tells "scanned nothing" from "scanned a corrupt model".
         "parse_error_count": str(len(results.get("errors", []))),
         "target_error_count": str(len(target_errors)),
-        # #131, following the #126 split. The count answers "how much of this
+        # Unreadable model files, split out the same way as target errors.
+        # The count answers "how much of this
         # tree could we not read", and the closed-set subtypes say why — which
         # is what tells a wave of failed downloads from a wave of clones
         # missing `git lfs pull`. Both are bounded cardinality by construction.
@@ -993,7 +994,7 @@ def scan(
         console.print(table)
     else:
         # "No AI models found" is a claim about the target's contents, so it
-        # must not be printed when the target was never scanned at all (#125).
+        # must not be printed when the target was never scanned at all.
         # The target error itself is rendered below.
         if not any(e.get('target_error') for e in results['errors']):
             console.print("[yellow]No AI models found.[/yellow]")
@@ -1036,19 +1037,19 @@ def scan(
     ):
         _match_local_model_cards(results, target, no_hf_lookup, console)
 
-    # Unusable targets (#125): the path was missing or nothing could scan it,
+    # Unusable targets: the path was missing or nothing could scan it,
     # so nothing was examined. Printed to stderr like fetch failures — it is a
     # failed instruction, not a finding about the model.
     for err in target_errors:
         err_console.print(
             f"[bold red]✖[/bold red] Cannot scan [yellow]{err['file']}[/yellow]: {err['error']}"
         )
-    # The nudge follows the failure it is about (#126); a fetch failure, when
+    # The nudge follows the failure it is about; a fetch failure, when
     # present, owns the fingerprint and already printed its nudge above.
     if target_errors and not fetch_failures:
         _maybe_print_loop_warning(loop_count, first_payload["http_status"])
 
-    # Files carrying a model extension that no parser could read (#131). Their
+    # Files carrying a model extension that no parser could read. Their
     # own section, because "could not parse" describes a parser that ran and
     # failed, while these mostly never got that far — an empty file, a git-LFS
     # stub, a stream that stops mid-way. The distinction is the actionable

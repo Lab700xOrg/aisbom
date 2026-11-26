@@ -404,7 +404,7 @@ def signals_from_artifact(art: Dict[str, Any]) -> Dict[str, Any]:
         # computed from the buffered read, so a large *local* file that the
         # streamed re-walk did cover in full still reports truncated — this
         # errs toward "we may not have finished looking", which is the safe
-        # direction for a compliance claim. See the follow-ups on #113.
+        # direction for a compliance claim.
         sig["onnx_incomplete"] = (
             bool(details.get("truncated"))
             or not details.get("parsed", True)
@@ -419,7 +419,7 @@ _RCE_DESC_RE = re.compile(r"RCE Detected:\s*([^)]*)\)")
 def signals_from_component(component: Dict[str, Any]) -> Dict[str, Any]:
     """Normalise a serialized CycloneDX component into the shared signal shape.
 
-    Reads the structured ``aisbom:*`` properties that #53/#54 added. A baseline
+    Reads the structured ``aisbom:*`` properties. A baseline
     SBOM produced before those shipped carries none, so the pickle-RCE signal
     degrades to the ``description`` string — which has always named the
     offending globals — rather than silently reporting a clean baseline and
@@ -464,7 +464,8 @@ def signals_from_component(component: Dict[str, Any]) -> Dict[str, Any]:
         )
         return sig
 
-    # Pre-#54 baseline: recover what the description string carries.
+    # Baseline from before the structured properties: recover what the
+    # description string carries.
     description = component.get("description") or ""
     match = _RCE_DESC_RE.search(description)
     if match:
@@ -729,7 +730,7 @@ class BaselineIndex:
     **Not** keyed on ``bom-ref``. That identifier embeds the artifact's
     enumeration index (``artifact-<n>-<name>``, see
     :func:`aisbom.modelcard.bom_ref_for`), which is stable *within* a scan —
-    which is all #111 needed it for — and not across two. Adding one file
+    which is all the model-card join needed it for — and not across two. Adding one file
     earlier in the tree shifts every later index, so matching on it would miss
     a genuinely remediated finding and report ``not_affected`` instead of
     ``fixed``.

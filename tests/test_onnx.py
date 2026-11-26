@@ -209,7 +209,8 @@ def test_empty_onnx_file_does_not_crash(tmp_path):
     results = DeepScanner(str(tmp_path)).scan()
     art = results["artifacts"][0]
 
-    # Still the no-crash guarantee this test exists for. Since #131 a zero-byte
+    # Still the no-crash guarantee this test exists for. Now that unreadable
+    # files are errors, a zero-byte
     # file is classified before any parser runs, so it carries no ONNX label —
     # the label asserts that ONNX's parser succeeded.
     assert art["framework"] is None

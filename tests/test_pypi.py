@@ -1,4 +1,4 @@
-"""PyPI license resolution for pinned requirements.txt dependencies (#129).
+"""PyPI license resolution for pinned requirements.txt dependencies.
 
 pypi.org is never contacted from this suite. Every test drives a fake session
 whose payloads are trimmed copies of real `/pypi/<name>/<version>/json`

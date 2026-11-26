@@ -42,7 +42,7 @@ from .spdx_gen import _sha256_or_none
 
 _ML_COMPONENT_TYPE = "machine-learning-model"
 
-# The property #111 routes a Hugging Face card's declared license to. It is
+# The property a Hugging Face card's declared license is routed to. It is
 # deliberately not merged into `licenses[]` there, because that field drives a
 # compliance *judgement* (the platform's license_issue_count, the CLI's LEGAL
 # RISK verdict) and backfilling it from HF metadata would silently change one.
@@ -53,7 +53,7 @@ _HF_LICENSE_PROPERTY = "aisbom:hf:license"
 
 # Placeholder versions that carry no more information than an absent field.
 # `aisbom scan` emitted the literal string "unknown" for requirements.txt pins
-# with no version until #114; other tools emit their own variants.
+# with no version until the completeness score; other tools emit their own variants.
 _PLACEHOLDER_VERSIONS = frozenset({"", "unknown", "none", "n/a", "noassertion", "*"})
 
 # Grade bands, calibrated against real AIsbom output rather than the academic

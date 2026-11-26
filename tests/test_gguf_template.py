@@ -328,7 +328,7 @@ def test_invalid_magic_is_still_rejected(tmp_path):
     (tmp_path / "bad.gguf").write_bytes(b"NOPE" + b"\x00" * 32)
     results = DeepScanner(str(tmp_path)).scan()
     art = results["artifacts"][0]
-    # #131: rejected *and* recorded. The label alone scored 0 in `_risk_score`,
+    # Rejected *and* recorded. The label alone scored 0 in `_risk_score`,
     # so "rejected" still meant exit 0.
     assert art["risk_level"] == "UNKNOWN (Unrecognized Format)"
     assert results["errors"]

@@ -1,4 +1,4 @@
-"""OSV lookup for pinned requirements.txt dependencies — CVE-keyed VEX (#128).
+"""OSV lookup for pinned requirements.txt dependencies — CVE-keyed VEX.
 
 The OSV API is never contacted from this suite. Every test drives a fake
 session whose responses are shaped like real api.osv.dev payloads, so hit,

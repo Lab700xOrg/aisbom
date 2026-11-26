@@ -1,4 +1,4 @@
-"""The single switch for "this run must not touch the network" (#129).
+"""The single switch for "this run must not touch the network".
 
 `--offline` on `scan`/`score`, or ``AISBOM_OFFLINE=1`` for any command. Every
 code path that can reach a server consults :func:`is_offline`: the PyPI

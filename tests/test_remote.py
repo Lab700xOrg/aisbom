@@ -199,7 +199,7 @@ def test_resolve_huggingface_repo_sends_bearer(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# #58 — Resolve failures surface as real errors (not a swallowed empty list),
+# Resolve failures surface as real errors (not a swallowed empty list),
 # and per-target fetch failures isolate to that target.
 # ---------------------------------------------------------------------------
 
@@ -282,7 +282,7 @@ def test_scanner_isolates_one_gated_file_and_scans_the_rest(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# #111 — HF model-card metadata fetch. Enrichment only: unlike the file
+# HF model-card metadata fetch. Enrichment only: unlike the file
 # listing above, every failure here must degrade silently to None so a gated
 # repo or an HF outage costs a modelCard, never a scan.
 # ---------------------------------------------------------------------------

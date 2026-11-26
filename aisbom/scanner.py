@@ -48,7 +48,7 @@ PICKLE_VARIANT_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill', '.npy', '.np
 
 # The subset whose format *is* a pickle stream. One of these that does not
 # disassemble through to a STOP opcode is truncated or mislabelled, not a clean
-# artifact (#131) — where a `.npy`/`.npz` of ordinary numbers legitimately
+# artifact — where a `.npy`/`.npz` of ordinary numbers legitimately
 # carries no pickle at all and stays LOW.
 PICKLE_STREAM_EXTENSIONS = {'.pkl', '.pickle', '.joblib', '.dill'}
 
@@ -77,7 +77,7 @@ NPZ_MAX_MEMBERS = 512
 
 REQUIREMENTS_FILENAME = 'requirements.txt'
 
-# Why a local scan target was unusable (#126). A closed set, chosen at the call
+# Why a local scan target was unusable. A closed set, chosen at the call
 # site and never derived from the path, extension, or message: it rides into
 # `cli_error` telemetry and the loop_state fingerprint, where anything
 # path-derived would be unbounded cardinality and would leak the path by
@@ -90,7 +90,7 @@ TARGET_ERROR_TYPES = frozenset({
     "UnsupportedHFPageURL",
 })
 
-# Why a file carrying a model extension could not be read (#131). Same closed
+# Why a file carrying a model extension could not be read. Same closed
 # -set discipline as TARGET_ERROR_TYPES and for the same reason: the subtype
 # rides into `cli_error` telemetry, so it is chosen at the call site and never
 # derived from the path or the exception text.
@@ -352,7 +352,7 @@ class DeepScanner:
         self.artifacts = []
         self.dependencies = []
         self.errors = []
-        # HF model-card metadata for an `hf://` target (#111). Stays None for
+        # HF model-card metadata for an `hf://` target. Stays None for
         # every other target shape, which is what guarantees a local scan makes
         # no network call.
         self.hf_model_card = None
@@ -393,7 +393,7 @@ class DeepScanner:
                     self._record_fetch_error(self.root_path, e)
                     targets = []
 
-            # Enrichment only (#111), and only for hf:// — a plain https:// URL
+            # Enrichment only, and only for hf:// — a plain https:// URL
             # is a single file with no repo to describe. Fetched once per scan
             # rather than per artifact, and never allowed to raise: see
             # fetch_huggingface_model_card for why this failure is swallowed
@@ -451,7 +451,8 @@ class DeepScanner:
         else:
             root = Path(self.root_path)
             # Path.rglob only ever yields the *contents* of a directory, so
-            # before #125 a file target (or a path that did not exist) walked
+            # before unusable targets failed the scan, a file target (or a
+            # path that did not exist) walked
             # nothing, recorded no error, and reported a clean scan — a
             # malicious .pt named directly on the command line exited 0.
             # Each local target shape is now handled explicitly.
@@ -580,7 +581,7 @@ class DeepScanner:
         """Inspect one local file by extension.
 
         Shared by the directory walk and the single-file target path so the
-        two cannot drift apart (#125). Returns True if an inspector claimed
+        two cannot drift apart. Returns True if an inspector claimed
         the file; callers decide whether declining it is noteworthy.
         """
         before = len(self.artifacts)
@@ -677,7 +678,7 @@ class DeepScanner:
         directory is *not* this: that is a legitimate clean scan.
 
         `error_type` must be a member of TARGET_ERROR_TYPES; it is the only
-        part of the error that reaches telemetry (#126).
+        part of the error that reaches telemetry.
         """
         if error_type not in TARGET_ERROR_TYPES:
             raise ValueError(f"unknown target error type: {error_type!r}")
@@ -696,14 +697,14 @@ class DeepScanner:
 
         Two effects, deliberately paired. The error lands in results['errors']
         so the CLI's `errors → exit 1` path fires and `score` refuses to grade
-        the scan (#114's gate keys off the same list). And `meta` loses its
+        the scan (the score's partial-scan gate keys off the same list). And `meta` loses its
         format label and risk verdict: both were assertions about a file that
         was never successfully parsed, and dropping `framework` is what stops
         `aisbom:format` claiming 200 random bytes are SafeTensors.
 
         The component itself stays in the SBOM, carrying the marker instead of
         a verdict — an auditor still needs to see that the file was there and
-        was not examined. `scan_incomplete` (#113) set the precedent.
+        was not examined. `scan_incomplete` set the precedent.
         """
         if unreadable_type not in UNREADABLE_TYPES:
             raise ValueError(f"unknown unreadable type: {unreadable_type!r}")
@@ -722,7 +723,7 @@ class DeepScanner:
     def _finalize_inspection(
         self, meta: Dict[str, Any], ident, deferred: tuple[str, str] | None = None,
     ) -> Dict[str, Any]:
-        """Route a failed inspection into results['errors'] (#131).
+        """Route a failed inspection into results['errors'].
 
         Called at the tail of every inspector, local and remote alike, so a
         remote `.safetensors` of random bytes is reported the same way a local
@@ -1080,7 +1081,7 @@ class DeepScanner:
 
     @classmethod
     def _looks_like_pth_config(cls, content: bytes) -> bool:
-        """True if ``content`` is a Python path-configuration file (#131).
+        """True if ``content`` is a Python path-configuration file.
 
         `.pth` is the one model extension that is also a real text format:
         Python's `site` module reads every `.pth` in site-packages and treats
@@ -1323,7 +1324,7 @@ class DeepScanner:
                         # would still run it, so this is not a clean bill.
                         # The structured marker matters as much as the label:
                         # without it a consumer reading properties rather than
-                        # prose (the VEX emitter, #113) sees an empty threat
+                        # prose (the VEX emitter) sees an empty threat
                         # list and concludes the member was inspected and clean.
                         meta["details"]["scan_incomplete"] = True
                         meta["risk_level"] = "MEDIUM (Unreadable Pickle Member)"
@@ -1411,7 +1412,7 @@ class DeepScanner:
                         # Text, but not a path config — and nothing produces a
                         # text `.pt`/`.bin` at all. A corrupt download, an HTML
                         # error page saved to disk, or a checkpoint that never
-                        # finished writing; all were graded LOW before #131.
+                        # finished writing; all were once graded LOW.
                         unreadable = (
                             "UnrecognizedFormat",
                             "no model format could read this file — not a zip "
@@ -1617,7 +1618,7 @@ class DeepScanner:
                 # exists for lz4/zstd. Carries the same structured marker as a
                 # truncated stream: nothing in this container was inspected, so
                 # a consumer reading properties must not read the empty threat
-                # list as a clean result (#113).
+                # list as a clean result.
                 details["scan_incomplete"] = True
                 meta["risk_level"] = f"MEDIUM (Unscanned Container: {unreadable})"
             elif carries_pickle:
@@ -1678,7 +1679,7 @@ class DeepScanner:
         }
         f = None
         # Only a completed header parse earns the SafeTensors label and the LOW
-        # verdict seeded above (#131). 200 bytes of noise used to keep both.
+        # verdict seeded above. 200 bytes of noise used to keep both.
         parsed = False
         try:
             f = open(local_path, "rb") if local_path else source
@@ -1975,7 +1976,8 @@ class DeepScanner:
             # 1. Check Magic "GGUF"
             magic = f.read(4)
             if magic != b'GGUF':
-                # Honest before #131, but consequence-free: an `UNKNOWN` label
+                # Honest before unreadable files became errors, but
+                # consequence-free: an `UNKNOWN` label
                 # scores 0 in the CLI's `_risk_score`, below LOW, so the scan
                 # exited 0 and the file rated safer than a clean model.
                 return self._finalize_inspection(
@@ -2351,7 +2353,7 @@ class DeepScanner:
                         salvage, meta["details"]["lambda_layers"]
                     )
                 else:
-                    # Same consequence-free-UNKNOWN fix as GGUF above (#131).
+                    # Same consequence-free-UNKNOWN fix as GGUF above.
                     return self._finalize_inspection(
                         meta, local_path or name,
                         self._lfs_pointer_verdict(self._peek_head(source, local_path))
@@ -2733,7 +2735,7 @@ class DeepScanner:
             }
 
             if not looks_like_onnx:
-                # Same consequence-free-UNKNOWN fix as GGUF/Keras (#131).
+                # Same consequence-free-UNKNOWN fix as GGUF/Keras.
                 onnx_unreadable = self._lfs_pointer_verdict(blob) or (
                     "UnrecognizedFormat",
                     "not a parseable ONNX model — the bytes do not "
@@ -2762,7 +2764,7 @@ class DeepScanner:
                         version = specs[0].version
                     # Only a single `==`/`===` without a wildcard names the
                     # version actually installed. `version` above is also set
-                    # for `>=2.0`, so the OSV lookup (#128) keys on this flag
+                    # for `>=2.0`, so the OSV lookup keys on this flag
                     # rather than on whether a version string exists.
                     pinned = (
                         len(specs) == 1

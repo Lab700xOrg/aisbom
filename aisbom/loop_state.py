@@ -1,7 +1,7 @@
 """
 Local failure-loop detection for `aisbom scan`.
 
-Parent: aisbom-ops #99. The 2026-07-11 cli_error investigation found the
+The 2026-07-11 cli_error investigation found the
 fleet error rate dominated by single machines running automated scans that
 fail identically every day (gated HF repo, no token, old CLI). The only
 channel to reach such an operator is their own logs — so the CLI keeps a
@@ -73,7 +73,7 @@ def _save_state(state: dict) -> None:
 def record_failure(error_type: str, http_status: str, target_type: str) -> int:
     """Record one failing scan; return the consecutive count.
 
-    Fed by fetch failures, crashes, and unusable local targets (#126, which
+    Fed by fetch failures, crashes, and unusable local targets (which
     pass `http_status="none"`).
 
     Increments when the fingerprint matches the stored one, resets to 1 when

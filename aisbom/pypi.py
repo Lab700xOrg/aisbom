@@ -1,8 +1,8 @@
-"""PyPI license resolution for pinned requirements.txt dependencies (#129).
+"""PyPI license resolution for pinned requirements.txt dependencies.
 
 Library components parsed from ``requirements.txt`` carried a name and a
 version and nothing else, so every SBOM lost most of the completeness grade's
-Licenses dimension (#114) for information PyPI publishes. This module asks
+Licenses dimension for information PyPI publishes. This module asks
 PyPI's JSON API what each exact pin declares and records it on the dependency,
 where the CycloneDX and SPDX 2.3 generators pick it up.
 
@@ -12,8 +12,8 @@ Contract
 **Enrichment, never the scan.** A PyPI outage, a rate limit, an unknown
 package, a malformed body or an exhausted time budget costs that dependency its
 license and nothing else. Nothing here raises into the CLI or changes an exit
-code — the same asymmetry as the HF model-card fetch (#111) and the OSV lookup
-(#128). Unlike OSV, a *partial* answer is fine: a license resolved for torch
+code — the same asymmetry as the HF model-card fetch and the OSV lookup
+. Unlike OSV, a *partial* answer is fine: a license resolved for torch
 says nothing about transformers, whereas a partial CVE list reads as complete.
 
 **A declaration, never a verdict.** The result is written to the dependency's
@@ -21,7 +21,7 @@ says nothing about transformers, whereas a partial CVE list reads as complete.
 judgement (the CLI's LEGAL RISK label, the platform's ``license_issue_count``),
 and deriving it from registry metadata nobody reviewed would be a silent
 verdict change — the same reason Hugging Face card licenses stay out of it
-(#111).
+.
 
 **Only exact pins are looked up.** ``torch>=2.0`` does not say which release
 is installed, and licenses do change between releases.

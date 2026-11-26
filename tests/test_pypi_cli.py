@@ -1,4 +1,4 @@
-"""PyPI license resolution and `--offline`, end to end through the CLI (#129).
+"""PyPI license resolution and `--offline`, end to end through the CLI.
 
 The lookup itself is covered in test_pypi.py. These tests pin what a user
 sees: licenses in the SBOM a plain `scan` writes, the same document from

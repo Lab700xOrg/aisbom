@@ -36,7 +36,7 @@ _SPDX_ID_SAFE_RE = re.compile(r"[^a-zA-Z0-9.\-]")
 
 
 def _declared_license(dep: Dict[str, Any]):
-    """The PyPI-declared license of a dependency (#129), or NOASSERTION.
+    """The PyPI-declared license of a dependency, or NOASSERTION.
 
     Declared, never concluded: the value is what the package's metadata says,
     and nobody has reviewed it. Only SPDX expressions are carried — SPDX 2.3

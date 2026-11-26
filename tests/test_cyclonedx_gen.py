@@ -1,4 +1,4 @@
-"""Tests for the extracted CycloneDX builder (#114).
+"""Tests for the extracted CycloneDX builder.
 
 `build_cyclonedx_json` was lifted out of `cli.scan` so `aisbom score` can grade
 a scan target without duplicating document construction. These tests pin the
@@ -79,8 +79,8 @@ def test_dropping_the_placeholder_causes_no_diff_drift(tmp_path):
     old_doc = _doc()
     for component in old_doc["components"]:
         if component["name"] == "numpy":
-            component["version"] = "unknown"      # the pre-#114 shape
-    new_doc = _doc()                              # the post-#114 shape
+            component["version"] = "unknown"      # the pre-score shape
+    new_doc = _doc()                              # the post-score shape
 
     old_path = tmp_path / "old.json"
     new_path = tmp_path / "new.json"
@@ -136,7 +136,7 @@ def test_sha256_is_emitted_when_present():
 
 @pytest.mark.parametrize("sentinel", ["remote_unhashed", "hash_error"])
 def test_scanner_sentinels_are_never_emitted_as_digests(sentinel):
-    """The bug #111 fixed: a sentinel shipped inside a SHA-256 entry made every
+    """The bug fixed here: a sentinel shipped inside a SHA-256 entry made every
     remote SBOM fail CycloneDX validation."""
     results = _results()
     results["artifacts"][0]["hash"] = sentinel
@@ -195,7 +195,7 @@ def test_an_empty_scan_still_produces_a_valid_document():
 
 
 def test_dependency_bom_refs_are_stable_across_runs():
-    """CVE-keyed VEX statements (#128) join on these, so they cannot be random."""
+    """CVE-keyed VEX statements join on these, so they cannot be random."""
     first = _doc()
     second = _doc()
     assert _by_name(first, "torch")["bom-ref"] == "dependency-0-torch"
@@ -214,7 +214,7 @@ def test_the_same_package_in_two_requirements_files_keeps_distinct_refs():
 
 
 # ---------------------------------------------------------------------------
-# PyPI-resolved dependency licenses (#129).
+# PyPI-resolved dependency licenses.
 # ---------------------------------------------------------------------------
 
 _TORCH_EXPRESSION = (

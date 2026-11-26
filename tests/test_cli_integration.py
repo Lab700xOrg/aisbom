@@ -144,7 +144,7 @@ def test_cli_scan_schema_v15_branch(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #111 — CycloneDX 1.7 is the default output.
+# CycloneDX 1.7 is the default output.
 # ---------------------------------------------------------------------------
 
 
@@ -167,7 +167,7 @@ def test_cli_scan_defaults_to_cyclonedx_1_7(tmp_path):
 
 
 def test_cli_scan_explicit_1_6_still_emits_1_6_without_model_cards(tmp_path):
-    """Pinning the old version keeps the exact pre-#111 document shape."""
+    """Pinning the old version keeps the exact pre-1.7 document shape."""
     sbom = _scan_to_sbom(tmp_path, "pinned.json", "--schema-version", "1.6")
     assert sbom["specVersion"] == "1.6"
     assert all("modelCard" not in c for c in sbom["components"])
@@ -328,7 +328,7 @@ def test_cli_diff_command(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #113 — VEX output alongside the SBOM.
+# VEX output alongside the SBOM.
 # ---------------------------------------------------------------------------
 
 
@@ -479,7 +479,7 @@ def test_vex_baseline_turns_a_removed_finding_into_fixed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #128 — CVE-keyed statements for requirements.txt pins, via OSV.
+# CVE-keyed statements for requirements.txt pins, via OSV.
 # ---------------------------------------------------------------------------
 
 

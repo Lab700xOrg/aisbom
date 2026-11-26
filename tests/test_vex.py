@@ -1,4 +1,4 @@
-"""VEX output — OpenVEX + CycloneDX VEX (#113).
+"""VEX output — OpenVEX + CycloneDX VEX.
 
 Every generated OpenVEX document is validated against the *official* OpenVEX
 0.2.0 JSON schema bundled at ``tests/schemas/openvex-0.2.0.schema.json``, and
@@ -6,7 +6,7 @@ every CycloneDX VEX document against the library's own strict 1.7 schema. Both
 set ``additionalProperties: false``, so a misspelled key fails the suite rather
 than shipping into a compliance artifact.
 
-The schema check matters here for the same reason it did for SPDX 3.0 (#112):
+The schema check matters here for the same reason it did for SPDX 3.0:
 the mapping from AIsbom's scan output to the VEX vocabulary is hand-built, and
 a document that does not validate is one a consumer will reject.
 """
@@ -303,7 +303,7 @@ def test_not_affected_carries_a_justification(openvex_validator):
 def test_under_investigation_when_the_stream_was_not_fully_read(openvex_validator):
     """An incomplete scan must not be reported as a clean one.
 
-    This is the nullifAI class (#107): a deliberately broken stream ends the
+    This is the nullifAI class: a deliberately broken stream ends the
     disassembly early. Reporting `not_affected` there would turn an evasion
     into a clean bill of health.
     """
@@ -869,7 +869,7 @@ def test_baseline_findings_reads_structured_properties():
 
 
 def test_baseline_findings_degrades_to_the_description_for_pre_54_sboms():
-    """A baseline older than #53/#54 carries no `aisbom:*` properties.
+    """A baseline older than the structured properties carries no `aisbom:*` properties.
 
     Reading nothing there would report a clean baseline and turn every
     pre-existing finding into a spurious `fixed` — the worst possible failure

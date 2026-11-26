@@ -1158,7 +1158,7 @@ def pickle_content_opcode_count(data: bytes) -> int:
     complete pickle" but "was there anything here to look at at all". Zero means
     the disassembler got nothing beyond a bare `PROTO` byte — the file is
     truncated or is not a pickle — which is what separates "could not read it"
-    from "read it, found nothing dangerous" (#131).
+    from "read it, found nothing dangerous".
 
     Reaching STOP is deliberately *not* required, because a real and complete
     pickle need not be the whole file. joblib writes its arrays as raw bytes
