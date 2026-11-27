@@ -163,6 +163,19 @@ def build_component_properties(art: Dict[str, Any]) -> List[Tuple[str, str]]:
         metadata_keys = details.get("metadata_keys") or []
         if metadata_keys:
             props.append(("aisbom:gguf:metadata_keys", _csv(metadata_keys)))
+        parameters = details.get("parameters")
+        if parameters is not None:
+            props.append(("aisbom:gguf:parameters", str(parameters)))
+        # From the header: tells a renamed split shard from a whole model.
+        split_count = details.get("split_count")
+        if split_count is not None:
+            props.append(("aisbom:gguf:split_count", str(split_count)))
+        # Set by the scanner only when every split of this file's set, in the
+        # same directory, was read with a count (see DeepScanner).
+        set_parameters = details.get("set_parameters")
+        if set_parameters is not None:
+            props.append(("aisbom:gguf:set_parameters", str(set_parameters)))
+            props.append(("aisbom:gguf:set_shards", str(details.get("set_shards"))))
 
         # Chat-template findings. The template itself is deliberately not
         # emitted — it can be hundreds of kilobytes and belongs in the model,

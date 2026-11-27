@@ -3,7 +3,7 @@
 Each field has a present and an absent case. Declared values get their own
 "declared" row and never answer the regulatory field itself; interpretations
 are tagged *AIsbom's mapping*; the parameter count is summed only over a
-provably complete set of safetensors files.
+provably complete set of safetensors files (GGUF: tests/test_gguf_parameters.py).
 """
 
 import copy
