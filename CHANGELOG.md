@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0 — 2026-11-26
+## 1.8.0 — 2026-11-27
 
 > **New command: `aisbom comply`.** It scans a target and writes a folder of documents for the EU AI Act or an FDA §524B submission, filled in only from what the scan read. Everything else is left as `TODO (provider)`. See [docs/comply.md](docs/comply.md).
 >
@@ -44,6 +44,15 @@
 
   **Comparing against a baseline from an earlier version:** `aisbom diff` now matches a removed and an added component that have the same SHA-256 and shows them as one `Renamed` row, so a nested file is not reported as deleted and re-added, and a rename alone never fails the diff. The drift view and alerts on the app.aisbom.io dashboard already match renamed files the same way. Run the comparison with this version or later. One case still shows as added and removed: identical files at two paths that an earlier version merged into a single name. Neither copy counts as a new CRITICAL finding when the baseline already had those bytes as CRITICAL.
 - **Standalone binaries no longer advertise brotli.** The frozen binaries bundled the `brotli` module through a development-only dependency, so every remote scan sent `Accept-Encoding: br`. It is now left out of the build, and the build fails if it comes back. The PyPI package is unchanged.
+
+### Changed
+
+- **CycloneDX SBOMs carry more of what a model card and the model files declare.** Each is a new property or field that replaces nothing, and risk levels and the `description` string are unaffected. They come from responses and file headers the scan already reads, so no new kind of request is made. The PyPI cache format changed to hold the author, so the first scan after upgrading fetches each pinned package from PyPI again, even if 1.7.0 had cached it.
+  - From Hugging Face: `aisbom:hf:author`, `aisbom:hf:base_model`, `aisbom:hf:language`, `aisbom:hf:created_at` (left out for the placeholder date that every repository older than Hugging Face's 2022 migration carries), `aisbom:hf:parameters_total`, and `aisbom:hf:quantization_tag` (quantisation-format tags only). Also the card's CO2 emissions as `aisbom:hf:co2_eq_emissions` with its `source`, `training_type`, `geographical_location` and `hardware_used`, and its `model-index` results as `modelCard.quantitativeAnalysis.performanceMetrics` (at most 50 per model; `aisbom:hf:model_index_truncated` records the declared count when cut).
+  - From the files: `aisbom:safetensors:parameters` and `aisbom:gguf:parameters` per file, `set_parameters` and `set_shards` on each file of a complete set, and `aisbom:gguf:split_count`.
+  - On dependencies: `aisbom:pypi:author`, from the same PyPI response that gives the licence.
+
+  `aisbom comply` reads these. `aisbom diff` does not compare properties, so it shows no change from them.
 
 ### Security
 
