@@ -61,6 +61,16 @@ HF_MIGRATION_CREATED_AT = "2022-03-02T23:29:04.000Z"
 # declared evaluation, not every row, and an unbounded list bloats every SBOM.
 MAX_PERFORMANCE_METRICS = 50
 
+# Hugging Face repo tags that name a quantised or converted weights format.
+# Recorded as declared; `aisbom comply` reads them as a re-upload signal for
+# its supplier rule. A fixed set, so an SBOM does not carry every tag a repo
+# has (`region:us`, `license:*`, `conversational` …). Matched exactly,
+# ignoring case: `gguf-my-repo` is a space's name, not a format.
+QUANTIZATION_TAGS = frozenset({
+    "gguf", "ggml", "gptq", "awq", "exl2", "mlx", "bitsandbytes",
+    "4-bit", "8-bit", "quantized", "int4", "int8", "fp8",
+})
+
 # Sub-fields of a dict-shaped `co2_eq_emissions` worth carrying, as declared.
 _CO2_FIELDS = ("source", "training_type", "geographical_location", "hardware_used")
 
@@ -126,6 +136,21 @@ def _str_list(raw: Any) -> List[str]:
     return out
 
 
+def _quantization_tags(raw: Any) -> List[str]:
+    """The repo's tags in :data:`QUANTIZATION_TAGS`, as written, one per format."""
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    seen = set()
+    for entry in raw:
+        tag = _clean_str(entry)
+        if tag is None or tag.lower() not in QUANTIZATION_TAGS or tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        out.append(tag)
+    return out
+
+
 def _number(value: Any) -> Optional[str]:
     """A JSON number as text; bools (a JSON number's lookalike) are refused."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -147,6 +172,8 @@ def _declared_properties(hf_meta: Dict[str, Any]) -> List[Dict[str, str]]:
         props.append({"name": "aisbom:hf:base_model", "value": base})
     for language in _str_list(card.get("language")):
         props.append({"name": "aisbom:hf:language", "value": language})
+    for tag in _quantization_tags(hf_meta.get("tags")):
+        props.append({"name": "aisbom:hf:quantization_tag", "value": tag})
 
     created = _clean_str(hf_meta.get("createdAt"))
     if created and created != HF_MIGRATION_CREATED_AT:

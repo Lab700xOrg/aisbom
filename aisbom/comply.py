@@ -50,7 +50,7 @@ import yaml
 # Bump on every change to the wording or field mapping of a generated
 # document, so a pack in someone's submission folder can be traced to the
 # exact template that produced it.
-TEMPLATE_VERSION = "2026-11-26"
+TEMPLATE_VERSION = "2026-11-27"
 
 TODO = "TODO (provider)"
 
@@ -974,18 +974,27 @@ def supplier_for(component: Dict[str, Any]) -> Tuple[str, str]:
     * A model: the Hugging Face repository owner, only when the card names no
       base model or every base model sits in the owner's own namespace. A
       fine-tune or re-upload of another organisation's model stays TODO, since
-      the uploader is then not plainly the supplier. Known gap: a re-upload
-      whose card declares no base model still gets the uploader.
+      the uploader is then not plainly the supplier.
+    * A model whose card names no base model but whose repo carries a
+      quantisation-format tag (``aisbom:hf:quantization_tag``) stays TODO too:
+      it is likely a third-party quantisation that left the base model out.
+      An author's own quantisation that names its own base model keeps the
+      owner. Known gap: an unquantised copy naming no base model still gets
+      the uploader, since nothing in its metadata tells it apart.
     * A package: the author its PyPI release declares.
     """
     if component.get("type") == _ML_COMPONENT_TYPE:
         owner = _card_prop(component, "aisbom:hf:author")
         if not owner:
             return TODO, ""
-        foreign = [b for b in _card_props(component, "aisbom:hf:base_model")
-                   if b.split("/", 1)[0] != owner or "/" not in b]
+        bases = _card_props(component, "aisbom:hf:base_model")
+        foreign = [b for b in bases if b.split("/", 1)[0] != owner or "/" not in b]
         if foreign:
             return TODO, f"not filled: derived from {', '.join(foreign)}"
+        quant_tags = _card_props(component, "aisbom:hf:quantization_tag")
+        if quant_tags and not bases:
+            return TODO, (f"not filled: likely a re-upload (tagged {', '.join(quant_tags)}; "
+                          f"the card names no base model)")
         return owner, SOURCE_SUPPLIER_HF
     authors = _prop_values(component, "aisbom:pypi:author")
     if authors:
@@ -1133,10 +1142,11 @@ def build_fda_pack(
         f"- **Supplier** (an NTIA minimum element): {counts.suppliers} of "
         f"{len(comps)} component(s) carry one under {MAPPING} (see "
         f"`supplier_source`): a model's Hugging Face repository owner when its "
-        f"card names no base model from another namespace, a package's PyPI "
-        f"author. Check each one: a repository that re-uploads another "
-        f"organisation's model without naming it as the base model shows the "
-        f"uploader. The rest are marked {TODO}.",
+        f"card names no base model from another namespace and the repo is not "
+        f"a quantisation that names no base model, a package's PyPI author. "
+        f"Check each one: an unquantised copy of another organisation's model "
+        f"that does not name it as the base model shows the uploader. The rest "
+        f"are marked {TODO}.",
         lookup_line,
     ])
     w.heading(2, "Vulnerability assessment")

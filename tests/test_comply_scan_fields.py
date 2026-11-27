@@ -301,6 +301,56 @@ def test_a_fine_tune_of_another_namespace_leaves_supplier_todo(base):
     assert row["supplier_source"] == f"not filled: derived from {base}"
 
 
+def test_a_quantised_repo_naming_no_base_model_leaves_supplier_todo():
+    # A third-party quantisation whose card leaves out base_model, such as
+    # RichardErkhov/openai-community_-_gpt2-gguf: the uploader is likely not the
+    # supplier, so the rule declines to name one.
+    doc = _with_card_props(_hf_sbom(), ("aisbom:hf:author", "RichardErkhov"),
+                           ("aisbom:hf:quantization_tag", "gguf"),
+                           ("aisbom:hf:quantization_tag", "4-bit"))
+    row = _rows(_fda(doc))["model.safetensors"]
+    assert row["supplier"] == comply.TODO
+    assert row["supplier_source"] == (
+        "not filled: likely a re-upload (tagged gguf, 4-bit; the card names no base model)")
+
+
+def test_an_authors_own_quantisation_keeps_the_owner_as_supplier():
+    # Qwen/Qwen2.5-7B-Instruct-GGUF points base_model at its own namespace.
+    doc = _with_card_props(_hf_sbom(), ("aisbom:hf:author", "Qwen"),
+                           ("aisbom:hf:base_model", "Qwen/Qwen2.5-7B-Instruct"),
+                           ("aisbom:hf:quantization_tag", "gguf"))
+    row = _rows(_fda(doc))["model.safetensors"]
+    assert row["supplier"] == "Qwen"
+    assert row["supplier_source"] == comply.SOURCE_SUPPLIER_HF
+
+
+def test_a_foreign_base_model_still_explains_itself_on_a_quantised_repo():
+    doc = _with_card_props(_hf_sbom(), ("aisbom:hf:author", "TheBloke"),
+                           ("aisbom:hf:base_model", "meta-llama/Llama-2-7b-hf"),
+                           ("aisbom:hf:quantization_tag", "gguf"))
+    row = _rows(_fda(doc))["model.safetensors"]
+    assert row["supplier"] == comply.TODO
+    assert row["supplier_source"] == "not filled: derived from meta-llama/Llama-2-7b-hf"
+
+
+def test_readme_names_the_re_upload_case_the_rule_cannot_see():
+    readme = _fda(_local_sbom())[comply.README_FILE]
+    line = next(l for l in readme.splitlines() if l.startswith("- **Supplier**"))
+    assert "quantisation" in line
+    assert "unquantised copy" in line
+
+
+def test_docs_list_every_quantization_tag_the_rule_reads():
+    from pathlib import Path
+
+    from aisbom.modelcard import QUANTIZATION_TAGS
+
+    docs = (Path(__file__).resolve().parent.parent / "docs" / "comply.md").read_text()
+    section = docs.split("### Supplier", 1)[1].split("\n### ", 1)[0]
+    missing = [t for t in sorted(QUANTIZATION_TAGS) if f"`{t}`" not in section]
+    assert not missing, f"docs/comply.md supplier section is missing {missing}"
+
+
 def test_a_model_with_no_repo_owner_has_no_supplier():
     row = _rows(_fda(_local_sbom()))["weights|v2.pt"]
     assert row["supplier"] == comply.TODO and row["supplier_source"] == ""

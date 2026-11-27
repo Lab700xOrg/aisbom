@@ -4,7 +4,7 @@ Every field `aisbom comply` writes, and where its value comes from. A field
 with no scan source is always written as `TODO (provider)`. A field with a
 scan source falls back to `TODO (provider)` when the scan found nothing for
 it, unless the provider's [answers file](#answers-file---answers) fills it.
-Template version: `2026-11-26` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
+Template version: `2026-11-27` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
 
 Sources, as tagged in the generated documents:
 
@@ -176,8 +176,23 @@ machine-readable way to record the per-vulnerability assessment it asks for.
 - **Model:** the Hugging Face repository owner (`aisbom:hf:author`), only
   when the card names no base model, or every `base_model` sits in the
   owner's own namespace. A fine-tune or re-upload of another organisation's
-  model stays TODO, and `supplier_source` says what it derives from. Known
-  gap: a re-upload whose card names no base model shows the uploader.
+  model stays TODO, and `supplier_source` says what it derives from.
+- **Likely re-upload:** a model whose card names no base model, but whose
+  repository carries a quantisation-format tag (`aisbom:hf:quantization_tag`),
+  stays TODO with `supplier_source` "not filled: likely a re-upload (tagged
+  …; the card names no base model)". Most third-party quantisations name
+  their base model and are caught by the rule above; this catches the ones
+  that do not. An author's own quantisation that names its own base model
+  (such as `Qwen/Qwen2.5-7B-Instruct-GGUF`) keeps the owner. The tags, matched
+  exactly and ignoring case: `gguf`, `ggml`, `gptq`, `awq`, `exl2`, `mlx`,
+  `bitsandbytes`, `4-bit`, `8-bit`, `quantized`, `int4`, `int8`, `fp8`.
+  An author's own quantisation that names no base model at all (such as
+  `microsoft/Phi-3-mini-4k-instruct-gguf`) is also left TODO: a blank is
+  preferred to a wrong supplier.
+- **Known gap:** an unquantised copy of another organisation's model whose
+  card names no base model (such as `NousResearch/Llama-2-7b-hf`) shows the
+  uploader. Nothing in its metadata tells it apart from an original release,
+  so the pack README asks the reader to check each supplier.
 - **Package:** the author its PyPI release declares (`aisbom:pypi:author`):
   `author`, else `maintainer`, else the display name in `author_email` or
   `maintainer_email`. An email address alone is not used.
