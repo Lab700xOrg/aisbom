@@ -97,6 +97,23 @@ def _stub_eol_network(monkeypatch):
     monkeypatch.setattr("aisbom.eol._default_session", lambda: _OfflineEol())
 
 
+class _OfflineKev:
+    """Stands in for the HTTP session inside aisbom.kev: every call fails."""
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("cisa.gov is not reachable from the test suite")
+
+
+@pytest.fixture(autouse=True)
+def _stub_kev_network(monkeypatch):
+    """Keep `comply --framework fda` from ever reaching the CISA KEV feed.
+
+    Same shape as `_stub_eol_network`: tests that inject a fake session are
+    unaffected; one that forgets sees the degraded path (KEV column TODO).
+    """
+    monkeypatch.setattr("aisbom.kev._default_session", lambda: _OfflineKev())
+
+
 @pytest.fixture(autouse=True)
 def _stub_hf_file_index(monkeypatch):
     """Keep local-file HF matching from ever reaching huggingface.co.

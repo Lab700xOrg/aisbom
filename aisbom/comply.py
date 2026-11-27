@@ -50,7 +50,7 @@ import yaml
 # Bump on every change to the wording or field mapping of a generated
 # document, so a pack in someone's submission folder can be traced to the
 # exact template that produced it.
-TEMPLATE_VERSION = "2026-11-27"
+TEMPLATE_VERSION = "2026-11-27.2"
 
 TODO = "TODO (provider)"
 
@@ -123,6 +123,7 @@ VERDICT_WORDS = (
 ANNEX_XI_FILE = "annex-xi-technical-documentation.md"
 ART53_FILE = "art53-training-content-summary.md"
 SUPPORT_FILE = "component-support.csv"
+VULNERABILITIES_FILE = "vulnerabilities.csv"
 README_FILE = "README.md"
 SBOM_FILE = "sbom.json"
 
@@ -144,6 +145,7 @@ _COMMISSION_TEMPLATE = (
 )
 _GUIDE_ART53 = "https://aisbom.io/compliance/eu-ai-act-article-53"
 _GUIDE_FDA = "https://aisbom.io/compliance/fda-524b"
+_KEV_CATALOGUE = "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
 # The field-id list and answers-file guide. Linked online because a pip
 # install ships only the `aisbom` package, not `docs/`.
 DOCS_URL = "https://github.com/Lab700xOrg/aisbom/blob/main/docs/comply.md"
@@ -1067,6 +1069,78 @@ def _support_csv(doc: Dict[str, Any], answers: Optional["Answers"],
     return buf.getvalue(), counts
 
 
+_VULNERABILITY_COLUMNS = [
+    "vulnerability_id",
+    "aliases",
+    "component_bom_ref",
+    "component",
+    "component_version",
+    "vex_status",
+    "cisa_kev_date_added",
+]
+
+# The `source.name` OSV-derived statements carry (see `aisbom.osv`). Only
+# those name a dependency CVE; model-file statements use AIsbom's own ids.
+_OSV_SOURCE = "OSV"
+_CVE_ID = re.compile(r"^CVE-\d{4}-\d{4,}$")
+
+
+def _dependency_cve_statements(statements: Sequence[Any]) -> List[Any]:
+    return [
+        s for s in statements
+        if getattr(getattr(s, "finding_class", None), "source_name", None) == _OSV_SOURCE
+    ]
+
+
+def _statement_ids(statement: Any) -> List[str]:
+    finding = statement.finding_class
+    return [str(finding.id), *[str(a) for a in getattr(finding, "aliases", ()) or ()]]
+
+
+def kev_cve_ids(statements: Sequence[Any]) -> List[str]:
+    """Every CVE ID, primary or alias, among the dependency CVE statements,
+    in statement order without repeats: what the CISA KEV lookup matches on."""
+    seen: Dict[str, None] = {}
+    for s in _dependency_cve_statements(statements):
+        for vid in _statement_ids(s):
+            if _CVE_ID.match(vid.upper()):
+                seen.setdefault(vid.upper(), None)
+    return list(seen)
+
+
+def _vulnerabilities_csv(doc: Dict[str, Any], statements: Sequence[Any],
+                         kev_added: Optional[Mapping[str, str]]) -> Tuple[str, int, int]:
+    """The vulnerability table, its row count and how many rows KEV lists.
+
+    ``kev_added`` is None when the KEV lookup did not run or failed: the
+    column is then TODO, so "not listed" is never claimed without a catalogue.
+    """
+    by_ref = {c.get("bom-ref"): c for c in _components(doc) if c.get("bom-ref")}
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_VULNERABILITY_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    rows = listed = 0
+    for s in _dependency_cve_statements(statements):
+        ids = _statement_ids(s)
+        component = by_ref.get(s.product_ref, {})
+        if kev_added is None:
+            kev_date = TODO
+        else:
+            kev_date = next((kev_added[i.upper()] for i in ids if i.upper() in kev_added), "")
+            listed += bool(kev_date)
+        writer.writerow({
+            "vulnerability_id": ids[0],
+            "aliases": ";".join(ids[1:]),
+            "component_bom_ref": s.product_ref,
+            "component": component.get("name") or "",
+            "component_version": component.get("version") or "",
+            "vex_status": s.status,
+            "cisa_kev_date_added": kev_date,
+        })
+        rows += 1
+    return buf.getvalue(), rows, listed
+
+
 def eol_targets(dependencies: Sequence[Dict[str, Any]]) -> List[Tuple[str, str, str]]:
     """``(bom_ref, name, version)`` for every exact pin among a scan's dependencies.
 
@@ -1092,17 +1166,23 @@ def build_fda_pack(
     answers: Optional["Answers"] = None,
     eol_answers: Optional[Mapping[str, Any]] = None,
     eol_note: Optional[str] = None,
+    kev_added: Optional[Mapping[str, str]] = None,
+    kev_catalog_version: Optional[str] = None,
+    kev_note: Optional[str] = None,
 ) -> Dict[str, str]:
     """Return ``{filename: content}`` for the FDA pack (SBOM and VEX excluded,
     since the CLI writes those with the same code `scan --vex` uses).
 
     ``eol_answers`` maps a dependency's ``bom-ref`` to an endoflife.date
     answer (``.date``, ``.source``); ``eol_note`` says why the lookup did not
-    run, or what failed, for the README. These are the one pre-fill not read
-    from ``sbom.json``: the lookup runs when the pack is built.
+    run, or what failed, for the README. ``kev_added`` maps a CVE ID to the
+    date CISA added it to KEV, or is None when that lookup did not run or
+    failed (``kev_note`` says which). These are the pre-fills not read from
+    ``sbom.json``: the lookups run when the pack is built.
     """
     comps = _components(doc)
     support_csv, counts = _support_csv(doc, answers, eol_answers)
+    vuln_csv, cve_rows, kev_listed = _vulnerabilities_csv(doc, vex_statements, kev_added)
     supplied = counts.supplied
     statuses = [getattr(s, "status", None) for s in vex_statements]
     affected = statuses.count("affected")
@@ -1124,6 +1204,8 @@ def build_fda_pack(
             *[[name, "VEX for the SBOM's components"] for name in vex_files],
             [SUPPORT_FILE, "One row per component: supplier, support level and "
                            "end-of-support date, pre-filled where a source exists"],
+            [VULNERABILITIES_FILE, "One row per dependency CVE statement in the VEX, "
+                                   "with the date CISA added it to KEV where listed"],
         ],
     )
     w.heading(2, "Supplier and support data")
@@ -1158,6 +1240,30 @@ def build_fda_pack(
         "classes; CVE statements cover exact `==` pins in requirements.txt, "
         "looked up in OSV unless the run was offline or used --no-osv."
     )
+    if not cve_rows:
+        kev_line = (
+            "- **CISA KEV:** this run produced no dependency CVE statements, so "
+            "the CISA KEV catalogue was not read."
+        )
+    elif kev_added is None:
+        kev_line = (
+            f"- **CISA KEV:** `cisa_kev_date_added` in `{VULNERABILITIES_FILE}` is "
+            f"{TODO} for all {cve_rows} dependency CVE statement(s)."
+        )
+    else:
+        version = f" (version {kev_catalog_version})" if kev_catalog_version else ""
+        kev_line = (
+            f"- **CISA KEV:** {kev_listed} of {cve_rows} dependency CVE statement(s) "
+            f"name a CVE in CISA's Known Exploited Vulnerabilities catalogue{version}; "
+            f"`cisa_kev_date_added` in `{VULNERABILITIES_FILE}` gives the date CISA "
+            f"added it. A blank cell means the CVE was not in the catalogue when "
+            f"this pack was built, which is not evidence that a vulnerability "
+            f"cannot be exploited in your device. The catalogue was read when this "
+            f"pack was built and is not in the VEX files."
+        )
+    if kev_note:
+        kev_line += f" CISA KEV lookup: {kev_note}."
+    w.lines.append(kev_line)
     w.heading(2, "What this pack cannot evidence")
     if supplied:
         support_line = (
@@ -1184,8 +1290,10 @@ def build_fda_pack(
     _filling_todos(w, "each component's support level and end-of-support date")
     w.heading(2, "Sources")
     w.lines.append(f"- AIsbom guide to FDA §524B: {_GUIDE_FDA}")
+    w.lines.append(f"- CISA Known Exploited Vulnerabilities catalogue: {_KEV_CATALOGUE}")
     return {
         SUPPORT_FILE: support_csv,
+        VULNERABILITIES_FILE: vuln_csv,
         README_FILE: w.close(),
     }
 

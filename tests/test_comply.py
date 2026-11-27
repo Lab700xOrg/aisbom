@@ -309,7 +309,8 @@ def test_eu_index_counts_prefilled_and_todo_fields():
 # ---------------------------------------------------------------------------
 
 def test_fda_pack_writes_support_table_and_index():
-    assert set(_fda(_local_sbom())) == {comply.SUPPORT_FILE, comply.README_FILE}
+    assert set(_fda(_local_sbom())) == {
+        comply.SUPPORT_FILE, comply.VULNERABILITIES_FILE, comply.README_FILE}
 
 
 def test_support_table_has_a_row_per_component_with_todo_lifecycle():

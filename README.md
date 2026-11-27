@@ -507,7 +507,7 @@ aisbom comply ./models --framework fda --output-dir ./submission/sbom
 | `--framework` | Writes |
 |---|---|
 | `eu-ai-act` | `annex-xi-technical-documentation.md` (Annex XI skeleton), `art53-training-content-summary.md` (in the sections of the Commission's training-content template), `sbom.json`, `README.md` |
-| `fda` | `sbom.json`, `sbom.openvex.json`, `sbom.vex.cdx.json`, `component-support.csv` (supplier, support level and end-of-support date per component), `README.md` |
+| `fda` | `sbom.json`, `sbom.openvex.json`, `sbom.vex.cdx.json`, `component-support.csv` (supplier, support level and end-of-support date per component), `vulnerabilities.csv` (one row per dependency CVE, with its CISA KEV date-added where listed), `README.md` |
 
 A field is filled only from something the scan read, such as the model card's
 task, architecture, licence, declared datasets, base model and languages, the
@@ -518,7 +518,8 @@ gets its own "declared" row, and readings such as modality from the task or
 supplier from the repository owner are labelled *AIsbom's mapping*. For the
 FDA pack, end-of-support dates come from
 [endoflife.date](#endoflifedate-lookups-comply---framework-fda-only) for the
-packages it tracks. Everything else, including provider identity, release
+packages it tracks, and each dependency CVE is checked against
+[CISA's KEV catalogue](#cisa-kev-lookups-comply---framework-fda-only). Everything else, including provider identity, release
 dates, training process, compute and energy, is left as `TODO (provider)`
 rather than guessed. [docs/comply.md](docs/comply.md) lists every field and
 where its value comes from.
@@ -543,7 +544,7 @@ The pack describes files, not your organisation, and is not legal advice.
 A scan with an unreadable target exits `1` and writes nothing. Otherwise the
 command exits `0` whatever the findings; gate CI with `aisbom scan`. `--offline`,
 `--no-osv` and `--no-hf-lookup` work as they do for `scan`; `--no-eol-lookup`
-skips the endoflife.date lookup.
+skips the endoflife.date lookup, and `--no-kev-lookup` the CISA KEV download.
 
 ---
 
@@ -782,6 +783,10 @@ When a scan finds exact `requirements.txt` pins and writes CycloneDX or SPDX 2.3
 ### endoflife.date lookups (`comply --framework fda` only)
 
 When `aisbom comply --framework fda` finds exact `requirements.txt` pins, AIsbom asks the public endoflife.date API for each distinct **package name** (`https://endoflife.date/api/v1/products/<name>`) to fill end-of-support dates in `component-support.csv`. Versions are matched on your machine and are not sent, and neither are file paths, model names, hashes, findings, or identifiers. `aisbom scan` never makes this request. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-eol-lookup`, `AISBOM_NO_EOL_LOOKUP=1` or `--offline` does. Nothing is cached.
+
+### CISA KEV lookups (`comply --framework fda` only)
+
+When `aisbom comply --framework fda` has dependency CVE statements from OSV, AIsbom downloads the whole public CISA Known Exploited Vulnerabilities catalogue (`https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`) to fill `cisa_kev_date_added` in `vulnerabilities.csv`. It is one request for a public file: the CVEs are matched on your machine, so no CVE IDs, package names, versions, file paths, model names, hashes or findings are sent. No request is made when there is no CVE to match, and `aisbom scan` never makes it. Like the OSV lookup this is a request to a third-party service, not telemetry, so `AISBOM_NO_TELEMETRY` does not affect it; `--no-kev-lookup`, `AISBOM_NO_KEV_LOOKUP=1` or `--offline` does. The CVE IDs and dates are cached locally in `~/.aisbom/kev_cache.json` for 24 hours, and deleting that file is always safe.
 
 ### Hugging Face model-card lookups (local scans)
 

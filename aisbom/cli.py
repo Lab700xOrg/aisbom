@@ -31,6 +31,7 @@ from .version_check import check_latest_version
 from . import hf_match
 from . import loop_state
 from . import eol
+from . import kev
 from . import offline
 from . import osv
 from . import pypi
@@ -73,6 +74,12 @@ def main(
 
       AISBOM_NO_OSV=1         Same as `scan --no-osv`: never query OSV for
                               requirements.txt CVEs when emitting VEX.
+
+      AISBOM_NO_EOL_LOOKUP=1  Same as `comply --no-eol-lookup`: never ask
+                              endoflife.date for end-of-support dates.
+
+      AISBOM_NO_KEV_LOOKUP=1  Same as `comply --no-kev-lookup`: never download
+                              the CISA KEV catalogue.
 
       AISBOM_OFFLINE=1        Same as `--offline`: no network access of any
                               kind (PyPI, OSV, telemetry, update check).
@@ -540,7 +547,7 @@ def _comply_pack_files(framework: "ComplyFramework") -> list[str]:
     names = [comply_mod.SBOM_FILE, comply_mod.README_FILE]
     if framework == ComplyFramework.FDA:
         names += [Path(p).name for p in _vex_paths(comply_mod.SBOM_FILE)]
-        names.append(comply_mod.SUPPORT_FILE)
+        names += [comply_mod.SUPPORT_FILE, comply_mod.VULNERABILITIES_FILE]
     else:
         names += [comply_mod.ANNEX_XI_FILE, comply_mod.ART53_FILE]
     return names
@@ -1700,6 +1707,28 @@ def _lookup_end_of_support(dependencies: list, opted_out: bool) -> tuple[dict, s
     return answers, result.error
 
 
+def _lookup_known_exploited(statements: list, opted_out: bool
+                            ) -> tuple[dict | None, str | None, str | None]:
+    """``(kev_added, catalog_version, note)`` for the FDA pack's dependency CVEs.
+
+    ``kev_added`` is None when the lookup did not run or failed, so the pack
+    marks the column TODO rather than claiming no CVE is listed. No request
+    is made when there is no CVE to match. Never raises."""
+    if offline.is_offline():
+        return None, None, "skipped (--offline)"
+    if opted_out or kev.disabled_by_env():
+        return None, None, "skipped (--no-kev-lookup)"
+    ids = comply_mod.kev_cve_ids(statements)
+    if not ids:
+        return {}, None, None
+    result = kev.lookup_known_exploited(ids)
+    if result.error:
+        console.print(f"[yellow]⚠ {result.error}; the CISA KEV column stays TODO.[/yellow]",
+                      highlight=False)
+        return None, None, result.error
+    return result.added, result.catalog_version, None
+
+
 @app.command()
 def comply(
     target: str = typer.Argument(
@@ -1746,6 +1775,15 @@ def comply(
             "For --framework fda, do not ask endoflife.date for the end-of-support "
             "date of each pinned dependency (sends package names only). "
             "AISBOM_NO_EOL_LOOKUP=1 does the same."
+        ),
+    ),
+    no_kev_lookup: bool = typer.Option(
+        False,
+        "--no-kev-lookup",
+        help=(
+            "For --framework fda, do not download CISA's Known Exploited "
+            "Vulnerabilities catalogue to mark dependency CVEs (sends nothing "
+            "about your project). AISBOM_NO_KEV_LOOKUP=1 does the same."
         ),
     ),
     offline_mode: bool = typer.Option(
@@ -1878,6 +1916,8 @@ def comply(
         )
         eol_answers, eol_note = _lookup_end_of_support(
             results.get("dependencies", []), no_eol_lookup)
+        kev_added, kev_catalog_version, kev_note = _lookup_known_exploited(
+            statements, no_kev_lookup)
         pack = comply_mod.build_fda_pack(
             doc,
             target=target,
@@ -1886,6 +1926,9 @@ def comply(
             answers=answers,
             eol_answers=eol_answers,
             eol_note=eol_note,
+            kev_added=kev_added,
+            kev_catalog_version=kev_catalog_version,
+            kev_note=kev_note,
         )
         title = "FDA §524B pack"
         for entry in comply_mod.unmatched_component_answers(doc, answers or comply_mod.Answers()):
