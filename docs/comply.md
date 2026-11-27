@@ -4,7 +4,7 @@ Every field `aisbom comply` writes, and where its value comes from. A field
 with no scan source is always written as `TODO (provider)`. A field with a
 scan source falls back to `TODO (provider)` when the scan found nothing for
 it, unless the provider's [answers file](#answers-file---answers) fills it.
-Template version: `2026-11-27` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
+Template version: `2026-11-27.2` (`aisbom/comply.py`, `TEMPLATE_VERSION`).
 
 Sources, as tagged in the generated documents:
 
@@ -27,7 +27,11 @@ Sources, as tagged in the generated documents:
   tensor-info block of a complete set of GGUF files
   (`aisbom:gguf:parameters`, see [Number of parameters](#number-of-parameters)).
 - **endoflife.date**: end-of-support dates looked up when an FDA pack is
-  built (see [FDA §524B](#fda-524b)). The only source not stored in `sbom.json`.
+  built (see [FDA §524B](#fda-524b)).
+- **CISA KEV**: the date CISA added a dependency CVE to its Known Exploited
+  Vulnerabilities catalogue, read when an FDA pack is built (see
+  [Known exploited vulnerabilities](#known-exploited-vulnerabilities)).
+  endoflife.date and CISA KEV are the only sources not stored in `sbom.json`.
 
 Wording follows the [aisbom.io compliance guides](https://aisbom.io/compliance/).
 Lines marked *AIsbom's mapping* are interpretations, not quotations of the
@@ -167,7 +171,8 @@ machine-readable way to record the per-vulnerability assessment it asks for.
 | `sbom.json` | The CycloneDX 1.7 SBOM `aisbom scan` writes for the same target |
 | `sbom.openvex.json`, `sbom.vex.cdx.json` | The VEX `aisbom scan --vex` writes: AIsbom finding classes for model files, plus OSV CVE statements for exact `==` pins unless `--no-osv` or `--offline` |
 | `component-support.csv` | One row per component, columns in this order: `bom_ref`, `name`, `type`, `version`, `sha256`, `license` from the SBOM; `support_level` and `end_of_support_date` from the answers file's `components` entries, otherwise (for the date) the endoflife.date lookup, otherwise TODO; `support_source` is `provider-supplied` when the answers file filled either; `supplier` and `supplier_source` under the [supplier rule](#supplier); `end_of_support_lookup` and `end_of_support_lookup_source`, what endoflife.date returned, kept even when the answers file overrides the date |
-| `README.md` | Contents, VEX statement counts, how many components carry a supplier and an endoflife.date date (and why a lookup did not run), and what the pack cannot evidence: support level and dates nothing covered, suppliers the scan cannot attribute, software outside the target, vulnerabilities with no CVE entry |
+| `vulnerabilities.csv` | One row per OSV CVE statement in the VEX (model-file finding classes are not listed), columns in this order: `vulnerability_id` (the CVE, or the OSV id when the advisory has no CVE), `aliases` (`;`-separated), `component_bom_ref`, `component`, `component_version`, `vex_status`, `cisa_kev_date_added` (see [Known exploited vulnerabilities](#known-exploited-vulnerabilities)). Written with only its header when there are no CVE statements |
+| `README.md` | Contents, VEX statement counts, how many CVE statements CISA KEV lists, how many components carry a supplier and an endoflife.date date (and why a lookup did not run), and what the pack cannot evidence: support level and dates nothing covered, suppliers the scan cannot attribute, software outside the target, vulnerabilities with no CVE entry |
 
 ### Supplier
 
@@ -211,6 +216,27 @@ announced date, unpinned requirements (a `>=` lower bound is not what is
 installed), and model files stay TODO. The lookup is skipped under
 `--offline` / `AISBOM_OFFLINE=1` and `--no-eol-lookup`, and a failure never
 stops the pack; the README says when it did not run.
+
+### Known exploited vulnerabilities
+
+When the VEX carries OSV CVE statements, `comply --framework fda` downloads
+CISA's [Known Exploited Vulnerabilities catalogue](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+(one `GET` of the public JSON feed; nothing about the project is sent) and
+matches each statement's CVE, primary id or alias, on the local machine.
+`cisa_kev_date_added` is then:
+
+- the catalogue's `dateAdded` for a CVE it lists;
+- blank for one it does not list. A blank records only that the CVE was not
+  in the catalogue version the README names when the pack was built; it is
+  not evidence that the vulnerability cannot be exploited;
+- TODO when the lookup did not run (`--offline` / `AISBOM_OFFLINE=1`,
+  `--no-kev-lookup` / `AISBOM_NO_KEV_LOOKUP=1`) or failed. The README says why,
+  and a failure never stops the pack.
+
+No request is made when there are no CVE statements. The CVE-to-date map is
+cached in `~/.aisbom/kev_cache.json` for 24 hours; an expired cache is never
+used as a fallback when a refetch fails. `aisbom scan --vex` never reads KEV,
+and the VEX files are the same with or without it.
 
 ## Answers file (`--answers`)
 
