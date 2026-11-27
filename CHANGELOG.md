@@ -1,11 +1,27 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-11-26
 
+> **New command: `aisbom comply`.** It scans a target and writes a folder of documents for the EU AI Act or an FDA §524B submission, filled in only from what the scan read. Everything else is left as `TODO (provider)`. See [docs/comply.md](docs/comply.md).
+>
+> **`aisbom comply --framework fda` contacts two services `aisbom scan` never does.** It sends each exact-pinned package **name** (not its version) to `endoflife.date` for end-of-support dates, and downloads the public CISA Known Exploited Vulnerabilities catalogue, which sends nothing about your project. `comply` also makes the PyPI and Hugging Face lookups `scan` makes, and FDA packs query OSV as `scan --vex` does. `--no-eol-lookup`, `--no-kev-lookup`, `--no-osv` and `--no-hf-lookup` each turn one off, and `--offline` turns off all of them. The README's Telemetry & Privacy section describes each one.
+>
 > **A URL target that nothing scans now exits `1` instead of `0`.** `aisbom scan https://example.com/bundle.zip`, or any URL whose extension no scanner claims, found no file, reported no error and passed as a clean scan. It now fails with `Unsupported file type`, as a named local file already did. **A pipeline that scans such a URL today will start failing.** The URL was never examined.
 
 ### New
 
+- **`aisbom comply` documentation packs.**
+  - `--framework eu-ai-act` writes an Annex XI technical-documentation skeleton and an Article 53 public summary of training content, in the sections of the Commission's July 2025 template.
+  - `--framework fda` writes the SBOM, the VEX that `scan --vex` produces, `component-support.csv` (supplier, support level and end-of-support date per component) and `vulnerabilities.csv` (one row per dependency CVE).
+
+  Each pre-filled value names its source. From the scan and the model card: task, architecture, licence, declared datasets, base model and languages, file formats, hashes and security findings. Some values are labelled *AIsbom's mapping* because they are readings, not quotations: input and output modality from the task, and the supplier. A model's supplier is its Hugging Face repository owner. It is left TODO for a fine-tune of another organisation's model, and for a repo tagged as a quantisation that names no base model. An unquantised copy whose card names no base model still shows the uploader, so check each supplier. A package's supplier is the author its PyPI release declares.
+
+  The parameter count is Hugging Face's own total, a sum of the tensor shapes in safetensors or GGUF headers when the scan has every file of the set, or both side by side. A GGUF count includes every stored tensor, so it can be higher than the model card's figure when a converter stored a shared weight twice.
+
+  For FDA packs, end-of-support dates come from endoflife.date for the exact-pinned packages it tracks. Each dependency CVE carries the date CISA added it to KEV, a blank when the catalogue doesn't list it, or `TODO (provider)` when the lookup didn't run. A blank is not evidence that a vulnerability can't be exploited.
+
+  The pack describes files, not your organisation, and is not legal advice. `comply` exits `1` and writes nothing when any part of the target can't be read; otherwise it exits `0` whatever the findings, so gate CI with `aisbom scan`.
+- **`comply` answers file.** `--write-answers-template comply.yaml` writes a starter file listing every field id and the scanned components. Fill it in and pass `--answers comply.yaml` on every run. Answers are tagged *provider-supplied* and never replace a value the scan read; when both exist, the document shows both. A malformed file or an unknown field id stops the run with exit `1` before scanning. The file is read locally and never sent anywhere.
 - **Hugging Face page URLs are scanned.** Pasting a model's web address used to find nothing and exit `0`. Now:
   - `https://huggingface.co/<owner>/<repo>` and `…/tree/main` are scanned as `hf://<owner>/<repo>`.
   - `…/blob/<revision>/<path>` is scanned as the file at `…/resolve/<revision>/<path>`, in a model repo, a dataset or a Space.
@@ -27,6 +43,11 @@
 - **Same-named model files in different folders are no longer merged in `aisbom diff`.** A local scan of a tree with `a/model.onnx` and `b/model.onnx` produced two components both named `model.onnx`, and `aisbom diff` compared only one of them. A file in a subfolder of the scanned directory is now named by its path inside that directory, with forward slashes on every OS (`a/model.onnx`). Files at the top of the scanned directory, and a file scanned on its own, keep their bare filename. Folders above the scanned directory are never part of the name. The component's `bom-ref` (`artifact-<n>-<name>`) and SPDX ID follow the new name. `hf://` scans already named files this way.
 
   **Comparing against a baseline from an earlier version:** `aisbom diff` now matches a removed and an added component that have the same SHA-256 and shows them as one `Renamed` row, so a nested file is not reported as deleted and re-added, and a rename alone never fails the diff. The drift view and alerts on the app.aisbom.io dashboard already match renamed files the same way. Run the comparison with this version or later. One case still shows as added and removed: identical files at two paths that an earlier version merged into a single name. Neither copy counts as a new CRITICAL finding when the baseline already had those bytes as CRITICAL.
+- **Standalone binaries no longer advertise brotli.** The frozen binaries bundled the `brotli` module through a development-only dependency, so every remote scan sent `Accept-Encoding: br`. It is now left out of the build, and the build fails if it comes back. The PyPI package is unchanged.
+
+### Security
+
+- **The standalone binaries now bundle certifi 2026.10.23**, for [GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2). `pip install` and the GitHub Action image already resolve the current certifi.
 
 ## 1.7.0 — 2026-10-25
 

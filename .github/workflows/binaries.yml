@@ -179,7 +179,25 @@ jobs:
           grep -q 'SPDX-2.3' /tmp/sbom.spdx.json
           grep -q 'mock_malware.pt' /tmp/sbom.spdx.json
 
-          echo "OK: frozen ${{ matrix.asset_name }} passed the exit-code and SBOM contract"
+          # `comply` is the only command that reads YAML (the answers file), so
+          # it is the only path that proves PyYAML was bundled. --offline keeps
+          # the gate network-free. It exits 0 whatever the findings.
+          "$BIN" comply /tmp/fixtures --framework fda --offline \
+            --output-dir /tmp/pack-fda --write-answers-template /tmp/comply.yaml > /dev/null
+          test -s /tmp/pack-fda/README.md
+          test -s /tmp/pack-fda/component-support.csv
+          test -s /tmp/pack-fda/vulnerabilities.csv
+          test -s /tmp/pack-fda/sbom.openvex.json
+          grep -q 'mock_malware.pt' /tmp/pack-fda/component-support.csv
+          grep -q 'annex_xi.1c.release_date' /tmp/comply.yaml
+
+          printf 'version: 1\nfields:\n  annex_xi.1c.release_date: 2025-07-01\n' > /tmp/answers.yaml
+          "$BIN" comply /tmp/fixtures --framework eu-ai-act --offline \
+            --output-dir /tmp/pack-eu --answers /tmp/answers.yaml > /dev/null
+          grep -q '2025-07-01 _(provider-supplied)_' /tmp/pack-eu/annex-xi-technical-documentation.md
+          test -s /tmp/pack-eu/art53-training-content-summary.md
+
+          echo "OK: frozen ${{ matrix.asset_name }} passed the exit-code, SBOM and comply contract"
 
       - name: Rename binary
         shell: bash
