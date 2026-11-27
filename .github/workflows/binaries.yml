@@ -3,20 +3,81 @@ name: Build Standalone Binaries
 on:
   release:
     types: [published]
+  # Rebuild one missing asset for an existing release, e.g. when a runner
+  # image was retired mid-release. It builds the tag's code with this
+  # workflow's steps, and refuses to replace an asset that is already
+  # attached, so published checksums never change.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v1.8.0"
+        required: true
+        type: string
+      asset:
+        description: "The one asset to build and attach"
+        required: true
+        type: choice
+        options:
+          - aisbom-macos-arm64
+          - aisbom-macos-amd64
+          - aisbom-linux-amd64
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
 jobs:
+  # Which legs to build: all three for a release, only the requested one for
+  # a manual rebuild. A job-level `if` cannot see `matrix`, so the matrix is
+  # computed here instead.
+  plan:
+    if: startsWith(github.event.release.tag_name || inputs.tag, 'v1.')
+    name: Plan build legs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ASSET: ${{ inputs.asset }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"os":"ubuntu-latest","asset_name":"aisbom-linux-amd64","python_arch":"x64","expected_arch":"x86_64"},
+            {"os":"macos-15-intel","asset_name":"aisbom-macos-amd64","python_arch":"x64","expected_arch":"x86_64"},
+            {"os":"macos-15","asset_name":"aisbom-macos-arm64","python_arch":"arm64","expected_arch":"arm64"}
+          ]'
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            [[ "$RELEASE_TAG" =~ ^v1\.[0-9]+\.[0-9]+$ ]] || { echo "FAIL: '$RELEASE_TAG' is not a v1.x.y tag"; exit 1; }
+            gh release view "$RELEASE_TAG" --repo "$REPO" > /dev/null
+            if gh release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -qx "$ASSET"; then
+              echo "FAIL: $RELEASE_TAG already has $ASSET; refusing to replace a published asset"
+              exit 1
+            fi
+            legs="$(jq -c --arg a "$ASSET" '[.[] | select(.asset_name == $a)]' <<< "$all")"
+          else
+            legs="$(jq -c '.' <<< "$all")"
+          fi
+          echo "matrix={\"include\":$legs}" >> "$GITHUB_OUTPUT"
+          echo "legs: $legs"
+
   # Same release gate as publish.yml. Standalone binaries are a distribution
   # channel like any other, so a regressed scanner must not reach users through
   # this door either.
   gate:
-    if: startsWith(github.event.release.tag_name, 'v1.')
+    needs: plan
     name: Release gate (tests + bypass scorecard)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -38,35 +99,28 @@ jobs:
 
   build-and-upload:
     # Build CLI binaries for v1.x.x releases (aligned CLI + Action).
-    if: startsWith(github.event.release.tag_name, 'v1.')
-    needs: gate
+    needs: [plan, gate]
     # Named by asset, not runner: two legs used to share a runner label, which
     # made their logs indistinguishable in `gh run view`.
     name: Build ${{ matrix.asset_name }}
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset_name: aisbom-linux-amd64
-            python_arch: x64
-            expected_arch: x86_64
-          # PyInstaller builds for the architecture of the interpreter running
-          # it. Requesting an x64 Python on an ARM runner does not reliably
-          # yield one, and past Intel assets silently came out arm64. Build
-          # Intel on an Intel runner so the smoke test also executes it there.
-          - os: macos-15-intel
-            asset_name: aisbom-macos-amd64
-            python_arch: x64
-            expected_arch: x86_64
-          - os: macos-14
-            asset_name: aisbom-macos-arm64
-            python_arch: arm64
-            expected_arch: arm64
+      # One leg failing (e.g. a retired runner image) must not cancel the
+      # others; a missing asset can be rebuilt alone with workflow_dispatch.
+      fail-fast: false
+      # Legs come from the plan job. PyInstaller builds for the architecture
+      # of the interpreter running it. Requesting an x64 Python on an ARM
+      # runner does not reliably yield one, and past Intel assets silently
+      # came out arm64. So Intel builds on an Intel runner (macos-15-intel)
+      # and arm64 on an arm64 one (macos-15), and the smoke test executes
+      # each binary where it was built.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -206,8 +260,19 @@ jobs:
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release' && startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/${{ matrix.asset_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Manual rebuild: attach to the existing release without touching its
+      # notes or other assets. No --clobber, so an asset that appeared since
+      # the plan job checked makes this fail rather than replace it.
+      - name: Attach asset to existing release
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ matrix.asset_name }}
+        run: gh release upload "$RELEASE_TAG" "dist/$ASSET" --repo "${{ github.repository }}"
