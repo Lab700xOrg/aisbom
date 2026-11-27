@@ -1030,10 +1030,8 @@ def scan(
     if results['dependencies']:
         console.print(f"\n📦 Found [bold]{len(results['dependencies'])}[/bold] Python libraries.")
         # Only the outputs that carry a dependency license pay for the lookup:
-        # Markdown has no dependency table and SPDX 3.0 has no license model yet.
-        if format == OutputFormat.JSON or (
-            format == OutputFormat.SPDX and spdx_version == "2.3"
-        ):
+        # Markdown has no dependency table.
+        if format in (OutputFormat.JSON, OutputFormat.SPDX):
             _resolve_dependency_licenses(results, console)
 
     # Only the outputs that carry model-card data pay for the lookup: the

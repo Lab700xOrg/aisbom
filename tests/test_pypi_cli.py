@@ -105,16 +105,34 @@ def test_spdx_23_output_declares_the_resolved_license(tmp_path, monkeypatch):
     assert pkgs["numpy"]["licenseDeclared"] == "NOASSERTION"
 
 
-@pytest.mark.parametrize("args", [
-    ["--format", "markdown"],
-    ["--format", "spdx", "--spdx-version", "3.0"],
-])
-def test_outputs_that_carry_no_dependency_license_skip_the_lookup(tmp_path, monkeypatch, args):
+def test_spdx_30_output_declares_the_resolved_license(tmp_path, monkeypatch):
+    out = tmp_path / "sbom.spdx.json"
+    _tree(tmp_path)
+    _fake_pypi(monkeypatch)
+    result = runner.invoke(app, [
+        "scan", str(tmp_path), "--format", "spdx", "--spdx-version", "3.0",
+        "--output", str(out),
+    ])
+    assert result.exit_code == 0, result.output
+    graph = json.loads(out.read_text())["@graph"]
+    ids = {e["spdxId"]: e for e in graph if "spdxId" in e}
+    declared = {
+        ids[r["from"]]["name"]: ids[r["to"][0]]["simplelicensing_licenseExpression"]
+        for r in graph if r.get("relationshipType") == "hasDeclaredLicense"
+    }
+    assert declared == {
+        "torch": _torch_info()["license_expression"],
+        "transformers": "Apache-2.0",
+    }  # numpy is unpinned: never looked up, never licensed
+
+
+def test_markdown_output_skips_the_lookup(tmp_path, monkeypatch):
     _tree(tmp_path)
     fake = _fake_pypi(monkeypatch)
-    result = runner.invoke(
-        app, ["scan", str(tmp_path), "--output", str(tmp_path / "out"), *args]
-    )
+    result = runner.invoke(app, [
+        "scan", str(tmp_path), "--output", str(tmp_path / "out"),
+        "--format", "markdown",
+    ])
     assert result.exit_code == 0, result.output
     assert fake.calls == 0
 

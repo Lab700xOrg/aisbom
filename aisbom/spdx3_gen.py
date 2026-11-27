@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .dependency import dependency_purl, specifier_comment
-from .spdx_gen import _sanitize, _sha256_or_none, _tool_version
+from .spdx_gen import _sanitize, _sha256_or_none, _tool_version, spdx_expression
 
 # The released 3.0.1 context. The schema pins this as a `const`, so it is not
 # a formatting preference — a different value fails validation outright.
@@ -95,6 +95,24 @@ def _card_datasets(hf_meta: Optional[Dict[str, Any]]) -> List[str]:
         if name and name not in names:
             names.append(name)
     return names
+
+
+def _declared_expression(value: Any, is_spdx: bool = True) -> Optional[str]:
+    """The declared license as a normalised SPDX expression, or None.
+
+    Same sources and rules as the SPDX 2.3 export: a dependency's license is
+    what PyPI declares for its exact pin (carried only when PyPI's answer was
+    an SPDX expression), a model's is what its own file declares. Free text
+    (``llama2``, ``Proprietary``) is dropped rather than minted into a
+    ``LicenseRef-``, which would give a license an identity its author never
+    gave it. The Hugging Face card's ``license`` is deliberately not a source:
+    CycloneDX reports it as a property, apart from the component's license,
+    and the two exports must agree.
+    """
+    if not is_spdx:
+        return None
+    parsed = spdx_expression(value)
+    return None if parsed is None else str(parsed)
 
 
 def _card_for(results: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
@@ -330,6 +348,14 @@ class SPDX3Generator:
             pkg["comment"] = comment
         return pkg
 
+    def _license_expression(self, expression: str) -> Dict[str, Any]:
+        return {
+            "type": "simplelicensing_LicenseExpression",
+            "spdxId": self._claim_id(self._iri(f"License-{_sanitize(expression)}")),
+            "creationInfo": _CREATION_INFO_REF,
+            "simplelicensing_licenseExpression": expression,
+        }
+
     def _relationship(self, fragment: str, source: str, rel_type: str,
                       targets: List[str]) -> Dict[str, Any]:
         return {
@@ -375,6 +401,26 @@ class SPDX3Generator:
         ]
         graph.extend(software_packages)
 
+        # Declared licenses, in package order: models, then dependencies.
+        # One element per distinct expression, shared by every package that
+        # declares it, as dataset elements are. An unresolved or non-SPDX
+        # license gets no element: an absent claim, not a NOASSERTION one.
+        declared: List[tuple] = []
+        for art, pkg in zip(artifacts, ai_packages):
+            declared.append((pkg["spdxId"], _declared_expression(art.get("license"))))
+        for dep, pkg in zip(results.get("dependencies", []), software_packages):
+            declared.append((pkg["spdxId"], _declared_expression(
+                dep.get("license"), bool(dep.get("license_is_spdx")),
+            )))
+        license_ids: Dict[str, str] = {}
+        license_elements: List[Dict[str, Any]] = []
+        for _, expression in declared:
+            if expression and expression not in license_ids:
+                element = self._license_expression(expression)
+                license_ids[expression] = element["spdxId"]
+                license_elements.append(element)
+        graph.extend(license_elements)
+
         # Each model is trainedOn only the datasets its own card declares, so
         # a local tree mixing repos never links a model to another's data.
         relationships: List[Dict[str, Any]] = []
@@ -385,6 +431,14 @@ class SPDX3Generator:
                     f"Relationship-trainedOn-{len(relationships)}",
                     pkg["spdxId"], "trainedOn", own,
                 ))
+        declared_count = 0
+        for holder, expression in declared:
+            if expression:
+                relationships.append(self._relationship(
+                    f"Relationship-hasDeclaredLicense-{declared_count}",
+                    holder, "hasDeclaredLicense", [license_ids[expression]],
+                ))
+                declared_count += 1
         graph.extend(relationships)
 
         doc_id = self._claim_id(self._iri("SPDXRef-DOCUMENT"))
@@ -405,6 +459,8 @@ class SPDX3Generator:
         profiles = ["core", "software", "ai"]
         if dataset_packages:
             profiles.append("dataset")
+        if license_elements:
+            profiles.append("simpleLicensing")
 
         graph.append({
             "type": "SpdxDocument",
