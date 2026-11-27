@@ -46,14 +46,27 @@ def _declared_license(dep: Dict[str, Any]):
     has no field for a free-text name, and minting a ``LicenseRef-`` for one
     would assert an identity the package author never gave it.
     """
-    if not (dep.get("license") and dep.get("license_is_spdx")):
+    if not dep.get("license_is_spdx"):
         return SpdxNoAssertion()
+    expression = spdx_expression(dep.get("license"))
+    return SpdxNoAssertion() if expression is None else expression
+
+
+def spdx_expression(value: Any):
+    """Parse ``value`` as a valid SPDX license expression, or return None.
+
+    The one place both SPDX exports decide whether a license is carried, so
+    2.3 and 3.0 cannot disagree. Parsing also normalises case
+    (``apache-2.0`` -> ``Apache-2.0``), matching the id CycloneDX writes.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
     from spdx_tools.common.spdx_licensing import spdx_licensing
 
     try:
-        return spdx_licensing.parse(dep["license"], validate=True, strict=True)
+        return spdx_licensing.parse(value, validate=True, strict=True)
     except Exception:  # noqa: BLE001 - a bad value costs the field, not the document
-        return SpdxNoAssertion()
+        return None
 
 
 def _tool_version() -> str:

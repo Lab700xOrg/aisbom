@@ -333,6 +333,138 @@ def test_full_scan_validates(validator):
     _assert_valid(validator, data)
 
 
+# --- declared licences ------------------------------------------------------
+#
+# Same sources and rules as SPDX 2.3 and CycloneDX: a dependency's licence is
+# what PyPI declares for its exact pin, a model's is what its file declares.
+# Only valid SPDX expressions are carried; free text and unresolved licences
+# get no licence element at all rather than an invented LicenseRef or a
+# placeholder.
+
+_TORCH_DEP = {
+    "name": "torch", "version": "2.13.0", "license": "BSD-3-Clause AND MIT",
+    "license_is_spdx": True, "license_source": "pypi",
+}
+
+
+def _licences(data):
+    return _graph(data, "simplelicensing_LicenseExpression")
+
+
+def _declared_for(data, spdx_id):
+    """The licence expressions declared for one element, via relationships."""
+    by_id = {e["spdxId"]: e for e in _licences(data)}
+    found = []
+    for rel in _graph(data, "Relationship"):
+        if rel["relationshipType"] == "hasDeclaredLicense" and rel["from"] == spdx_id:
+            found.extend(by_id[t]["simplelicensing_licenseExpression"] for t in rel["to"])
+    return found
+
+
+def test_a_pypi_resolved_dependency_licence_is_declared(validator):
+    data = _generate([_pytorch_artifact()], [_TORCH_DEP])
+    (lib,) = _graph(data, "software_Package")
+    assert _declared_for(data, lib["spdxId"]) == ["BSD-3-Clause AND MIT"]
+    _assert_valid(validator, data)
+
+
+def test_a_non_spdx_dependency_licence_is_not_declared(validator):
+    data = _generate([_pytorch_artifact()], [{
+        "name": "vendorlib", "version": "1.0", "license": "Proprietary",
+        "license_is_spdx": False, "license_source": "pypi",
+    }])
+    assert _licences(data) == []
+    assert not [r for r in _graph(data, "Relationship")
+                if r["relationshipType"] == "hasDeclaredLicense"]
+    _assert_valid(validator, data)
+
+
+def test_an_invalid_spdx_flagged_licence_is_not_declared():
+    data = _generate([_pytorch_artifact()], [{
+        "name": "oddlib", "version": "1.0", "license": "MIT OR",
+        "license_is_spdx": True, "license_source": "pypi",
+    }])
+    assert _licences(data) == []
+
+
+def test_an_unresolved_dependency_licence_emits_nothing():
+    data = _generate([_pytorch_artifact()], [{"name": "requests", "version": "2.28.1"}])
+    assert _licences(data) == []
+
+
+@pytest.mark.parametrize("declared, expected", [
+    ("apache-2.0", "Apache-2.0"),
+    ("Apache-2.0", "Apache-2.0"),
+    ("cc-by-nc-4.0", "CC-BY-NC-4.0"),
+])
+def test_a_model_licence_matches_cyclonedx(declared, expected, validator):
+    """The CycloneDX component for the same artifact names the same id."""
+    from cyclonedx.factory.license import LicenseFactory
+
+    data = _generate([_pytorch_artifact(name="w.safetensors", license=declared)])
+    (pkg,) = _graph(data, "ai_AIPackage")
+    assert _declared_for(data, pkg["spdxId"]) == [expected]
+    assert LicenseFactory().make_from_string(declared).id == expected
+    _assert_valid(validator, data)
+
+
+@pytest.mark.parametrize("declared", [
+    "Unknown", "", None, "llama2", "openrail", "cc-by-nc-4.0 (Non-Commercial)",
+])
+def test_a_model_with_no_spdx_licence_gets_none(declared):
+    data = _generate([_pytorch_artifact(license=declared)])
+    assert _licences(data) == []
+
+
+def test_hf_card_licence_is_not_used():
+    """The card's licence is a CycloneDX property, never the component licence."""
+    card = {"cardData": {"license": "apache-2.0"}}
+    data = _generate([_pytorch_artifact()], hf_model_card=card)
+    assert _licences(data) == []
+
+
+def test_licence_elements_are_shared_between_packages(validator):
+    data = _generate(
+        [_pytorch_artifact(license="MIT")],
+        [{"name": "a", "version": "1", "license": "MIT", "license_is_spdx": True},
+         {"name": "b", "version": "1", "license": "mit", "license_is_spdx": True}],
+    )
+    (lic,) = _licences(data)
+    assert lic["simplelicensing_licenseExpression"] == "MIT"
+    holders = [r["from"] for r in _graph(data, "Relationship")
+               if r["relationshipType"] == "hasDeclaredLicense"]
+    assert len(holders) == 3
+    _assert_valid(validator, data)
+
+
+def test_licences_are_in_the_described_set_and_profile(validator):
+    data = _generate([_pytorch_artifact()], [_TORCH_DEP])
+    (doc,) = _graph(data, "SpdxDocument")
+    assert "simpleLicensing" in doc["profileConformance"]
+    (lic,) = _licences(data)
+    (describes,) = [r for r in _graph(data, "Relationship")
+                    if r["relationshipType"] == "describes"]
+    # A licence describes no artifact; it is reachable through the
+    # package's relationship, not a root of the document.
+    assert lic["spdxId"] not in describes["to"]
+    assert lic["spdxId"] not in doc["rootElement"]
+
+
+def test_no_licences_claims_no_licensing_profile():
+    data = _generate([_pytorch_artifact()])
+    (doc,) = _graph(data, "SpdxDocument")
+    assert "simpleLicensing" not in doc["profileConformance"]
+
+
+def test_licences_do_not_change_the_document_namespace():
+    """The licence comes from a network lookup that may fail; the scan's
+    identity must not flip between an online and an offline run."""
+    without = _generate([_pytorch_artifact()], [{"name": "torch", "version": "2.13.0"}])
+    with_lic = _generate([_pytorch_artifact()], [_TORCH_DEP])
+    ns = lambda d: _graph(d, "SpdxDocument")[0]["spdxId"]  # noqa: E731
+    assert ns(without) == ns(with_lic)
+
+
 # --- CLI wiring -------------------------------------------------------------
 #
 # `--spdx-version` shipped declared-but-unread: it advertised "2.3 or 3.0"
@@ -390,3 +522,40 @@ def test_cli_rejects_unsupported_spdx_version(tmp_path):
     assert "Unsupported SPDX version" in result.output
     # The old behaviour silently wrote a 2.3 document instead of failing.
     assert not out.exists()
+
+
+def _fake_pypi(monkeypatch, calls):
+    from aisbom import pypi
+
+    def fake(dependencies, **_):
+        calls.append([d["name"] for d in dependencies])
+        for dep in dependencies:
+            if dep.get("pinned"):
+                dep.update(license="Apache-2.0", license_is_spdx=True,
+                           license_source="pypi")
+        return pypi.LicenseLookupResult(queried=1, resolved=1)
+
+    monkeypatch.setattr(pypi, "resolve_dependency_licenses", fake)
+
+
+def test_cli_spdx_3_0_resolves_dependency_licences(tmp_path, monkeypatch, validator):
+    calls = []
+    _fake_pypi(monkeypatch, calls)
+    (tmp_path / "requirements.txt").write_text("requests==2.32.3\n")
+    result, out = _scan(tmp_path, "--spdx-version", "3.0")
+    assert result.exit_code == 0, result.output
+    assert calls == [["requests"]]
+    data = json.loads(out.read_text())
+    (lib,) = _graph(data, "software_Package")
+    assert _declared_for(data, lib["spdxId"]) == ["Apache-2.0"]
+    _assert_valid(validator, data)
+
+
+def test_cli_spdx_3_0_offline_makes_no_licence_lookup(tmp_path, monkeypatch):
+    calls = []
+    _fake_pypi(monkeypatch, calls)
+    (tmp_path / "requirements.txt").write_text("requests==2.32.3\n")
+    result, out = _scan(tmp_path, "--spdx-version", "3.0", "--offline")
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert _licences(json.loads(out.read_text())) == []
