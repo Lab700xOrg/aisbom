@@ -13,6 +13,7 @@ import pytest
 from aisbom.modelcard import (
     HF_MIGRATION_CREATED_AT,
     MAX_PERFORMANCE_METRICS,
+    QUANTIZATION_TAGS,
     build_model_card,
     inject_model_cards,
 )
@@ -96,6 +97,31 @@ def test_base_model_and_language_as_bare_string_or_list():
     props = props_of(build_model_card(artifact(), meta))
     assert props["aisbom:hf:base_model"] == ["a/one", "b/two"]
     assert props["aisbom:hf:language"] == ["fr"]
+
+
+def test_quantization_format_tags_are_recorded_as_declared():
+    # Shaped after hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4's tags.
+    meta = {"id": "a/b", "tags": [
+        "transformers", "safetensors", "llama", "text-generation", "AWQ",
+        "4-bit", "awq", "conversational", "region:us", "license:llama3.1",
+    ]}
+    props = props_of(build_model_card(artifact(), meta))
+    # Recorded as Hugging Face states them, matched without regard to case,
+    # and de-duplicated by that match: "AWQ" and "awq" are one declaration.
+    assert props["aisbom:hf:quantization_tag"] == ["AWQ", "4-bit"]
+
+
+def test_every_quantization_tag_in_the_fixed_set_is_recognised():
+    meta = {"id": "a/b", "tags": sorted(QUANTIZATION_TAGS)}
+    props = props_of(build_model_card(artifact(), meta))
+    assert props["aisbom:hf:quantization_tag"] == sorted(QUANTIZATION_TAGS)
+
+
+@pytest.mark.parametrize("tags", [None, "gguf", 7, [], ["transformers", "region:us"],
+                                  [3, None, {"gguf": 1}], ["gguf-my-repo", "base_model:quantized:a/b"]])
+def test_no_quantization_tag_without_a_listed_format_tag(tags):
+    props = props_of(build_model_card(artifact(), {"id": "a/b", "tags": tags}))
+    assert "aisbom:hf:quantization_tag" not in props
 
 
 def test_co2_given_as_a_bare_number():
